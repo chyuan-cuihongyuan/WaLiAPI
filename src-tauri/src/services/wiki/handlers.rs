@@ -5,6 +5,7 @@ use super::repository::WikiRepository;
 use crate::server::router::SharedState;
 use crate::core::proxy;
 use crate::db::repository::Repository;
+use tauri::AppHandle;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -299,16 +300,30 @@ pub async fn update_page(
         .and_then(|c| c.as_str())
         .unwrap_or("");
 
-    if let Err(e) = project::write_page(&id, &path, content).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    let repo = WikiRepository::new(shared.state.db.pool.clone());
+    match update_page_inner(&shared.app, &shared.state.db.pool, &repo, &id, &path, content).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "path": path })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Inner logic for saving a wiki page — shared by HTTP handler and MCP handler.
+pub async fn update_page_inner(
+    app: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    repo: &WikiRepository,
+    id: &str,
+    path: &str,
+    content: &str,
+) -> Result<(), String> {
+    if let Err(e) = project::write_page(id, path, content).await {
+        return Err(e);
     }
 
-    let repo = WikiRepository::new(shared.state.db.pool.clone());
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
-    let title = path.split('/').last().unwrap_or(&path)
-        .trim_end_matches(".md").to_string();
+    let title = ingest::extract_title_from_content(content, path);
     let page_type = if path.contains("entities/") { "entity" }
         else if path.contains("concepts/") { "concept" }
         else if path.contains("summaries/") { "summary" }
@@ -322,14 +337,19 @@ pub async fn update_page(
     let wikilinks: Vec<String> = extract_wikilinks(content);
     let wikilinks_json = serde_json::to_string(&wikilinks).unwrap_or("[]".to_string());
 
-    if let Err(e) = repo.upsert_page(&id, &path, &title, page_type, &hash, token_count, &wikilinks_json, "{}").await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
-    }
+    // Extract tags from frontmatter
+    let tags = crate::services::wiki::ingest::extract_tags_from_frontmatter(content);
+    let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
+
+    repo.upsert_page(id, path, &title, page_type, &hash, token_count, &wikilinks_json, "{}", &tags_json).await?;
+
+    // Rebuild knowledge graph edges based on updated wikilinks
+    let _ = ingest::rebuild_graph_edges(pool, id).await;
 
     // Append log
-    let _ = project::append_log(&id, &format!("update | {}", path)).await;
+    let _ = project::append_log(id, &format!("update | {}", path)).await;
 
-    Json(serde_json::json!({ "ok": true, "path": path })).into_response()
+    Ok(())
 }
 
 pub async fn delete_page(
@@ -341,6 +361,8 @@ pub async fn delete_page(
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
     let _ = project::delete_page_file(&id, &path).await;
+    // Rebuild graph edges after page deletion
+    let _ = ingest::rebuild_graph_edges(&shared.state.db.pool, &id).await;
     (StatusCode::NO_CONTENT, "").into_response()
 }
 
@@ -363,71 +385,76 @@ pub async fn ask(
     Path(id): Path<String>,
     Json(input): Json<WikiAskInput>,
 ) -> Response {
-    let repo = WikiRepository::new(shared.state.db.pool.clone());
-    let db_repo = Arc::new(Repository::new(shared.state.db.pool.clone()));
+    let top_k = input.top_k.unwrap_or(5);
+    let model = input.model.as_deref();
+
+    match ask_inner(&shared, &id, &input.question, top_k, model).await {
+        Ok(json) => Json(json).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Inner logic for Wiki Q&A — shared by HTTP handler and MCP handler.
+pub async fn ask_inner(
+    shared: &SharedState,
+    id: &str,
+    question: &str,
+    top_k: usize,
+    model_override: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let pool = &shared.state.db.pool;
+    let repo = WikiRepository::new(pool.clone());
+    let db_repo = Arc::new(Repository::new(pool.clone()));
     let app = shared.app.clone();
 
     // Search relevant pages
-    let top_k = input.top_k.unwrap_or(5);
-    let results = repo.search_pages(&id, &input.question, top_k).await.unwrap_or_default();
+    let results = repo.search_pages(id, question, top_k).await.unwrap_or_default();
 
     // Read page contents
     let mut contexts = Vec::new();
     for r in &results {
-        if let Ok(content) = project::read_page(&id, &r.path).await {
+        if let Ok(content) = project::read_page(id, &r.path).await {
             let snippet: String = content.chars().take(2000).collect();
             contexts.push(format!("## {} ({})\n{}", r.title, r.path, snippet));
         }
     }
 
     if contexts.is_empty() {
-        return Json(serde_json::json!({
+        return Ok(serde_json::json!({
             "answer": "No relevant wiki pages found for your question. Please ingest some documents first.",
             "sources": []
-        })).into_response();
+        }));
     }
 
     let context_text = contexts.join("\n\n---\n\n");
 
     // Get project config
-    let proj = match repo.get_project(&id).await {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    };
+    let proj = repo.get_project(id).await?;
 
-    let chat_model = input.model.as_deref()
+    let chat_model = model_override
         .or(proj.chat_model.as_deref())
         .unwrap_or("gpt-4o");
     let chat_channel_id = match proj.chat_channel_id.as_deref() {
         Some(id) if !id.is_empty() => id.to_string(),
         _ => {
-            let row: Option<(String,)> = match sqlx::query_as("SELECT id FROM channels WHERE status = 1 ORDER BY priority DESC LIMIT 1")
-                .fetch_optional(&shared.state.db.pool).await {
-                Ok(r) => r,
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
-            };
+            let row: Option<(String,)> = sqlx::query_as("SELECT id FROM channels WHERE status = 1 ORDER BY priority DESC LIMIT 1")
+                .fetch_optional(pool).await
+                .map_err(|e| format!("DB error: {}", e))?;
             match row.map(|(id,)| id) {
                 Some(id) => id,
-                None => return (StatusCode::INTERNAL_SERVER_ERROR, "No active channel configured. Please create a channel first or set chat_channel_id in Wiki project settings.".to_string()).into_response(),
+                None => return Err("No active channel configured. Please create a channel first or set chat_channel_id in Wiki project settings.".to_string()),
             }
         }
     };
 
-    // Build history
-    let history_text = input.history.as_ref().map(|h| {
-        h.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n")
-    }).unwrap_or_default();
-
     let system_prompt = "You are a Wiki knowledge assistant. Answer questions based on the provided wiki pages. Be concise and cite source pages using [[wikilinks]] format.";
     let user_prompt = format!(
-        "Based on the following wiki pages, answer the question.\n\nWiki pages:\n{}\n\n{}\nQuestion: {}\n\nAnswer:",
-        context_text,
-        if history_text.is_empty() { String::new() } else { format!("Conversation history:\n{}\n\n", history_text) },
-        input.question
+        "Based on the following wiki pages, answer the question.\n\nWiki pages:\n{}\n\nQuestion: {}\n\nAnswer:",
+        context_text, question
     );
 
     // Save user message
-    let _ = repo.add_session(&id, "user", &input.question, None, None).await;
+    let _ = repo.add_session(id, "user", question, None, None).await;
 
     let chat_request = serde_json::json!({
         "model": chat_model,
@@ -484,13 +511,13 @@ pub async fn ask(
     }).collect();
 
     // Save assistant message
-    let _ = repo.add_session(&id, "assistant", &answer, Some(&serde_json::to_string(&sources).unwrap_or_default()), Some(chat_model)).await;
+    let _ = repo.add_session(id, "assistant", &answer, Some(&serde_json::to_string(&sources).unwrap_or_default()), Some(chat_model)).await;
 
-    Json(serde_json::json!({
+    Ok(serde_json::json!({
         "answer": answer,
         "sources": sources,
         "usage": usage,
-    })).into_response()
+    }))
 }
 
 // ── Graph ──
@@ -502,95 +529,6 @@ pub async fn get_graph(
     let repo = WikiRepository::new(shared.state.db.pool.clone());
     match repo.get_graph(&id).await {
         Ok(graph) => Json(graph).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
-}
-
-// ── Reviews ──
-
-pub async fn list_reviews(
-    State(shared): State<SharedState>,
-    Path(id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let repo = WikiRepository::new(shared.state.db.pool.clone());
-    let resolved = params.get("resolved").and_then(|v| match v.as_str() {
-        "false" | "0" => Some(false),
-        "true" | "1" => Some(true),
-        _ => None,
-    });
-    match repo.list_reviews(&id, resolved).await {
-        Ok(reviews) => Json(serde_json::json!({ "data": reviews })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
-}
-
-pub async fn resolve_review(
-    State(shared): State<SharedState>,
-    Path((_id, rid)): Path<(String, String)>,
-) -> Response {
-    let repo = WikiRepository::new(shared.state.db.pool.clone());
-    if let Err(e) = repo.resolve_review(&rid).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
-    }
-    Json(serde_json::json!({ "ok": true })).into_response()
-}
-
-// ── Lint ──
-
-pub async fn run_lint(
-    State(shared): State<SharedState>,
-    Path(id): Path<String>,
-) -> Response {
-    let repo = WikiRepository::new(shared.state.db.pool.clone());
-    // TODO: Phase 3 - implement full lint engine
-    // For now, check for orphan pages (no incoming wikilinks)
-    match repo.list_pages(&id).await {
-        Ok(pages) => {
-            let mut all_linked: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for p in &pages {
-                let links: Vec<String> = serde_json::from_str(&p.wikilinks).unwrap_or_default();
-                for l in links {
-                    all_linked.insert(l);
-                }
-            }
-            let orphans: Vec<&WikiPage> = pages.iter()
-                .filter(|p| !all_linked.contains(&p.path) && p.page_type != "index" && p.page_type != "log")
-                .collect();
-
-            Json(serde_json::json!({
-                "orphan_count": orphans.len(),
-                "total_pages": pages.len(),
-                "orphans": orphans.iter().map(|p| serde_json::json!({
-                    "path": p.path,
-                    "title": p.title,
-                })).collect::<Vec<_>>(),
-                "note": "Full lint engine (contradiction, missing pages, stale) will be implemented in Phase 3."
-            })).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
-}
-
-// ── Deep Research ──
-
-pub async fn deep_research(
-    State(shared): State<SharedState>,
-    Path(id): Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> Response {
-    let topic = body.get("topic").and_then(|t| t.as_str()).unwrap_or("");
-    let repo = WikiRepository::new(shared.state.db.pool.clone());
-
-    match repo.create_task(&id, None, "deep_research").await {
-        Ok(task_id) => {
-            Json(serde_json::json!({
-                "task_id": task_id,
-                "status": "pending",
-                "topic": topic,
-                "message": "Deep research task queued. Will be implemented in Phase 5."
-            })).into_response()
-        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }

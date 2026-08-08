@@ -56,6 +56,7 @@ pub struct WikiPage {
     pub token_count: i64,
     pub wikilinks: String,
     pub frontmatter: String,
+    pub tags: String,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -109,22 +110,6 @@ pub struct WikiIngestTask {
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct WikiReview {
-    pub id: String,
-    pub project_id: String,
-    pub review_type: String,
-    pub title: String,
-    pub description: Option<String>,
-    pub source_path: Option<String>,
-    pub affected_pages: String,
-    pub search_queries: String,
-    pub options_json: String,
-    pub resolved: i64,
-    pub created_at: String,
-    pub resolved_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -206,4 +191,10 @@ pub struct GraphEdge {
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiTag {
+    pub word: String,
+    pub count: usize,
 }

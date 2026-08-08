@@ -41,6 +41,10 @@ impl WikiRepository {
 
     pub async fn create_project(&self, input: &CreateProjectInput, wiki_dir: &str) -> Result<WikiProject, String> {
         let id = Self::uuid();
+        self.create_project_with_id(&id, input, wiki_dir).await
+    }
+
+    pub async fn create_project_with_id(&self, id: &str, input: &CreateProjectInput, wiki_dir: &str) -> Result<WikiProject, String> {
         let now = Self::now();
         let schema = input.schema_text.clone().unwrap_or_else(|| DEFAULT_SCHEMA.to_string());
 
@@ -143,16 +147,17 @@ impl WikiRepository {
         token_count: i64,
         wikilinks: &str,
         frontmatter: &str,
+        tags: &str,
     ) -> Result<(), String> {
         let now = Self::now();
         sqlx::query(
-            "INSERT INTO wiki_pages (id, project_id, path, title, page_type, content_hash, token_count, wikilinks, frontmatter, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            "INSERT INTO wiki_pages (id, project_id, path, title, page_type, content_hash, token_count, wikilinks, frontmatter, tags, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
              ON CONFLICT(project_id, path) DO UPDATE SET
                title=excluded.title, page_type=excluded.page_type,
                content_hash=excluded.content_hash, token_count=excluded.token_count,
                wikilinks=excluded.wikilinks, frontmatter=excluded.frontmatter,
-               status='active', updated_at=excluded.updated_at"
+               tags=excluded.tags, status='active', updated_at=excluded.updated_at"
         )
         .bind(Self::uuid())
         .bind(project_id)
@@ -163,6 +168,7 @@ impl WikiRepository {
         .bind(token_count)
         .bind(wikilinks)
         .bind(frontmatter)
+        .bind(tags)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -236,6 +242,9 @@ impl WikiRepository {
                         let pos = content_lower.find(&query_lower).unwrap_or(0);
                         let start = if pos > 60 { pos - 60 } else { 0 };
                         let end = std::cmp::min(start + 200, content.len());
+                        // Align to char boundaries to avoid splitting multi-byte UTF-8 chars
+                        let start = content.floor_char_boundary(start);
+                        let end = content.ceil_char_boundary(end);
                         let snippet = format!("...{}...", &content[start..end].replace('\n', " "));
 
                         results.push(WikiSearchResult {
@@ -390,32 +399,6 @@ impl WikiRepository {
         .map_err(|e| format!("DB error: {}", e))
     }
 
-    // ── Reviews ──
-
-    pub async fn list_reviews(&self, project_id: &str, resolved: Option<bool>) -> Result<Vec<WikiReview>, String> {
-        let query = match resolved {
-            None => "SELECT * FROM wiki_reviews WHERE project_id = ? ORDER BY created_at DESC",
-            Some(false) => "SELECT * FROM wiki_reviews WHERE project_id = ? AND resolved = 0 ORDER BY created_at DESC",
-            Some(true) => "SELECT * FROM wiki_reviews WHERE project_id = ? AND resolved = 1 ORDER BY created_at DESC",
-        };
-        sqlx::query_as::<_, WikiReview>(query)
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| format!("DB error: {}", e))
-    }
-
-    pub async fn resolve_review(&self, review_id: &str) -> Result<(), String> {
-        let now = Self::now();
-        sqlx::query("UPDATE wiki_reviews SET resolved = 1, resolved_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(review_id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| format!("DB error: {}", e))?;
-        Ok(())
-    }
-
     // ── Sessions ──
 
     pub async fn list_sessions(&self, project_id: &str) -> Result<Vec<WikiSession>, String> {
@@ -455,6 +438,39 @@ impl WikiRepository {
             .await
             .map_err(|e| format!("DB error: {}", e))?;
         Ok(())
+    }
+
+    // ── Tags ──
+
+    pub async fn get_tags(&self, project_id: &str, limit: usize) -> Result<Vec<crate::services::wiki::models::WikiTag>, String> {
+        // Collect tags from all active pages in the project
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT tags FROM wiki_pages WHERE project_id = ? AND status = 'active'"
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+
+        let mut freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (tags_json,) in &rows {
+            let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
+            for tag in tags {
+                let tag = tag.trim().to_lowercase();
+                if !tag.is_empty() {
+                    *freq.entry(tag).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut freq_vec: Vec<(String, usize)> = freq.into_iter().collect();
+        freq_vec.sort_by(|a, b| b.1.cmp(&a.1));
+
+        Ok(freq_vec
+            .into_iter()
+            .take(limit)
+            .map(|(word, count)| crate::services::wiki::models::WikiTag { word, count })
+            .collect())
     }
 
     // ── Graph ──
