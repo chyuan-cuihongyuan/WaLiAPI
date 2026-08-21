@@ -13,6 +13,10 @@ pub struct ServerStatus {
 pub async fn get_server_status(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<ServerStatus, String> {
+    get_server_status_impl(&*state).await
+}
+
+pub async fn get_server_status_impl(state: &Arc<AppState>) -> Result<ServerStatus, String> {
     let running = state
         .server_running
         .load(std::sync::atomic::Ordering::SeqCst);

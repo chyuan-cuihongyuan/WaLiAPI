@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   LayoutDashboard,
   BookOpen,
@@ -14,8 +13,11 @@ import {
   ExternalLink,
   Link,
   Database,
+  LogOut,
+  X,
 } from "lucide-react";
 import { serverApi } from "../../lib/api";
+import { isTauriRuntime, openExternalUrl, setWebAdminToken } from "../../lib/runtime";
 import type { ServerStatus } from "../../types";
 import packageJson from "../../../package.json";
 
@@ -35,9 +37,13 @@ const appVersion = packageJson.version;
 export function Sidebar({
   hasUpdate,
   onCheckUpdate,
+  mobileOpen = false,
+  onMobileClose = () => {},
 }: {
   hasUpdate: boolean;
   onCheckUpdate: () => void;
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 }) {
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const location = useLocation();
@@ -51,7 +57,15 @@ export function Sidebar({
   }, []);
 
   return (
-    <aside className="w-72 h-screen flex-col border-r border-slate-200 bg-[#eef3f8] px-3 py-3 hidden md:flex">
+    <aside className={`fixed inset-y-0 left-0 z-50 flex h-dvh w-72 flex-col border-r border-slate-200 bg-[#eef3f8] px-3 py-3 transition-transform duration-200 md:static md:z-auto md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
+      <button
+        type="button"
+        onClick={onMobileClose}
+        className="absolute right-4 top-4 flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 active:bg-slate-100 md:hidden"
+        aria-label="关闭导航"
+      >
+        <X size={20} />
+      </button>
       <div className="surface rounded-[22px] p-5">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white shadow-[0_8px_16px_rgba(47,111,237,0.18)] overflow-hidden">
@@ -61,7 +75,8 @@ export function Sidebar({
             <div className="flex items-center justify-between gap-2">
               <div className="text-[20px] font-bold tracking-[-0.04em] text-slate-900 leading-none">WaLiAPI</div>
               <button
-                onClick={onCheckUpdate}
+                onClick={() => isTauriRuntime() ? onCheckUpdate() : void openExternalUrl(`${githubUrl}/releases`)}
+                title={isTauriRuntime() ? "检查更新" : "查看 Web 版本发布"}
                 className={`relative rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
                   hasUpdate
                     ? "border-emerald-300 bg-emerald-50 text-emerald-600"
@@ -88,6 +103,7 @@ export function Sidebar({
             key={to}
             to={to}
             end={to === "/channels"}
+            onClick={onMobileClose}
             className={({ isActive }) =>
               `group flex items-center gap-3 rounded-2xl px-4 py-3 text-sm transition-colors ${
                 isActive || (to === "/" && location.pathname === "/")
@@ -111,6 +127,14 @@ export function Sidebar({
       </nav>
 
       <div className="space-y-3">
+        {!isTauriRuntime() && (
+          <button
+            onClick={() => { setWebAdminToken(""); window.location.reload(); }}
+            className="flex w-full items-center gap-3 rounded-[18px] border border-slate-200 bg-white/70 px-4 py-2.5 text-left text-sm text-slate-500 hover:bg-white hover:text-slate-800"
+          >
+            <LogOut size={16} /> 断开管理会话
+          </button>
+        )}
         <div className="surface-soft rounded-[20px] p-4">
           <div className="mb-3 flex items-center justify-between">
             <div>
@@ -135,14 +159,16 @@ export function Sidebar({
             <div className="min-w-0 flex-1">
               <div className="mb-1">API BaseUrl 地址</div>
               <div className="truncate font-mono text-[12px] text-slate-700">
-                {serverStatus?.running ? serverStatus.url : "等待服务启动"}
+                {serverStatus?.running
+                  ? (isTauriRuntime() ? serverStatus.url : window.location.origin)
+                  : "等待服务启动"}
               </div>
             </div>
           </div>
         </div>
 
         <button
-          onClick={() => openUrl(githubUrl)}
+          onClick={() => void openExternalUrl(githubUrl)}
           className="flex w-full items-center gap-3 rounded-[18px] border border-slate-200 bg-white/70 px-4 py-3 text-left text-sm text-slate-600 transition-all hover:bg-white hover:text-slate-900 hover:shadow-[0_8px_18px_rgba(15,23,42,0.05)]"
         >
           <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white">

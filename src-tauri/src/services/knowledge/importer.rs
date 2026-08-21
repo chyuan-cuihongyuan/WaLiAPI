@@ -2,15 +2,15 @@ use super::models::ImportSourceInput;
 use super::parser;
 use super::processor;
 use super::repository::KbRepository;
+use crate::runtime::RuntimeHandle;
 use sha2::Digest;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter};
 
 /// Import a Git repository: clone → filter → process files
 pub async fn import_git_repo(
     pool: &SqlitePool,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     kb_id: &str,
     source_id: &str,
     input: &ImportSourceInput,
@@ -93,7 +93,7 @@ pub async fn import_git_repo(
 /// Import from a URL: fetch content → process
 pub async fn import_url(
     pool: &SqlitePool,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     kb_id: &str,
     source_id: &str,
     input: &ImportSourceInput,
@@ -190,7 +190,7 @@ pub async fn import_url(
 /// Import from a local directory: scan → filter → process files
 pub async fn import_local_dir(
     pool: &SqlitePool,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     kb_id: &str,
     source_id: &str,
     input: &ImportSourceInput,
@@ -228,7 +228,7 @@ pub async fn import_local_dir(
 /// Common: process all files in a directory with filtering
 async fn process_directory_files(
     pool: &SqlitePool,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     kb_id: &str,
     source_id: &str,
     dir: &PathBuf,
@@ -520,7 +520,13 @@ fn is_supported_extension(ext: &str) -> bool {
     )
 }
 
-fn emit_import_progress(app: &AppHandle, kb_id: &str, source_id: &str, progress: u8, detail: &str) {
+fn emit_import_progress(
+    app: &RuntimeHandle,
+    kb_id: &str,
+    source_id: &str,
+    progress: u8,
+    detail: &str,
+) {
     let _ = app.emit(
         "kb-import-progress",
         serde_json::json!({

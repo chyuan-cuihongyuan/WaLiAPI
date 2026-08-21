@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { authApi } from "../../lib/api";
+import { isTauriRuntime, writeClipboard } from "../../lib/runtime";
 import type {
   AuthLoginSessionStatus,
   AuthMutationResult,
@@ -70,6 +71,8 @@ export function LoginModal({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [verification, setVerification] = useState<DeviceVerification | null>(null);
   const [copied, setCopied] = useState(false);
+  const [callbackUrl, setCallbackUrl] = useState("");
+  const [submittingCallback, setSubmittingCallback] = useState(false);
   const isDevice = provider.loginMode === "device_code";
   const steps = isDevice ? kimiSteps : codexSteps;
 
@@ -133,7 +136,7 @@ export function LoginModal({
   const copyUserCode = async () => {
     if (!verification) return;
     try {
-      await navigator.clipboard.writeText(verification.userCode);
+      await writeClipboard(verification.userCode);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch (_) { /* clipboard unavailable */ }
@@ -142,6 +145,20 @@ export function LoginModal({
   const reopenBrowser = () => {
     if (verification) {
       window.open(verification.url, "_blank", "noopener,noreferrer");
+    }
+  };
+
+  const submitCallback = async () => {
+    if (!sessionId || !callbackUrl.trim()) return;
+    setSubmittingCallback(true);
+    setError(null);
+    try {
+      await authApi.loginCallback(sessionId, callbackUrl.trim());
+      setCallbackUrl("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "回调地址提交失败，请复制完整地址后重试。");
+    } finally {
+      setSubmittingCallback(false);
     }
   };
 
@@ -154,7 +171,15 @@ export function LoginModal({
         <button onClick={reopenBrowser} className="action-secondary w-full justify-center px-2 py-2 text-xs"><RefreshCw size={14} />重新打开授权页</button>
         {verification.expiresAt && <p className="text-[11px] text-muted-foreground">授权码有效期至 {new Date(verification.expiresAt).toLocaleString("zh-CN")}</p>}
       </div>}
-      {state === "running" && !isDevice && <p className="mt-4 flex items-center gap-2 rounded-xl bg-primary/10 px-3 py-2.5 text-sm text-primary"><ExternalLink size={15} />已在浏览器打开授权页，请在浏览器完成登录</p>}
+      {state === "running" && !isDevice && verification ? <div className="mt-4 space-y-3 rounded-xl border border-border bg-primary/5 p-4">
+        <p className="break-all font-mono text-xs text-primary">{verification.url}</p>
+        <button onClick={reopenBrowser} className="action-secondary w-full justify-center"><ExternalLink size={15} />打开 OAuth 授权页</button>
+        {!isTauriRuntime() && <div className="space-y-2 border-t border-border pt-3">
+          <p className="text-xs leading-5 text-muted-foreground">远程部署时，授权后 localhost 页面可能无法打开。请复制浏览器地址栏中的完整回调地址并粘贴到这里。</p>
+          <input value={callbackUrl} onChange={event => setCallbackUrl(event.target.value)} placeholder="http://localhost:1455/auth/callback?code=…&state=…" className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs" />
+          <button onClick={() => void submitCallback()} disabled={!callbackUrl.trim() || submittingCallback} className="action-secondary w-full justify-center">{submittingCallback ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}提交回调地址</button>
+        </div>}
+      </div> : state === "running" && !isDevice ? <p className="mt-4 flex items-center gap-2 rounded-xl bg-primary/10 px-3 py-2.5 text-sm text-primary"><Loader2 size={15} className="animate-spin" />正在准备 OAuth 授权页</p> : null}
       {error && <p role="alert" className="mt-4 flex items-center gap-2 rounded-xl bg-destructive/10 px-3 py-2.5 text-sm text-destructive"><CircleAlert size={15} />{error}</p>}
       {state === "done" && <p className="mt-4 rounded-xl bg-success/10 px-3 py-2.5 text-sm text-success">账号已保存。{currentStep === 5 ? "模型同步已完成。" : ""}</p>}
       <div className="mt-6 flex justify-end gap-2">{state === "running" ? <button onClick={() => void cancel()} className="action-secondary">取消登录</button> : state !== "done" && <button onClick={onClose} className="action-secondary">取消</button>}{state === "done" ? <button onClick={onClose} className="action-primary">完成</button> : <button onClick={() => void login()} disabled={state === "running"} className="action-primary">{state === "running" ? "登录中…" : "开始登录"}</button>}</div>

@@ -1,9 +1,9 @@
 use super::index::HnswIndex;
 use super::models::SearchResult;
 use super::repository::KbRepository;
+use crate::runtime::RuntimeHandle;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter};
 
 /// Default HNSW parameters
 const DEFAULT_M: usize = 16;
@@ -264,7 +264,11 @@ pub async fn detect_embedding_dim(pool: &SqlitePool, kb_id: &str) -> Result<Opti
 
 /// Build HNSW index for a KB from all its chunks.
 /// Emits `kb-index-progress` Tauri events with percentage.
-pub async fn build_index(pool: &SqlitePool, kb_id: &str, app: &AppHandle) -> Result<(), String> {
+pub async fn build_index(
+    pool: &SqlitePool,
+    kb_id: &str,
+    app: &RuntimeHandle,
+) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
 
     let chunks = repo

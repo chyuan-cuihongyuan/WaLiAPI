@@ -1,8 +1,8 @@
+use crate::runtime::RuntimeHandle;
 use crate::AppState;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tauri::{Emitter, State};
+use tauri::State;
 
 // Re-export models for convenience
 pub use crate::services::wiki::models::*;
@@ -282,9 +282,17 @@ pub async fn get_wiki_tags(
     projectId: String,
     limit: Option<usize>,
 ) -> Result<Vec<WikiTag>, String> {
+    get_wiki_tags_impl(state.inner(), &projectId, limit).await
+}
+
+pub async fn get_wiki_tags_impl(
+    state: &Arc<AppState>,
+    project_id: &str,
+    limit: Option<usize>,
+) -> Result<Vec<WikiTag>, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.get_tags(&projectId, limit.unwrap_or(15)).await
+    repo.get_tags(project_id, limit.unwrap_or(15)).await
 }
 
 // ── Wiki Stats ──
@@ -309,40 +317,45 @@ pub async fn ingest_wiki_source(
     sourceId: String,
 ) -> Result<serde_json::Value, String> {
     let pool = state.db.pool.clone();
-    crate::services::wiki::ingest::ingest_source(&app, &pool, &projectId, &sourceId)
-        .await
-        .map(|r| {
-            serde_json::json!({
-                "status": "done",
-                "pages_created": r.pages_created,
-                "page_paths": r.page_paths,
-            })
+    crate::services::wiki::ingest::ingest_source(
+        &RuntimeHandle::desktop(app.clone()),
+        &pool,
+        &projectId,
+        &sourceId,
+    )
+    .await
+    .map(|r| {
+        serde_json::json!({
+            "status": "done",
+            "pages_created": r.pages_created,
+            "page_paths": r.page_paths,
         })
-        .map_err(|e| {
-            let pool_clone = pool.clone();
-            let sid = sourceId.clone();
-            let pid = projectId.clone();
-            let err = e.clone();
-            let app_clone = app.clone();
-            tokio::spawn(async move {
-                let repo = crate::services::wiki::repository::WikiRepository::new(pool_clone);
-                let _ = repo
-                    .update_source_status(&sid, "failed", 0, Some(&err))
-                    .await;
-                let _ = app_clone.emit(
-                    "wiki-source-progress",
-                    serde_json::json!({
-                        "source_id": sid,
-                        "project_id": pid,
-                        "filename": "",
-                        "stage": "error",
-                        "progress": 0,
-                        "detail": &err,
-                    }),
-                );
-            });
-            e
-        })
+    })
+    .map_err(|e| {
+        let pool_clone = pool.clone();
+        let sid = sourceId.clone();
+        let pid = projectId.clone();
+        let err = e.clone();
+        let app_clone = RuntimeHandle::desktop(app.clone());
+        tokio::spawn(async move {
+            let repo = crate::services::wiki::repository::WikiRepository::new(pool_clone);
+            let _ = repo
+                .update_source_status(&sid, "failed", 0, Some(&err))
+                .await;
+            let _ = app_clone.emit(
+                "wiki-source-progress",
+                serde_json::json!({
+                    "source_id": sid,
+                    "project_id": pid,
+                    "filename": "",
+                    "stage": "error",
+                    "progress": 0,
+                    "detail": &err,
+                }),
+            );
+        });
+        e
+    })
 }
 
 #[tauri::command]
@@ -359,8 +372,13 @@ pub async fn rescan_wiki_sources(
     let mut results = Vec::new();
 
     for source in &pending {
-        match crate::services::wiki::ingest::ingest_source(&app, &pool, &projectId, &source.id)
-            .await
+        match crate::services::wiki::ingest::ingest_source(
+            &RuntimeHandle::desktop(app.clone()),
+            &pool,
+            &projectId,
+            &source.id,
+        )
+        .await
         {
             Ok(r) => results.push(serde_json::json!({
                 "source_id": source.id,

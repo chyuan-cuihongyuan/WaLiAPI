@@ -414,6 +414,12 @@ impl CodexLogin {
         write_auth_json_with_rename(path, payload, |from, to| fs::rename(from, to))
     }
 
+    /// Build the exact Codex CLI `auth.json` representation without touching
+    /// the filesystem. Used by the authenticated browser download adapter.
+    pub fn auth_json_content(payload: &ProviderPayload) -> Result<String, ProviderError> {
+        encode_auth_json(payload)
+    }
+
     fn oauth_client(&self, redirect_uri: &str) -> CodexOauthClient {
         Client::new(ClientId::new(CODEX_CLIENT_ID.to_owned()))
             .set_auth_type(AuthType::RequestBody)
@@ -670,38 +676,7 @@ where
         .parent()
         .filter(|parent| parent.is_dir())
         .ok_or(ProviderError::Storage)?;
-    let id_token = required_string(
-        payload.as_value(),
-        "id_token",
-        ProviderError::InvalidPayload,
-    )?;
-    let access_token = required_string(
-        payload.as_value(),
-        "access_token",
-        ProviderError::InvalidPayload,
-    )?;
-    let refresh_token = required_string(
-        payload.as_value(),
-        "refresh_token",
-        ProviderError::InvalidPayload,
-    )?;
-    let account_id = required_string(
-        payload.as_value(),
-        "account_id",
-        ProviderError::InvalidPayload,
-    )?;
-    let encoded = serde_json::to_vec_pretty(&json!({
-        "auth_mode": "chatgpt",
-        "OPENAI_API_KEY": Value::Null,
-        "tokens": {
-            "id_token": id_token,
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "account_id": account_id,
-        },
-        "last_refresh": Utc::now().to_rfc3339(),
-    }))
-    .map_err(|_| ProviderError::Storage)?;
+    let encoded = encode_auth_json(payload)?.into_bytes();
     let stamp = Utc::now().format("%Y%m%d%H%M%S%f");
     let filename = path
         .file_name()
@@ -736,6 +711,41 @@ where
         path: path.to_owned(),
         backup_path,
     })
+}
+
+fn encode_auth_json(payload: &ProviderPayload) -> Result<String, ProviderError> {
+    let id_token = required_string(
+        payload.as_value(),
+        "id_token",
+        ProviderError::InvalidPayload,
+    )?;
+    let access_token = required_string(
+        payload.as_value(),
+        "access_token",
+        ProviderError::InvalidPayload,
+    )?;
+    let refresh_token = required_string(
+        payload.as_value(),
+        "refresh_token",
+        ProviderError::InvalidPayload,
+    )?;
+    let account_id = required_string(
+        payload.as_value(),
+        "account_id",
+        ProviderError::InvalidPayload,
+    )?;
+    serde_json::to_string_pretty(&json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": Value::Null,
+        "tokens": {
+            "id_token": id_token,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "account_id": account_id,
+        },
+        "last_refresh": Utc::now().to_rfc3339(),
+    }))
+    .map_err(|_| ProviderError::Storage)
 }
 
 #[cfg(unix)]

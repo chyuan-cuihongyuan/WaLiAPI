@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { settingsApi, serverApi, securityApi } from "../lib/api";
+import { isTauriRuntime } from "../lib/runtime";
 import type { Settings, BuiltinRule, CustomRule } from "../types";
 import { Save, RotateCcw, Check, Server, SlidersHorizontal, Palette, RefreshCw, ShieldAlert, Plus, Trash2, ListChecks, Pencil, X, AlertCircle, HelpCircle } from "lucide-react";
 
@@ -149,12 +150,14 @@ export function SettingsPage() {
 
   const handleSave = async () => {
     await settingsApi.save(settings);
-    await settingsApi.applyTheme(settings.ui_theme);
-    await settingsApi.setAutoStart(settings.auto_start);
+    if (isTauriRuntime()) {
+      await settingsApi.applyTheme(settings.ui_theme);
+      await settingsApi.setAutoStart(settings.auto_start);
+    }
     document.documentElement.setAttribute("data-theme", settings.ui_theme || "dark");
     document.documentElement.lang = settings.ui_language || "zh-CN";
     setSaved(true);
-    setMessage("设置已保存，主题与桌面行为已应用。");
+    setMessage(isTauriRuntime() ? "设置已保存，主题与桌面行为已应用。" : "设置已保存。Web 监听地址和端口由运行环境变量控制。");
     setTimeout(() => setSaved(false), 2000);
   };
 
@@ -169,13 +172,13 @@ export function SettingsPage() {
   const helpTooltipCls = "pointer-events-none absolute left-1/2 top-full z-50 mt-2 w-64 max-w-[calc(100vw-3rem)] -translate-x-1/2 rounded-xl border border-border bg-background px-3 py-2 text-xs leading-relaxed text-foreground opacity-0 shadow-lg transition-opacity group-hover/help:opacity-100";
 
   // Tab 配置
-  const TABS = [
+  const TABS = ([
     { id: "security", label: "安全审计", icon: ShieldAlert },
     { id: "server", label: "服务配置", icon: Server },
     { id: "general", label: "通用设置", icon: SlidersHorizontal },
     { id: "appearance", label: "界面设置", icon: Palette },
     { id: "retry", label: "重试策略", icon: RefreshCw },
-  ] as const;
+  ] as const);
 
   return (
     <div className="page-shell space-y-5">
@@ -476,7 +479,7 @@ export function SettingsPage() {
             <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><Server size={18} className="text-primary" /></div>
             <div>
               <h2 className="text-lg font-semibold">服务配置</h2>
-              <p className="text-sm text-muted-foreground">控制本地网关监听地址与服务重启</p>
+              <p className="text-sm text-muted-foreground">{isTauriRuntime() ? "控制本地网关监听地址与服务重启" : "查看 Linux Web 服务当前监听配置"}</p>
             </div>
           </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -485,6 +488,7 @@ export function SettingsPage() {
               <input
                 value={settings.server_host}
                 onChange={e => setSettings({ ...settings, server_host: e.target.value })}
+                disabled={!isTauriRuntime()}
                 className={`${inputCls} font-mono`}
               />
             </div>
@@ -494,14 +498,15 @@ export function SettingsPage() {
                 type="number"
                 value={settings.server_port}
                 onChange={e => setSettings({ ...settings, server_port: parseInt(e.target.value) || 0 })}
+                disabled={!isTauriRuntime()}
                 className={inputCls}
               />
             </div>
-            <div className="flex items-end">
+            {isTauriRuntime() ? <div className="flex items-end">
               <button onClick={handleRestart} className="action-secondary w-full">
                 <RotateCcw size={16} /> 重启服务
               </button>
-            </div>
+            </div> : <div className="flex items-end text-xs leading-5 text-slate-500">只读：通过 WALIAPI_HOST / WALIAPI_PORT 修改，并由 systemd 或 Docker 重启服务。</div>}
           </div>
         </div>
       )}
@@ -512,9 +517,10 @@ export function SettingsPage() {
             <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><SlidersHorizontal size={18} className="text-primary" /></div>
             <div>
               <h2 className="text-lg font-semibold">通用设置</h2>
-              <p className="text-sm text-muted-foreground">桌面端交互习惯与启动行为</p>
+              <p className="text-sm text-muted-foreground">路由偏好{isTauriRuntime() ? "与桌面启动行为" : "和部署行为说明"}</p>
             </div>
           </div>
+          {isTauriRuntime() ? (
           <div>
             <h3 className="mb-3 text-sm font-medium text-muted-foreground">桌面行为</h3>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -533,8 +539,13 @@ export function SettingsPage() {
                 />
               </label>
             ))}
+            </div>
           </div>
-          </div>
+          ) : (
+            <div className="surface-soft rounded-2xl px-4 py-4 text-sm text-muted-foreground">
+              Web 服务随 systemd 或 Docker 启动；请用服务单元的启用状态或容器 restart policy 管理自启动。
+            </div>
+          )}
           <div>
             <h3 className="mb-3 text-sm font-medium text-muted-foreground">路由设置</h3>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">

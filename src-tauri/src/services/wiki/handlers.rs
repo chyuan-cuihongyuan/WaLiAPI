@@ -4,6 +4,7 @@ use super::project;
 use super::repository::WikiRepository;
 use crate::core::proxy;
 use crate::db::repository::Repository;
+use crate::runtime::RuntimeHandle;
 use crate::server::router::SharedState;
 use axum::{
     extract::{Path, Query, State},
@@ -12,9 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::AppHandle;
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
@@ -56,7 +55,10 @@ pub async fn create_project(
     let dir = project::project_wiki_dir(&project_id);
     let wiki_dir = dir.to_string_lossy().to_string();
 
-    match repo.create_project(&input, &wiki_dir).await {
+    match repo
+        .create_project_with_id(&project_id, &input, &wiki_dir)
+        .await
+    {
         Ok(p) => (StatusCode::CREATED, Json(p)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -317,7 +319,7 @@ pub async fn update_page(
 
 /// Inner logic for saving a wiki page — shared by HTTP handler and MCP handler.
 pub async fn update_page_inner(
-    app: &AppHandle,
+    _app: &RuntimeHandle,
     pool: &sqlx::SqlitePool,
     repo: &WikiRepository,
     id: &str,

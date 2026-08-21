@@ -156,8 +156,15 @@ impl Database {
             .app_data_dir()
             .expect("failed to get app data dir");
 
-        std::fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
+        Self::new_in_dir(app_data_dir)
+            .await
+            .expect("failed to initialize database")
+    }
 
+    /// Initialize a database without a Tauri application. Migrations and rule
+    /// seeding deliberately match the desktop startup path.
+    pub async fn new_in_dir(app_data_dir: PathBuf) -> Result<Self, String> {
+        std::fs::create_dir_all(&app_data_dir).map_err(|e| e.to_string())?;
         let db_path = app_data_dir.join("waliapi.db");
         let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
@@ -165,7 +172,7 @@ impl Database {
             .max_connections(5)
             .connect(&db_url)
             .await
-            .expect("failed to connect to database");
+            .map_err(|e| format!("failed to connect to database: {e}"))?;
 
         // 修复旧版迁移 checksum（v0.1.1 → v0.1.3 兼容）
         fix_legacy_migration_checksums(&pool).await;
@@ -180,12 +187,12 @@ impl Database {
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
-            .expect("failed to run database migrations");
+            .map_err(|e| format!("failed to run database migrations: {e}"))?;
 
         // Seed built-in security rules if table exists and is empty
         let _ = crate::security::rules::seed_builtin_rules(&pool).await;
 
-        Self { pool }
+        Ok(Self { pool })
     }
 }
 

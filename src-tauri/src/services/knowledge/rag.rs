@@ -4,9 +4,9 @@ use super::repository::KbRepository;
 use super::retriever;
 use crate::core::proxy;
 use crate::db::repository::Repository;
+use crate::runtime::RuntimeHandle;
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tauri::AppHandle;
 
 /// RAG: Retrieve relevant chunks, then generate answer via WaLiAPI proxy
 /// Enhanced with conversation history, token limit fallback, and configurable search modes.
@@ -19,7 +19,7 @@ pub async fn ask(
     top_k: usize,
     mcp_only: bool,
     history: &[ConversationMessage],
-    app: &AppHandle,
+    app: &RuntimeHandle,
 ) -> Result<RagAnswer, String> {
     ask_with_config(
         pool,
@@ -48,7 +48,7 @@ pub async fn ask_with_config(
     top_k: usize,
     mcp_only: bool,
     history: &[ConversationMessage],
-    app: &AppHandle,
+    app: &RuntimeHandle,
     vector_weight: f32,
     keyword_weight: f32,
     search_mode: &str,
@@ -466,7 +466,7 @@ pub async fn deep_research(
     chat_model: &str,
     top_k: usize,
     max_rounds: usize,
-    app: &AppHandle,
+    app: &RuntimeHandle,
 ) -> Result<RagAnswer, String> {
     let repo = Repository::new(pool.clone());
     let kb_repo = KbRepository::new(pool.clone());

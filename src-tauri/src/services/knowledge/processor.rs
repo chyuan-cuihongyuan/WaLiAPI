@@ -6,15 +6,15 @@ use super::retriever;
 use super::splitter;
 use crate::db::models::now_iso;
 use crate::db::repository::Repository;
+use crate::runtime::RuntimeHandle;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Emitter};
 
 /// Default embedding model
 const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 
 /// Emit progress event to frontend
 fn emit_progress(
-    app: &AppHandle,
+    app: &RuntimeHandle,
     doc_id: &str,
     kb_id: &str,
     filename: &str,
@@ -38,7 +38,7 @@ fn emit_progress(
 /// Process an uploaded document: parse → split → embed → store
 pub async fn process_document(
     pool: &SqlitePool,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     kb_id: &str,
     doc_id: &str,
     filename: &str,
@@ -80,7 +80,7 @@ pub async fn process_document(
 
 async fn process_document_inner(
     pool: &SqlitePool,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     kb_id: &str,
     doc_id: &str,
     filename: &str,
@@ -337,7 +337,7 @@ async fn process_document_inner(
 /// Reindex a document (delete old chunks, reprocess)
 pub async fn reindex_document(
     pool: &SqlitePool,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     doc_id: &str,
 ) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());

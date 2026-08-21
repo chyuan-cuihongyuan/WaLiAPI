@@ -350,6 +350,86 @@ curl http://127.0.0.1:8777/v1/messages \
 
 在「应用配置」页面选择已安装的 AI 编程工具，一键写入网关地址和密钥，无需手动编辑配置文件。
 
+### Linux Web 部署（Docker，推荐）
+
+Linux Web 版本由同一个 Rust 服务提供 API 和 `dist/` 静态资源，适合放在一台 Linux 服务器上长期运行。Docker 构建是多阶段构建：Node/pnpm 编译前端，Rust 编译 `waliapi-server`，运行时使用非 root 用户；SQLite 数据持久化在 `/data`。
+
+```bash
+git clone https://github.com/fuzhengwei/WaLiAPI.git
+cd WaLiAPI
+export WALIAPI_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export WALIAPI_MCP_TOKEN="$(openssl rand -hex 32)"
+docker compose up -d --build
+curl http://127.0.0.1:8777/health
+```
+
+可选地将 `WALIAPI_PORT` 设置为其他端口。Compose 默认只发布到宿主机 `127.0.0.1`；生产环境不要使用示例 token，也不要把管理端口直接暴露到公网。用 Caddy（见 [`deploy/caddy/Caddyfile.example`](deploy/caddy/Caddyfile.example)）或 Nginx 终止 HTTPS 后反代到 `127.0.0.1:8777`。Caddy 配置域名后会自动申请和续期证书。
+
+Web 管理面、MCP 和 `/v1` 数据面使用三个互不通用的凭证域：后台管理与 KB/Wiki REST 使用 `WALIAPI_ADMIN_TOKEN`，外部 Agent 的 `/mcp` 使用权限隔离的 `WALIAPI_MCP_TOKEN`，数据面使用后台创建的 `sk-waliapi-*` 密钥。两个环境变量令牌均要求至少 32 个字符且必须不同；所有管理/服务路由都不继承数据面的宽松 CORS。反向代理只负责 TLS 和转发，不得移除或绕过认证头。建议在防火墙中仅开放 HTTPS 端口。
+
+Web 版提供与桌面版一致的业务能力：仪表盘、API/Auth 渠道、下游密钥、日志与安全规则、知识库、Wiki、MCP、Skills、导入导出、服务器侧应用配置以及全部路由/重试设置。浏览器文件选择、下载和进度事件分别由浏览器文件 API、下载和认证 SSE 适配。Linux 进程相关能力采用部署等价语义：监听地址/端口由 `WALIAPI_HOST` / `WALIAPI_PORT` 控制，自启动和更新由 systemd、Docker 与 GitHub Release 管理。
+
+远程 Codex OAuth 完成授权后若浏览器无法打开 `localhost:1455` 回调页，可复制地址栏中的完整回调 URL，粘贴回登录窗口完成令牌交换；也可直接上传 Codex `auth.json`。Kimi 使用设备码流程，不依赖本地回调。Web 的“本地目录扫描”和应用配置均指 Linux 服务器/容器文件系统：Docker 中先挂载目录，再填写容器内路径。生成的客户端配置默认持久化到 `/data/managed-home`；Wiki 页面与源文件统一持久化到 `WALIAPI_DATA_DIR/wiki`。设置 `WALIAPI_PUBLIC_URL=https://waliapi.example.com` 可让生成配置使用公网 HTTPS 地址。
+
+#### GitHub Actions 发布
+
+[`release-web.yml`](.github/workflows/release-web.yml) 可以直接生成两类 Linux Web 产物：
+
+- `waliapi-web-<version>-linux-x86_64.tar.gz`：包含 `waliapi-server`、`dist/`、systemd 和 Caddy 示例；每次手动运行都会保存为 Workflow Artifact。
+- `ghcr.io/<owner>/<repository>:<version>`：通过 GHCR 发布的 `linux/amd64` Docker 镜像。
+
+推送 `web-v*` 标签会创建 GitHub Release、上传二进制包，并发布带版本号和 `latest` 标签的镜像：
+
+```bash
+git tag web-v0.2.1
+git push origin web-v0.2.1
+```
+
+也可以从 Actions 页面手动运行；默认只构建和验证 Docker 镜像，勾选 `publish_image` 才会推送到 GHCR。工作流不需要、也不会读取管理员 token。镜像和二进制包都是无密钥的通用产物，必须在运行时注入：
+
+```bash
+export WALIAPI_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export WALIAPI_MCP_TOKEN="$(openssl rand -hex 32)"
+docker run -d --name waliapi \
+  -p 127.0.0.1:8777:8777 \
+  -v waliapi-data:/data \
+  -e WALIAPI_ADMIN_TOKEN \
+  -e WALIAPI_MCP_TOKEN \
+  ghcr.io/<owner>/<repository>:latest
+```
+
+直接运行二进制包时同样使用环境变量：
+
+```bash
+WALIAPI_ADMIN_TOKEN="$WALIAPI_ADMIN_TOKEN" \
+WALIAPI_MCP_TOKEN="$WALIAPI_MCP_TOKEN" \
+WALIAPI_WEB_DIR="$PWD/dist" \
+./waliapi-server
+```
+
+#### 不使用 Docker：systemd
+
+先执行 `pnpm build` 和 `cargo build --release --manifest-path src-tauri/Cargo.toml --bin waliapi-server`。将 release 二进制和前端 `dist/` 放到 `/opt/waliapi/`，创建 `waliapi` 系统用户。systemd 沙箱通过 `StateDirectory=waliapi` 创建并授权固定的数据目录 `/var/lib/waliapi`；若确需改到其他目录，必须同步修改 unit 的可写路径。
+
+用仅 root 可读的权限安装环境文件，再填写管理员 token：
+
+```bash
+sudo install -Dm600 deploy/systemd/waliapi.env.example /etc/waliapi/waliapi.env
+sudo chown root:root /etc/waliapi/waliapi.env
+sudoedit /etc/waliapi/waliapi.env
+```
+
+然后安装服务：
+
+```bash
+sudo install -Dm644 deploy/systemd/waliapi.service /etc/systemd/system/waliapi.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now waliapi
+sudo systemctl status waliapi
+```
+
+无论采用 Docker 还是 systemd，都应保持单实例运行（SQLite 不支持多个写入实例共享同一数据目录）。定期在停机窗口或使用 SQLite 一致性备份方式备份 `/data`（systemd 部署为 `/var/lib/waliapi`），并在升级前保留可回滚副本。管理员 token、渠道密钥和数据库备份都属于敏感数据，应限制文件权限并通过 HTTPS 传输。
+
 ---
 
 ## 📁 项目结构

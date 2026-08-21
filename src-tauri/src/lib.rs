@@ -10,8 +10,9 @@ mod endpoint_executor;
 mod protocol;
 #[cfg(test)]
 mod rollout_integration_tests;
+pub mod runtime;
 pub mod security;
-mod server;
+pub mod server;
 pub mod services;
 pub mod utils;
 
@@ -25,6 +26,7 @@ use tauri_plugin_store::StoreExt;
 use tokio::sync::RwLock;
 
 pub struct AppState {
+    pub runtime: runtime::RuntimeHandle,
     pub db: Arc<db::Database>,
     pub auth_service: Arc<auth_provider::service::AuthService>,
     pub login_sessions: Arc<commands::auth::LoginSessions>,
@@ -122,6 +124,7 @@ pub fn run() {
                     auth_provider::ProviderRegistry::new(),
                 ));
                 let state = Arc::new(AppState {
+                    runtime: runtime::RuntimeHandle::desktop(app_handle.clone()),
                     db,
                     auth_service: auth_service.clone(),
                     login_sessions: Arc::new(commands::auth::LoginSessions::new()),
@@ -275,6 +278,82 @@ pub fn run() {
                 let _ = (app, &event);
             }
         });
+}
+
+/// Entrypoint for the Linux/web binary. This creates no Tauri windows or
+/// plugins; it only builds the same database/auth/runtime state as desktop.
+pub async fn run_headless() -> Result<(), anyhow::Error> {
+    let token = std::env::var("WALIAPI_ADMIN_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| value.len() >= 32)
+        .ok_or_else(|| {
+            anyhow::anyhow!("WALIAPI_ADMIN_TOKEN must be configured with at least 32 characters")
+        })?;
+    let mcp_token = std::env::var("WALIAPI_MCP_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| value.len() >= 32)
+        .ok_or_else(|| {
+            anyhow::anyhow!("WALIAPI_MCP_TOKEN must be configured with at least 32 characters")
+        })?;
+    if token == mcp_token {
+        return Err(anyhow::anyhow!(
+            "WALIAPI_MCP_TOKEN must be different from WALIAPI_ADMIN_TOKEN"
+        ));
+    }
+    let host = std::env::var("WALIAPI_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = std::env::var("WALIAPI_PORT")
+        .ok()
+        .map(|raw| {
+            raw.parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("WALIAPI_PORT must be a valid u16"))
+        })
+        .transpose()?
+        .unwrap_or(8777);
+    let data_dir = std::env::var_os("WALIAPI_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::data_local_dir().map(|dir| dir.join("waliapi")))
+        .unwrap_or_else(|| std::path::PathBuf::from("./waliapi-data"));
+    let runtime = runtime::RuntimeHandle::headless(&data_dir).map_err(anyhow::Error::msg)?;
+    let mut startup_settings = serde_json::Map::new();
+    startup_settings.insert("server.host".into(), serde_json::json!(host.clone()));
+    startup_settings.insert("server.port".into(), serde_json::json!(port));
+    runtime
+        .set_settings(&startup_settings)
+        .map_err(anyhow::Error::msg)?;
+    let db = Arc::new(
+        db::Database::new_in_dir(data_dir)
+            .await
+            .map_err(anyhow::Error::msg)?,
+    );
+    let auth_service = Arc::new(auth_provider::service::AuthService::new(
+        Arc::new(db::repository::Repository::new(db.pool.clone())),
+        auth_provider::ProviderRegistry::new(),
+    ));
+    let state = Arc::new(AppState {
+        runtime,
+        db,
+        auth_service: auth_service.clone(),
+        login_sessions: Arc::new(commands::auth::LoginSessions::new()),
+        server_port: Arc::new(RwLock::new(0)),
+        server_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        server_handle: Arc::new(RwLock::new(None)),
+        test_receipts: Arc::new(crate::services::channel_test::TestReceiptStore::new(
+            std::time::Duration::from_secs(30 * 60),
+        )),
+    });
+    tokio::spawn(auth_provider::maintenance::run_maintenance_loop(
+        auth_service,
+    ));
+    server::start_server_with_runtime(
+        state.runtime.clone(),
+        state,
+        Some((host, port)),
+        Some(token),
+        Some(mcp_token),
+    )
+    .await
 }
 
 fn restore_main_window(app: &AppHandle) -> tauri::Result<()> {

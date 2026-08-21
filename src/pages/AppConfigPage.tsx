@@ -5,6 +5,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { appConfigApi, serverApi, apiKeyApi, channelApi, authApi } from "../lib/api";
 import type { AppInfo, ConfigContent } from "../lib/api";
 import type { ServerStatus, Channel, ApiKey, AuthAccount } from "../types";
+import { downloadText, isTauriRuntime, writeClipboard } from "../lib/runtime";
 import {
   Terminal,
   Code2,
@@ -239,7 +240,11 @@ export function AppConfigPanel({ appName }: { appName: string }) {
 
   const handleOpenFolder = async () => {
     try {
-      await appConfigApi.openFolder(appName);
+      const serverPath = await appConfigApi.openFolder(appName);
+      if (serverPath) {
+        await writeClipboard(serverPath);
+        setAppliedResult({ success: true, message: `服务器配置目录已复制：${serverPath}` });
+      }
     } catch (e) {
       console.error("Failed to open folder:", e);
     }
@@ -262,7 +267,9 @@ export function AppConfigPanel({ appName }: { appName: string }) {
   }
 
   const Icon = getAppIcon(appName);
-  const gatewayUrl = ss?.running ? ss.url : "http://127.0.0.1:8777";
+  const gatewayUrl = isTauriRuntime()
+    ? (ss?.running ? ss.url : "http://127.0.0.1:8777")
+    : window.location.origin;
 
   return (
     <div className="space-y-4">
@@ -289,9 +296,9 @@ export function AppConfigPanel({ appName }: { appName: string }) {
                   未检测到
                 </span>
               )}
-              {appInfo.download_url && (
+              {appInfo.downloadUrl && (
                 <a
-                  href={appInfo.download_url}
+                  href={appInfo.downloadUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-600 transition-colors hover:bg-blue-100"
@@ -325,7 +332,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
             <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
               配置文件
             </div>
-            <div className="font-mono text-xs text-slate-600 break-all">{appInfo.config_path}</div>
+            <div className="font-mono text-xs text-slate-600 break-all">{appInfo.configPath}</div>
           </div>
         </div>
 
@@ -456,21 +463,21 @@ export function AppConfigPanel({ appName }: { appName: string }) {
           <div className="flex items-center gap-2 min-w-0">
             <FileText size={15} className="text-slate-400 shrink-0" />
             <h3 className="text-sm font-semibold text-slate-700 shrink-0">配置文件</h3>
-            <code className="text-[11px] font-mono text-slate-400 truncate">{appInfo.config_path}</code>
+            <code className="text-[11px] font-mono text-slate-400 truncate">{appInfo.configPath}</code>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={handleOpenFolder}
               className="action-secondary flex items-center gap-1.5 px-2.5 py-1.5"
-              title="在文件管理器中打开"
+              title={isTauriRuntime() ? "在文件管理器中打开" : "复制服务器配置目录"}
             >
               <FolderOpen size={13} />
-              打开
+              {isTauriRuntime() ? "打开" : "复制路径"}
             </button>
             <button
               onClick={() => {
                 if (configContent?.content) {
-                  navigator.clipboard.writeText(configContent.content);
+                  void writeClipboard(configContent.content);
                   setCopied(true);
                   setTimeout(() => setCopied(false), 2000);
                 }
@@ -482,6 +489,17 @@ export function AppConfigPanel({ appName }: { appName: string }) {
               {copied ? <Check size={13} /> : <Copy size={13} />}
               {copied ? "已复制" : "复制"}
             </button>
+            {!isTauriRuntime() && (
+              <button
+                onClick={() => configContent?.content && downloadText(appInfo.configPath.split(/[\\/]/).pop() || "waliapi-config.txt", configContent.content, "text/plain")}
+                disabled={!configContent?.content}
+                className="action-secondary flex items-center gap-1.5 px-2.5 py-1.5 disabled:cursor-not-allowed disabled:opacity-40"
+                title="下载配置文件"
+              >
+                <Download size={13} />
+                下载
+              </button>
+            )}
             <button
               onClick={load}
               className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"

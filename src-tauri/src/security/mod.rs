@@ -1,6 +1,5 @@
+use crate::runtime::RuntimeHandle;
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
-use tauri_plugin_store::StoreExt;
 
 pub mod features;
 pub mod gate;
@@ -133,51 +132,47 @@ impl Default for SecuritySettings {
     }
 }
 
-pub fn get_security_settings(app: &AppHandle) -> SecuritySettings {
+pub fn get_security_settings(app: &RuntimeHandle) -> SecuritySettings {
     let defaults = SecuritySettings::default();
-    let Ok(store) = app.store("settings.json") else {
-        return defaults;
-    };
-
     SecuritySettings {
-        enabled: store
-            .get("security.enabled")
+        enabled: app
+            .setting("security.enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.enabled),
-        mode: store
-            .get("security.mode")
+        mode: app
+            .setting("security.mode")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or(defaults.mode),
-        scan_request: store
-            .get("security.scan_request")
+        scan_request: app
+            .setting("security.scan_request")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.scan_request),
-        scan_response: store
-            .get("security.scan_response")
+        scan_response: app
+            .setting("security.scan_response")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.scan_response),
-        scan_unicode: store
-            .get("security.scan_unicode")
+        scan_unicode: app
+            .setting("security.scan_unicode")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.scan_unicode),
-        scan_tools: store
-            .get("security.scan_tools")
+        scan_tools: app
+            .setting("security.scan_tools")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.scan_tools),
-        scan_network: store
-            .get("security.scan_network")
+        scan_network: app
+            .setting("security.scan_network")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.scan_network),
-        redact_secrets: store
-            .get("security.redact_secrets")
+        redact_secrets: app
+            .setting("security.redact_secrets")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.redact_secrets),
-        block_on_critical: store
-            .get("security.block_on_critical")
+        block_on_critical: app
+            .setting("security.block_on_critical")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.block_on_critical),
-        max_scan_bytes: store
-            .get("security.max_scan_bytes")
+        max_scan_bytes: app
+            .setting("security.max_scan_bytes")
             .and_then(|v| v.as_u64())
             .unwrap_or(defaults.max_scan_bytes as u64) as usize,
     }

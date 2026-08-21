@@ -1,3 +1,4 @@
+use crate::runtime::RuntimeHandle;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
@@ -134,7 +135,11 @@ pub struct FeatureFlagsDto {
 
 #[tauri::command]
 pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlagsDto, String> {
-    let f = crate::core::feature_flags::read_feature_flags(&app);
+    get_feature_flags_impl(&RuntimeHandle::desktop(app))
+}
+
+pub fn get_feature_flags_impl(runtime: &RuntimeHandle) -> Result<FeatureFlagsDto, String> {
+    let f = crate::core::feature_flags::read_feature_flags(runtime);
     Ok(FeatureFlagsDto {
         new_routeplan: f.new_routeplan,
         cross_protocol_codec: f.cross_protocol_codec,
@@ -147,6 +152,122 @@ pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlagsDto, String> {
 
 #[tauri::command]
 pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
+    get_settings_impl(&RuntimeHandle::desktop(app)).await
+}
+
+pub async fn get_settings_impl(runtime: &RuntimeHandle) -> Result<Settings, String> {
+    let value = |key: &str| runtime.setting(key);
+    let string = |key: &str, default: &str| {
+        value(key)
+            .and_then(|v| v.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| default.to_string())
+    };
+    let unsigned = |key: &str, default: u64| value(key).and_then(|v| v.as_u64()).unwrap_or(default);
+    let boolean =
+        |key: &str, default: bool| value(key).and_then(|v| v.as_bool()).unwrap_or(default);
+    Ok(Settings {
+        server_port: unsigned("server.port", 8777) as u16,
+        server_host: string("server.host", "127.0.0.1"),
+        ui_theme: string("ui.theme", "dark"),
+        ui_language: string("ui.language", "zh-CN"),
+        minimize_to_tray: boolean("general.minimize_to_tray", true),
+        close_to_tray: boolean("general.close_to_tray", true),
+        auto_start: boolean("general.auto_start", false),
+        retry_enabled: boolean("retry.enabled", true),
+        retry_times: unsigned("retry.times", 2) as i32,
+        security_enabled: boolean("security.enabled", true),
+        security_mode: string("security.mode", "audit"),
+        security_scan_unicode: boolean("security.scan_unicode", true),
+        security_scan_tools: boolean("security.scan_tools", true),
+        security_scan_network: boolean("security.scan_network", true),
+        security_scan_response: boolean("security.scan_response", false),
+        security_redact_secrets: boolean("security.redact_secrets", false),
+        security_block_on_critical: boolean("security.block_on_critical", false),
+        routing_prefer_auth_accounts: boolean("routing.prefer_auth_accounts", true),
+        routing_prefer_same_protocol: boolean("routing.prefer_same_protocol", true),
+    })
+}
+
+pub async fn save_settings_impl(settings: Settings, runtime: &RuntimeHandle) -> Result<(), String> {
+    let mut values = serde_json::Map::new();
+    values.insert(
+        "server.port".into(),
+        serde_json::json!(settings.server_port),
+    );
+    values.insert(
+        "server.host".into(),
+        serde_json::json!(settings.server_host),
+    );
+    values.insert("ui.theme".into(), serde_json::json!(settings.ui_theme));
+    values.insert(
+        "ui.language".into(),
+        serde_json::json!(settings.ui_language),
+    );
+    values.insert(
+        "general.minimize_to_tray".into(),
+        serde_json::json!(settings.minimize_to_tray),
+    );
+    values.insert(
+        "general.close_to_tray".into(),
+        serde_json::json!(settings.close_to_tray),
+    );
+    values.insert(
+        "general.auto_start".into(),
+        serde_json::json!(settings.auto_start),
+    );
+    values.insert(
+        "retry.enabled".into(),
+        serde_json::json!(settings.retry_enabled),
+    );
+    values.insert(
+        "retry.times".into(),
+        serde_json::json!(settings.retry_times),
+    );
+    values.insert(
+        "security.enabled".into(),
+        serde_json::json!(settings.security_enabled),
+    );
+    values.insert(
+        "security.mode".into(),
+        serde_json::json!(settings.security_mode),
+    );
+    values.insert(
+        "security.scan_unicode".into(),
+        serde_json::json!(settings.security_scan_unicode),
+    );
+    values.insert(
+        "security.scan_tools".into(),
+        serde_json::json!(settings.security_scan_tools),
+    );
+    values.insert(
+        "security.scan_network".into(),
+        serde_json::json!(settings.security_scan_network),
+    );
+    values.insert(
+        "security.scan_response".into(),
+        serde_json::json!(settings.security_scan_response),
+    );
+    values.insert(
+        "security.redact_secrets".into(),
+        serde_json::json!(settings.security_redact_secrets),
+    );
+    values.insert(
+        "security.block_on_critical".into(),
+        serde_json::json!(settings.security_block_on_critical),
+    );
+    values.insert(
+        "routing.prefer_auth_accounts".into(),
+        serde_json::json!(settings.routing_prefer_auth_accounts),
+    );
+    values.insert(
+        "routing.prefer_same_protocol".into(),
+        serde_json::json!(settings.routing_prefer_same_protocol),
+    );
+    runtime.set_settings(&values)
+}
+
+#[allow(dead_code)]
+async fn legacy_get_settings(app: AppHandle) -> Result<Settings, String> {
     let store = app.store("settings.json").map_err(|e| e.to_string())?;
     let settings = Settings {
         server_port: get_u64(&store, "server.port", 8777) as u16,
@@ -174,6 +295,11 @@ pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
 
 #[tauri::command]
 pub async fn save_settings(settings: Settings, app: AppHandle) -> Result<(), String> {
+    save_settings_impl(settings, &RuntimeHandle::desktop(app)).await
+}
+
+#[allow(dead_code)]
+async fn legacy_save_settings(settings: Settings, app: AppHandle) -> Result<(), String> {
     let store = app.store("settings.json").map_err(|e| e.to_string())?;
     store.set("server.port", serde_json::json!(settings.server_port));
     store.set("server.host", serde_json::json!(settings.server_host));

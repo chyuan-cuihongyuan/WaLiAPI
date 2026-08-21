@@ -1,0 +1,12 @@
+.git
+.github
+.codegraph
+.impeccable
+.superpowers
+node_modules
+dist
+target
+src-tauri/target
+*.log
+.DS_Store
+

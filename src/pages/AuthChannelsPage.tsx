@@ -8,6 +8,7 @@ import { LoginModal } from "../components/auth/LoginModal";
 import { ModelSyncModal } from "../components/auth/ModelSyncModal";
 import { ProviderPills } from "../components/auth/ProviderPills";
 import { ChannelTabs } from "../components/layout/ChannelTabs";
+import { downloadText, isTauriRuntime, pickTextFile } from "../lib/runtime";
 
 type Confirmation = { kind: "delete"; account: AuthAccount };
 
@@ -89,6 +90,22 @@ export function AuthChannelsPage() {
     void load();
   };
   const importAuth = async () => {
+    if (!isTauriRuntime()) {
+      const selected = await pickTextFile(".json,application/json");
+      if (!selected) return;
+      setPendingId("import");
+      setNotice({ kind: "success", message: `正在读取 ${selected.name} …` });
+      try {
+        const result = await authApi.loginImportContent("codex", selected.content);
+        setNotice(result.warning ? { kind: "warning", message: "账号已保存但暂不参与路由：模型同步失败。" } : { kind: "success", message: result.notice || `已从 ${selected.name} 导入账号。` });
+        await load();
+      } catch (_) {
+        setNotice({ kind: "error", message: "导入失败，请确认 auth.json 字段完整。" });
+      } finally {
+        setPendingId(null);
+      }
+      return;
+    }
     let path: string | null = null;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -134,6 +151,18 @@ export function AuthChannelsPage() {
     }
   };
   const exportAuth = async (account: AuthAccount) => {
+    if (!isTauriRuntime()) {
+      setPendingId(account.id);
+      try {
+        downloadText(exportFileName(account), await authApi.exportContent(account.id));
+        setNotice({ kind: "success", message: "Auth JSON 已下载，请妥善保管。" });
+      } catch (_) {
+        setNotice({ kind: "error", message: "导出失败，请稍后重试。" });
+      } finally {
+        setPendingId(null);
+      }
+      return;
+    }
     let path: string | null = null;
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");

@@ -24,6 +24,7 @@ import {
   type ServiceStatus,
 } from "../lib/api";
 import type { Channel } from "../types";
+import { isTauriRuntime, listen, writeClipboard } from "../lib/runtime";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -154,9 +155,10 @@ function McpSection() {
 
   const mcpService = services.find(s => s.id === "mcp");
   const kbService = services.find(s => s.id === "knowledge");
-  const [serverUrl, setServerUrl] = useState("http://127.0.0.1:8777");
+  const [serverUrl, setServerUrl] = useState(() => isTauriRuntime() ? "http://127.0.0.1:8777" : window.location.origin);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     serverApi.getStatus().then(s => {
       if (s.running) setServerUrl(`http://127.0.0.1:${s.port}`);
     }).catch(() => {});
@@ -165,10 +167,11 @@ function McpSection() {
   const baseUrl = serverUrl;
   const mcpEndpoint = `${baseUrl}/mcp`;
   const sseEndpoint = `${baseUrl}/mcp/sse`;
+  const mcpAuthHeader = isTauriRuntime() ? "" : '\n  -H "Authorization: Bearer $WALIAPI_MCP_TOKEN" \\';
   const tools = (mcpService?.stats?.tools as { name: string; label: string; desc: string }[]) || [];
 
   const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
+    void writeClipboard(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -239,7 +242,7 @@ function McpSection() {
             </div>
           </div>
           <div>
-            <label className="mb-1 block text-xs font-medium text-slate-500">SSE 端点（GET，可用于 EventSource）</label>
+            <label className="mb-1 block text-xs font-medium text-slate-500">SSE 端点（GET，供可设置 Authorization 头的 MCP 客户端使用）</label>
             <div className="flex items-center gap-2">
               <code className="flex-1 truncate rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs font-mono text-slate-800">{sseEndpoint}</code>
               <button
@@ -251,7 +254,9 @@ function McpSection() {
             </div>
           </div>
           <div className="rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 text-xs text-amber-700">
-            ⚠️ MCP 端点仅接受 JSON-RPC POST 请求，浏览器直接打开会返回 405。请使用 curl 或 MCP 客户端调用。
+            {isTauriRuntime()
+              ? "桌面版 MCP 仅监听本机回环地址。"
+              : "Linux Web 的 MCP 使用独立 WALIAPI_MCP_TOKEN；不要把 WALIAPI_ADMIN_TOKEN 配给 Agent。浏览器原生 EventSource 无法设置该请求头。"}
           </div>
         </div>
       </div>
@@ -291,7 +296,7 @@ function McpSection() {
           <h3 className="text-sm font-semibold text-slate-900">调用示例</h3>
         </div>
         <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-4 text-xs"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
-  -H "Content-Type: application/json" \\
+  -H "Content-Type: application/json" \\${mcpAuthHeader}
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
@@ -306,9 +311,10 @@ function McpSection() {
 // ─── Skills Section ─────────────────────────────────────────────────────
 
 function SkillsSection() {
-  const [serverUrl, setServerUrl] = useState("http://127.0.0.1:8777");
+  const [serverUrl, setServerUrl] = useState(() => isTauriRuntime() ? "http://127.0.0.1:8777" : window.location.origin);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     serverApi.getStatus().then(s => {
       if (s.running) setServerUrl(`http://127.0.0.1:${s.port}`);
     }).catch(() => {});
@@ -388,7 +394,7 @@ function SkillsSection() {
               <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-slate-800 text-[10px] font-bold text-white">2</span>
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-medium text-slate-700">重启 Agent 客户端</p>
-                <p className="mt-1 text-[11px] leading-relaxed text-slate-500">重启 WaLiCode / Codex / Claude Code 等 Agent 客户端，技能会在启动时自动加载。首次使用时 AI 会自动询问 MCP 地址（<code className="rounded bg-slate-200 px-1 py-0.5 text-[10px] font-mono text-slate-700">${mcpEndpoint}</code>），无需手动配置。</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-500">重启 WaLiCode / Codex / Claude Code 等 Agent 客户端，技能会在启动时自动加载。首次使用时提供 MCP 地址（<code className="rounded bg-slate-200 px-1 py-0.5 text-[10px] font-mono text-slate-700">${mcpEndpoint}</code>）{isTauriRuntime() ? "。" : "，并将 WALIAPI_MCP_TOKEN 配置为 Authorization Bearer Token。"}</p>
               </div>
             </div>
           </div>
@@ -460,7 +466,7 @@ function SkillsSection() {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
               <span className="text-xs font-medium text-slate-500">MCP 工具数</span>
-              <span className="text-xs text-slate-800">13 个（5 只读 + 8 写入）</span>
+              <span className="text-xs text-slate-800">29 个（13 RAG + 16 Wiki）</span>
             </div>
             <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
               <span className="text-xs font-medium text-slate-500">许可证</span>
@@ -473,7 +479,7 @@ function SkillsSection() {
         <div className="surface data-card rounded-2xl">
           <div className="mb-4 flex items-center gap-2">
             <Terminal size={18} className="text-slate-700" />
-            <h3 className="text-sm font-semibold text-slate-900">MCP 工具覆盖（13 个）</h3>
+            <h3 className="text-sm font-semibold text-slate-900">RAG MCP 工具（13 个；另含 16 个 Wiki 工具）</h3>
           </div>
           <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
             {[
@@ -950,7 +956,6 @@ function SourcesTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => voi
     let unlisten: (() => void) | undefined;
     let active = true;
     (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<{ kb_id: string; source_id: string; progress: number; detail: string }>(
         "kb-import-progress",
         (event) => {
@@ -1267,29 +1272,32 @@ function ImportSourceModal({
                   placeholder="/path/to/project/docs"
                   className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                 />
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const { open } = await import("@tauri-apps/plugin-dialog");
-                      const selected = await open({
-                        directory: true,
-                        multiple: false,
-                        title: "选择导入目录",
-                      });
-                      if (typeof selected === "string") {
-                        setDirPath(selected);
+                {isTauriRuntime() && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const { open } = await import("@tauri-apps/plugin-dialog");
+                        const selected = await open({
+                          directory: true,
+                          multiple: false,
+                          title: "选择导入目录",
+                        });
+                        if (typeof selected === "string") setDirPath(selected);
+                      } catch {
+                        // 对话框取消或不可用，忽略
                       }
-                    } catch {
-                      // 对话框取消或不可用，忽略
-                    }
-                  }}
-                  className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
-                >
-                  <FolderInput size={15} />
-                  浏览
-                </button>
+                    }}
+                    className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
+                  >
+                    <FolderInput size={15} />
+                    浏览
+                  </button>
+                )}
               </div>
+              {!isTauriRuntime() && (
+                <p className="mt-1.5 text-xs text-slate-500">请输入 Linux 服务器或容器内可读取的绝对路径；Docker 部署需先挂载该目录。</p>
+              )}
             </div>
           )}
 
@@ -1383,7 +1391,6 @@ function IndexTab({ kb }: { kb: KnowledgeBase }) {
     // Listen for real-time index build progress
     let unlisten: (() => void) | undefined;
     (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<{ kb_id: string; status: string; message: string; progress?: number; current?: number; total?: number }>(
         "kb-index-progress",
         (event) => {
@@ -1574,7 +1581,6 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
     let unlisten: (() => void) | undefined;
     let active = true;
     (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<{ doc_id: string; kb_id: string; filename: string; error: string }>(
         "kb-document-error",
         (event) => {
@@ -1606,7 +1612,6 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
     let unlisten: (() => void) | undefined;
     let active = true;
     (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<{ doc_id: string; kb_id: string; filename: string; stage: string; progress: number; detail: string }>(
         "kb-document-progress",
         (event) => {
@@ -1673,7 +1678,7 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
 
   const handleReindex = async (docId: string) => {
     try {
-      await kbApi.reindexDocument(docId);
+      await kbApi.reindexDocument(docId, kb.id);
       await fetchDocs();
     } catch (e) {
       alert(`重新索引失败: ${e}`);
@@ -2734,10 +2739,11 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
 // ─── MCP Tab (per-KB) ───────────────────────────────────────────────────
 
 function McpTab({ kb }: { kb: KnowledgeBase }) {
-  const [serverUrl, setServerUrl] = useState("http://127.0.0.1:8777");
+  const [serverUrl, setServerUrl] = useState(() => isTauriRuntime() ? "http://127.0.0.1:8777" : window.location.origin);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     serverApi.getStatus().then(s => {
       if (s.running) setServerUrl(`http://127.0.0.1:${s.port}`);
     }).catch(() => {});
@@ -2745,9 +2751,10 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
 
   const baseUrl = serverUrl;
   const mcpEndpoint = `${baseUrl}/mcp`;
+  const mcpAuthHeader = isTauriRuntime() ? "" : '\n  -H "Authorization: Bearer $WALIAPI_MCP_TOKEN" \\';
 
   const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
+    void writeClipboard(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -2790,7 +2797,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2.5 text-xs text-blue-700">
             <div className="font-medium mb-1">📡 MCP (Model Context Protocol) 对接</div>
             <div className="text-blue-600">
-              其他 AI Agent / 工具可通过 MCP 协议接入此 RAG。将上方端点配置到支持 MCP 的客户端（如 Claude Desktop、Cursor、自定义 Agent），即可让 AI 自动检索和问答你的私有 RAG。
+              其他 AI Agent / 工具可通过 MCP 协议接入此 RAG。将上方端点配置到支持 MCP 的客户端（如 Claude Desktop、Cursor、自定义 Agent）{isTauriRuntime() ? "" : "，并配置 WALIAPI_MCP_TOKEN Bearer 请求头"}，即可让 AI 自动检索和问答你的私有 RAG。
             </div>
           </div>
 
@@ -2838,7 +2845,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-500">1. 列出可用 RAG</label>
             <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-[11px]"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
-  -H "Content-Type: application/json" \\
+  -H "Content-Type: application/json" \\${mcpAuthHeader}
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
@@ -2853,7 +2860,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-500">2. 语义检索</label>
             <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-[11px]"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
-  -H "Content-Type: application/json" \\
+  -H "Content-Type: application/json" \\${mcpAuthHeader}
   -d '{
     "jsonrpc": "2.0",
     "id": 2,
@@ -2872,7 +2879,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-500">3. RAG 问答</label>
             <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-[11px]"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
-  -H "Content-Type: application/json" \\
+  -H "Content-Type: application/json" \\${mcpAuthHeader}
   -d '{
     "jsonrpc": "2.0",
     "id": 3,
@@ -3769,7 +3776,6 @@ function WikiSourcesTab({ project, onRefresh, onNavigateSettings }: { project: W
     let unlisten: (() => void) | undefined;
     let active = true;
     (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<{ source_id: string; project_id: string; filename: string; stage: string; progress: number; detail: string }>(
         "wiki-source-progress",
         (event) => {
@@ -3811,7 +3817,7 @@ function WikiSourcesTab({ project, onRefresh, onNavigateSettings }: { project: W
 
   const handleDelete = async (id: string) => {
     if (!confirm("确定删除此源文件？")) return;
-    await wikiApi.deleteSource(id);
+    await wikiApi.deleteSource(id, project.id);
     await fetchSources();
     onRefresh();
   };

@@ -3,6 +3,7 @@ import { apiKeyApi, channelApi, authApi } from "../lib/api";
 import type { ApiKey, CreateApiKeyInput, ApiKeyStats, Channel, AuthAccount } from "../types";
 import { formatTime } from "../lib/constants";
 import { Plus, Key, Trash2, Power, X, Check, Copy, CalendarClock, Database, Activity, Clock, Zap, ChevronDown, Pencil } from "lucide-react";
+import { writeClipboard } from "../lib/runtime";
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
@@ -92,7 +93,7 @@ export function ApiKeysPage() {
   };
 
   const copyKey = (key: string) => {
-    navigator.clipboard.writeText(key);
+    void writeClipboard(key);
     setCopied(key);
     setTimeout(() => setCopied(null), 2000);
   };

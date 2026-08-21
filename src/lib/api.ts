@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { downloadText, invoke, isTauriRuntime, pickTextFile, webFetch } from "./runtime";
 import type {
   Channel, CreateChannelInput, UpdateChannelInput, TestChannelResult,
   ChannelKey,
@@ -118,14 +118,18 @@ export const authApi = {
       replaceAccountId: replaceAccountId ?? null,
     }),
   loginStatus: (sessionId: string) => invoke<AuthLoginSessionStatus>("auth_login_status", { sessionId }),
+  loginCallback: (sessionId: string, callbackUrl: string) => invoke<AuthLoginSessionStatus>("auth_login_callback", { sessionId, callbackUrl }),
   loginCancel: (sessionId: string) => invoke<AuthLoginSessionStatus>("auth_login_cancel", { sessionId }),
   loginImport: (provider?: string, path?: string) =>
     invoke<AuthMutationResult>("auth_login_import", { provider, path }),
+  loginImportContent: (provider: string, content: string) =>
+    invoke<AuthMutationResult>("auth_login_import_content", { provider, content }),
   defaultImportPath: () => invoke<string>("auth_default_import_path"),
   logout: (id: string) => invoke<AuthLogoutResult>("auth_logout", { id }),
   refreshToken: (id: string) => invoke<AuthAccount>("auth_refresh_token", { id }),
   syncModels: (id: string) => invoke<AuthAccount>("auth_sync_models", { id }),
   exportJson: (id: string, path: string) => invoke<AuthExportResult>("auth_export_json", { id, path }),
+  exportContent: (id: string) => invoke<string>("auth_export_content", { id }),
   toggle: (id: string, disabled: boolean) => invoke<AuthAccount>("auth_toggle", { id, disabled }),
   quotaStatus: (id: string) => invoke<AuthQuotaStatus>("auth_quota_status", { id }),
   update: (input: AuthUpdateInput) => invoke<AuthAccount>("auth_update", { input }),
@@ -187,8 +191,12 @@ export const importExportApi = {
   importWaliapiExport: (content: string) => invoke<ImportResult>("import_waliapi_export", { content }),
   scanLocalAiConfigs: () => invoke<ScanResult>("scan_local_ai_configs"),
   importScannedSources: (sources: ScannedSource[]) => invoke<ImportResult>("import_scanned_sources", { sources }),
-  pickImportFile: () => invoke<string | null>("pick_import_file"),
-  saveExportFile: (content: string, defaultName: string) => invoke<boolean>("save_export_file", { content, defaultName }),
+  pickImportFile: async () => isTauriRuntime() ? invoke<string | null>("pick_import_file") : (await pickTextFile(".json,application/json"))?.content ?? null,
+  saveExportFile: async (content: string, defaultName: string) => {
+    if (isTauriRuntime()) return invoke<boolean>("save_export_file", { content, defaultName });
+    downloadText(defaultName, content);
+    return true;
+  },
 };
 
 // Security rules
@@ -323,38 +331,56 @@ export interface KbTag {
   count: number;
 }
 
+function dataOf<T>(response: T | { data: T }): T {
+  return typeof response === "object" && response !== null && "data" in response
+    ? (response as { data: T }).data
+    : response as T;
+}
+
+function encodedPath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
 // Knowledge Base commands
 export const kbApi = {
-  getAll: () => invoke<KnowledgeBase[]>("get_knowledge_bases"),
+  getAll: () => isTauriRuntime()
+    ? invoke<KnowledgeBase[]>("get_knowledge_bases")
+    : webFetch<{ data: KnowledgeBase[] }>("/api/kb").then(dataOf),
   create: (input: { name: string; description?: string; embedding_model?: string }) =>
-    invoke<KnowledgeBase>("create_knowledge_base", { input }),
+    isTauriRuntime() ? invoke<KnowledgeBase>("create_knowledge_base", { input }) : webFetch<KnowledgeBase>("/api/kb", { method: "POST", json: input }),
   update: (id: string, input: Partial<{ name: string; description: string; embedding_model: string; embedding_channel_id: string; status: number; mcp_enabled: number; chunk_size: number; chunk_overlap: number; excluded_dirs: string; excluded_files: string; included_files: string; embedding_batch_size: number }>) =>
-        invoke<KnowledgeBase>("update_knowledge_base", { id, input }),
-  delete: (id: string) => invoke<void>("delete_knowledge_base", { id }),
-  getDocuments: (kbId: string) => invoke<KbDocument[]>("get_kb_documents", { kbId }),
+    isTauriRuntime() ? invoke<KnowledgeBase>("update_knowledge_base", { id, input }) : webFetch<KnowledgeBase>(`/api/kb/${encodeURIComponent(id)}`, { method: "PUT", json: input }),
+  delete: (id: string) => isTauriRuntime() ? invoke<void>("delete_knowledge_base", { id }) : webFetch<void>(`/api/kb/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  getDocuments: (kbId: string) => isTauriRuntime()
+    ? invoke<KbDocument[]>("get_kb_documents", { kbId })
+    : webFetch<{ data: KbDocument[] }>(`/api/kb/${encodeURIComponent(kbId)}/documents`).then(dataOf),
   uploadDocument: (input: { kb_id: string; filename: string; content: string }) =>
-    invoke<KbDocument>("upload_kb_document", { input }),
+    isTauriRuntime() ? invoke<KbDocument>("upload_kb_document", { input }) : webFetch<KbDocument>(`/api/kb/${encodeURIComponent(input.kb_id)}/documents`, { method: "POST", json: input }),
   deleteDocument: (docId: string, kbId: string) =>
-    invoke<void>("delete_kb_document", { docId, kbId }),
-  reindexDocument: (docId: string) =>
-    invoke<void>("reindex_kb_document", { docId }),
-  search: (input: { query: string; kb_id?: string; top_k?: number; vector_weight?: number; keyword_weight?: number; search_mode?: string }) =>
-    invoke<KbSearchResult[]>("search_knowledge_base", { input }),
+    isTauriRuntime() ? invoke<void>("delete_kb_document", { docId, kbId }) : webFetch<void>(`/api/kb/${encodeURIComponent(kbId)}/documents/${encodeURIComponent(docId)}`, { method: "DELETE" }),
+  reindexDocument: (docId: string, kbId?: string) =>
+    isTauriRuntime() ? invoke<void>("reindex_kb_document", { docId }) : webFetch<void>(`/api/kb/${encodeURIComponent(kbId || "_")}/documents/${encodeURIComponent(docId)}/reindex`, { method: "POST" }),
+  search: (input: { query: string; kb_id?: string; top_k?: number; vector_weight?: number; keyword_weight?: number; search_mode?: string }) => {
+    if (isTauriRuntime()) return invoke<KbSearchResult[]>("search_knowledge_base", { input });
+    const query = new URLSearchParams({ q: input.query, top_k: String(input.top_k ?? 5) });
+    if (input.kb_id) query.set("kb_id", input.kb_id);
+    return webFetch<{ data: KbSearchResult[] }>(`/api/kb/search?${query}`).then(dataOf);
+  },
   ask: (input: { question: string; kb_id?: string; top_k?: number; model?: string; history?: ConversationMessage[]; deep_research?: boolean; max_rounds?: number; vector_weight?: number; keyword_weight?: number; search_mode?: string }) =>
-    invoke<KbRagAnswer>("ask_knowledge_base", { input }),
-  getStats: (kbId: string) => invoke<Record<string, unknown>>("get_kb_stats", { kbId }),
+    isTauriRuntime() ? invoke<KbRagAnswer>("ask_knowledge_base", { input }) : webFetch<KbRagAnswer>("/api/kb/ask", { method: "POST", json: input }),
+  getStats: (kbId: string) => isTauriRuntime() ? invoke<Record<string, unknown>>("get_kb_stats", { kbId }) : webFetch<Record<string, unknown>>(`/api/kb/${encodeURIComponent(kbId)}/stats`),
   // Conversation history
-  getConversations: (kbId: string) => invoke<KbConversation[]>("get_kb_conversations", { kbId }),
-  clearConversations: (kbId: string) => invoke<void>("clear_kb_conversations", { kbId }),
+  getConversations: (kbId: string) => isTauriRuntime() ? invoke<KbConversation[]>("get_kb_conversations", { kbId }) : webFetch<{ data: KbConversation[] }>(`/api/kb/${encodeURIComponent(kbId)}/conversations`).then(dataOf),
+  clearConversations: (kbId: string) => isTauriRuntime() ? invoke<void>("clear_kb_conversations", { kbId }) : webFetch<void>(`/api/kb/${encodeURIComponent(kbId)}/conversations`, { method: "DELETE" }),
   // Sources (multi-source import)
-  getSources: (kbId: string) => invoke<KbSource[]>("get_kb_sources", { kbId }),
-  deleteSource: (sourceId: string, kbId: string) => invoke<void>("delete_kb_source", { sourceId, kbId }),
+  getSources: (kbId: string) => isTauriRuntime() ? invoke<KbSource[]>("get_kb_sources", { kbId }) : webFetch<{ data: KbSource[] }>(`/api/kb/${encodeURIComponent(kbId)}/sources`).then(dataOf),
+  deleteSource: (sourceId: string, kbId: string) => isTauriRuntime() ? invoke<void>("delete_kb_source", { sourceId, kbId }) : webFetch<void>(`/api/kb/${encodeURIComponent(kbId)}/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }),
   importSource: (kbId: string, input: { source_type: string; repo_url?: string; branch?: string; token?: string; url?: string; dir_path?: string; excluded_dirs?: string[]; included_files?: string[]; max_file_size?: number }) =>
-    invoke<KbSource>("import_kb_source", { kbId, input }),
+    isTauriRuntime() ? invoke<KbSource>("import_kb_source", { kbId, input }) : webFetch<KbSource>(`/api/kb/${encodeURIComponent(kbId)}/sources`, { method: "POST", json: input }),
   // Index management
-  getIndexStatus: (kbId: string) => invoke<KbIndexMeta | null>("get_kb_index_status", { kbId }),
-  buildIndex: (kbId: string) => invoke<void>("build_kb_index", { kbId }),
-  dropIndex: (kbId: string) => invoke<void>("drop_kb_index", { kbId }),
+  getIndexStatus: (kbId: string) => isTauriRuntime() ? invoke<KbIndexMeta | null>("get_kb_index_status", { kbId }) : webFetch<{ data: KbIndexMeta | null }>(`/api/kb/${encodeURIComponent(kbId)}/index`).then(dataOf),
+  buildIndex: (kbId: string) => isTauriRuntime() ? invoke<void>("build_kb_index", { kbId }) : webFetch<void>(`/api/kb/${encodeURIComponent(kbId)}/index`, { method: "POST" }),
+  dropIndex: (kbId: string) => isTauriRuntime() ? invoke<void>("drop_kb_index", { kbId }) : webFetch<void>(`/api/kb/${encodeURIComponent(kbId)}/index`, { method: "DELETE" }),
   getTags: (kbId: string, limit?: number) => invoke<KbTag[]>("get_kb_tags", { kbId, limit }),
 };
 
@@ -474,22 +500,22 @@ export interface AddWikiSourceInput {
 
 // Wiki commands
 export const wikiApi = {
-    getProjects: () => invoke<WikiProject[]>("get_wiki_projects"),
-    createProject: (input: CreateWikiProjectInput) => invoke<WikiProject>("create_wiki_project", { input }),
-    getProject: (id: string) => invoke<WikiProject>("get_wiki_project", { id }),
-    updateProject: (id: string, input: UpdateWikiProjectInput) => invoke<WikiProject>("update_wiki_project", { id, input }),
-    deleteProject: (id: string) => invoke<void>("delete_wiki_project", { id }),
-    getPages: (projectId: string) => invoke<WikiPage[]>("get_wiki_pages", { projectId }),
-    getPage: (projectId: string, path: string) => invoke<WikiPage & { content: string }>("get_wiki_page", { projectId, path }),
-    savePage: (projectId: string, path: string, content: string) => invoke<void>("save_wiki_page", { projectId, path, content }),
-    getSources: (projectId: string) => invoke<WikiSource[]>("get_wiki_sources", { projectId }),
-    addSource: (projectId: string, input: AddWikiSourceInput) => invoke<WikiSource>("add_wiki_source", { projectId, input }),
-    deleteSource: (sourceId: string) => invoke<void>("delete_wiki_source", { sourceId }),
-    search: (projectId: string, query: string, topK?: number) => invoke<WikiSearchResult[]>("search_wiki", { projectId, query, topK }),
-    getGraph: (projectId: string) => invoke<WikiGraphData>("get_wiki_graph", { projectId }),
-    getStats: (projectId: string) => invoke<Record<string, unknown>>("get_wiki_stats", { projectId }),
-    ingestSource: (projectId: string, sourceId: string) => invoke<{ status: string; pages_created: number; page_paths: string[] }>("ingest_wiki_source", { projectId, sourceId }),
-    rescanSources: (projectId: string) => invoke<{ status: string; processed: number; results: unknown[] }>("rescan_wiki_sources", { projectId }),
+    getProjects: () => isTauriRuntime() ? invoke<WikiProject[]>("get_wiki_projects") : webFetch<{ data: WikiProject[] }>("/api/wiki/projects").then(dataOf),
+    createProject: (input: CreateWikiProjectInput) => isTauriRuntime() ? invoke<WikiProject>("create_wiki_project", { input }) : webFetch<WikiProject>("/api/wiki/projects", { method: "POST", json: input }),
+    getProject: (id: string) => isTauriRuntime() ? invoke<WikiProject>("get_wiki_project", { id }) : webFetch<WikiProject>(`/api/wiki/projects/${encodeURIComponent(id)}`),
+    updateProject: (id: string, input: UpdateWikiProjectInput) => isTauriRuntime() ? invoke<WikiProject>("update_wiki_project", { id, input }) : webFetch<WikiProject>(`/api/wiki/projects/${encodeURIComponent(id)}`, { method: "PUT", json: input }),
+    deleteProject: (id: string) => isTauriRuntime() ? invoke<void>("delete_wiki_project", { id }) : webFetch<void>(`/api/wiki/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    getPages: (projectId: string) => isTauriRuntime() ? invoke<WikiPage[]>("get_wiki_pages", { projectId }) : webFetch<{ data: WikiPage[] }>(`/api/wiki/projects/${encodeURIComponent(projectId)}/pages`).then(dataOf),
+    getPage: (projectId: string, path: string) => isTauriRuntime() ? invoke<WikiPage & { content: string }>("get_wiki_page", { projectId, path }) : webFetch<WikiPage & { content: string }>(`/api/wiki/projects/${encodeURIComponent(projectId)}/pages/${encodedPath(path)}`),
+    savePage: (projectId: string, path: string, content: string) => isTauriRuntime() ? invoke<void>("save_wiki_page", { projectId, path, content }) : webFetch<void>(`/api/wiki/projects/${encodeURIComponent(projectId)}/pages/${encodedPath(path)}`, { method: "PUT", json: { content } }),
+    getSources: (projectId: string) => isTauriRuntime() ? invoke<WikiSource[]>("get_wiki_sources", { projectId }) : webFetch<{ data: WikiSource[] }>(`/api/wiki/projects/${encodeURIComponent(projectId)}/sources`).then(dataOf),
+    addSource: (projectId: string, input: AddWikiSourceInput) => isTauriRuntime() ? invoke<WikiSource>("add_wiki_source", { projectId, input }) : webFetch<WikiSource>(`/api/wiki/projects/${encodeURIComponent(projectId)}/sources`, { method: "POST", json: input }),
+    deleteSource: (sourceId: string, projectId?: string) => isTauriRuntime() ? invoke<void>("delete_wiki_source", { sourceId }) : webFetch<void>(`/api/wiki/projects/${encodeURIComponent(projectId || "_")}/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }),
+    search: (projectId: string, query: string, topK?: number) => isTauriRuntime() ? invoke<WikiSearchResult[]>("search_wiki", { projectId, query, topK }) : webFetch<{ data: WikiSearchResult[] }>(`/api/wiki/projects/${encodeURIComponent(projectId)}/search?q=${encodeURIComponent(query)}&top_k=${topK ?? 10}`).then(dataOf),
+    getGraph: (projectId: string) => isTauriRuntime() ? invoke<WikiGraphData>("get_wiki_graph", { projectId }) : webFetch<WikiGraphData>(`/api/wiki/projects/${encodeURIComponent(projectId)}/graph`),
+    getStats: (projectId: string) => isTauriRuntime() ? invoke<Record<string, unknown>>("get_wiki_stats", { projectId }) : webFetch<Record<string, unknown>>(`/api/wiki/projects/${encodeURIComponent(projectId)}/stats`),
+    ingestSource: (projectId: string, sourceId: string) => isTauriRuntime() ? invoke<{ status: string; pages_created: number; page_paths: string[] }>("ingest_wiki_source", { projectId, sourceId }) : webFetch<{ status: string; pages_created: number; page_paths: string[] }>(`/api/wiki/projects/${encodeURIComponent(projectId)}/sources/${encodeURIComponent(sourceId)}/ingest`, { method: "POST" }),
+    rescanSources: (projectId: string) => isTauriRuntime() ? invoke<{ status: string; processed: number; results: unknown[] }>("rescan_wiki_sources", { projectId }) : webFetch<{ status: string; processed: number; results: unknown[] }>(`/api/wiki/projects/${encodeURIComponent(projectId)}/rescan`, { method: "POST" }),
     getTags: (projectId: string, limit?: number) => invoke<WikiTag[]>("get_wiki_tags", { projectId, limit }),
 };
 
@@ -513,11 +539,11 @@ export interface AppInfo {
   label: string;
   icon: string;
   description: string;
-  config_path: string;
-  config_format: string;
+  configPath: string;
+  configFormat: string;
   available: boolean;
   applied: boolean;
-  download_url: string;
+  downloadUrl: string;
 }
 
 export interface ApplyResult {
@@ -536,5 +562,7 @@ export const appConfigApi = {
   apply: (appName: string, apiKey: string, model: string) => invoke<ApplyResult>("apply_app_config", { appName, apiKey, model }),
   clear: (appName: string) => invoke<ApplyResult>("clear_app_config", { appName }),
   getContent: (appName: string) => invoke<ConfigContent>("get_app_config_content", { appName }),
-  openFolder: (appName: string) => invoke<void>("open_config_folder", { appName }),
+  openFolder: (appName: string) => isTauriRuntime()
+    ? invoke<void>("open_config_folder", { appName }).then(() => undefined)
+    : invoke<string>("get_app_config_path", { appName }),
 };

@@ -188,16 +188,30 @@ pub struct LoginSessions {
 }
 
 struct SessionLoginRuntime {
-    inner: TauriLoginRuntime,
+    browser: LoginBrowserRuntime,
     sessions: Arc<LoginSessions>,
     session_id: String,
     cancellation: watch::Receiver<bool>,
 }
 
+enum LoginBrowserRuntime {
+    Desktop(TauriLoginRuntime),
+    Headless,
+}
+
 #[async_trait::async_trait]
 impl LoginRuntime for SessionLoginRuntime {
     async fn open_browser(&self, url: &str) -> Result<(), ProviderError> {
-        self.inner.open_browser(url).await?;
+        match &self.browser {
+            LoginBrowserRuntime::Desktop(runtime) => runtime.open_browser(url).await?,
+            LoginBrowserRuntime::Headless => {
+                // The browser process lives on the administrator's machine, so
+                // surface the URL through the existing safe verification DTO.
+                self.sessions
+                    .set_verification(&self.session_id, url, "", None)
+                    .await;
+            }
+        }
         // This is an actual opener success, not a timer-driven estimate.
         self.sessions
             .set_step(&self.session_id, LoginStep::Authorizing.as_str())
@@ -503,11 +517,11 @@ async fn run_provider_login_session(
     provider: ProviderKind,
     target: crate::auth_provider::LoginTarget,
     cancellation: watch::Receiver<bool>,
-    app: tauri::AppHandle,
+    browser: LoginBrowserRuntime,
     service: Arc<crate::auth_provider::service::AuthService>,
 ) {
     let runtime = SessionLoginRuntime {
-        inner: TauriLoginRuntime::new(app),
+        browser,
         sessions: sessions.clone(),
         session_id: session_id.clone(),
         cancellation,
@@ -579,6 +593,10 @@ fn import_path(path: Option<String>) -> Result<PathBuf, String> {
 /// Reads no secrets; path logic stays in `CodexLogin::default_auth_json_path`.
 #[tauri::command]
 pub async fn auth_default_import_path() -> Result<String, String> {
+    auth_default_import_path_impl().await
+}
+
+pub async fn auth_default_import_path_impl() -> Result<String, String> {
     CodexLogin::default_auth_json_path()
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(safe_error)
@@ -588,6 +606,10 @@ pub async fn auth_default_import_path() -> Result<String, String> {
 pub async fn auth_accounts_list(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Vec<AuthAccountDto>, String> {
+    auth_accounts_list_impl(state.inner()).await
+}
+
+pub async fn auth_accounts_list_impl(state: &Arc<AppState>) -> Result<Vec<AuthAccountDto>, String> {
     let repository = Repository::new(state.db.pool.clone());
     repository
         .list_auth_accounts()
@@ -643,6 +665,10 @@ pub struct AuthProviderDto {
 /// Registered providers available for interactive login (renderer-safe spec).
 #[tauri::command]
 pub async fn auth_providers_list() -> Result<Vec<AuthProviderDto>, String> {
+    auth_providers_list_impl().await
+}
+
+pub async fn auth_providers_list_impl() -> Result<Vec<AuthProviderDto>, String> {
     Ok(crate::auth_provider::spec::registered_provider_specs()
         .iter()
         .map(|spec| AuthProviderDto {
@@ -686,8 +712,51 @@ pub async fn auth_login_start(
     let service = state.auth_service.clone();
     let task_id = session_id.clone();
     tauri::async_runtime::spawn(async move {
-        run_provider_login_session(sessions, task_id, kind, target, cancellation, app, service)
-            .await;
+        run_provider_login_session(
+            sessions,
+            task_id,
+            kind,
+            target,
+            cancellation,
+            LoginBrowserRuntime::Desktop(TauriLoginRuntime::new(app)),
+            service,
+        )
+        .await;
+    });
+    Ok(AuthLoginStart { session_id })
+}
+
+pub async fn auth_login_start_impl(
+    provider: String,
+    replace_account_id: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<AuthLoginStart, String> {
+    let kind = provider_kind(Some(provider))?;
+    let target = match replace_account_id {
+        Some(id) => {
+            validate_account_id(&id)?;
+            crate::auth_provider::LoginTarget::Replace {
+                local_account_id: id,
+            }
+        }
+        None => crate::auth_provider::LoginTarget::New,
+    };
+    let provider_name = kind.to_string();
+    let (session_id, cancellation) = state.login_sessions.start(&provider_name).await;
+    let sessions = state.login_sessions.clone();
+    let service = state.auth_service.clone();
+    let task_id = session_id.clone();
+    tokio::spawn(async move {
+        run_provider_login_session(
+            sessions,
+            task_id,
+            kind,
+            target,
+            cancellation,
+            LoginBrowserRuntime::Headless,
+            service,
+        )
+        .await;
     });
     Ok(AuthLoginStart { session_id })
 }
@@ -697,7 +766,66 @@ pub async fn auth_login_status(
     session_id: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthLoginSessionStatus, String> {
-    state.login_sessions.status(&session_id).await
+    auth_login_status_impl(&session_id, state.inner()).await
+}
+
+pub async fn auth_login_status_impl(
+    session_id: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthLoginSessionStatus, String> {
+    state.login_sessions.status(session_id).await
+}
+
+/// Forward a Codex loopback OAuth callback copied from the administrator's
+/// browser to the listener running inside the Linux Web process. Codex only
+/// registers localhost redirect URIs, so a remote browser cannot reach that
+/// listener directly; the listener still validates the original CSRF state.
+pub async fn auth_login_callback_impl(
+    session_id: &str,
+    callback_url: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthLoginSessionStatus, String> {
+    let status = state.login_sessions.status(session_id).await?;
+    if status.provider != "codex"
+        || matches!(status.state.as_str(), "succeeded" | "failed" | "cancelled")
+    {
+        return Err("Codex login session is not waiting for a callback".to_owned());
+    }
+
+    let url = normalize_codex_callback_url(callback_url)?;
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|_| "Unable to create callback client".to_owned())?
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| "Codex callback listener is unavailable".to_owned())?;
+    if !response.status().is_success() {
+        return Err("Codex callback was rejected; verify the copied URL".to_owned());
+    }
+    state.login_sessions.status(session_id).await
+}
+
+fn normalize_codex_callback_url(callback_url: &str) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(callback_url.trim())
+        .map_err(|_| "Invalid Codex callback URL".to_owned())?;
+    let valid_host = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let valid_port = matches!(url.port(), Some(1455 | 1457));
+    let has_callback = url.path() == "/auth/callback"
+        && url.query_pairs().any(|(key, _)| key == "state")
+        && url
+            .query_pairs()
+            .any(|(key, _)| key == "code" || key == "error");
+    if !valid_host || !valid_port || !has_callback {
+        return Err("Callback must be the localhost Codex OAuth redirect URL".to_owned());
+    }
+    url.set_host(Some("127.0.0.1"))
+        .map_err(|_| "Invalid Codex callback host".to_owned())?;
+    Ok(url)
 }
 
 #[tauri::command]
@@ -705,7 +833,14 @@ pub async fn auth_login_cancel(
     session_id: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthLoginSessionStatus, String> {
-    state.login_sessions.cancel(&session_id).await
+    auth_login_cancel_impl(&session_id, state.inner()).await
+}
+
+pub async fn auth_login_cancel_impl(
+    session_id: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthLoginSessionStatus, String> {
+    state.login_sessions.cancel(session_id).await
 }
 
 #[tauri::command]
@@ -714,12 +849,28 @@ pub async fn auth_login_import(
     path: Option<String>,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthMutationResult, String> {
+    auth_login_import_impl(provider, path, state.inner()).await
+}
+
+pub async fn auth_login_import_impl(
+    provider: Option<String>,
+    path: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<AuthMutationResult, String> {
     let kind = provider_kind(provider)?;
     let path = import_path(path)?;
     let bytes = fs::read(path).map_err(|_| "Unable to read auth file".to_owned())?;
+    auth_login_import_bytes_impl(kind, &bytes, state).await
+}
+
+pub async fn auth_login_import_bytes_impl(
+    kind: ProviderKind,
+    bytes: &[u8],
+    state: &Arc<AppState>,
+) -> Result<AuthMutationResult, String> {
     let summary = state
         .auth_service
-        .import(kind, &bytes)
+        .import(kind, bytes)
         .await
         .map_err(safe_error)?;
     sync_after_login(
@@ -730,11 +881,24 @@ pub async fn auth_login_import(
     .await
 }
 
+pub async fn auth_login_import_content_impl(
+    provider: Option<String>,
+    bytes: &[u8],
+    state: &Arc<AppState>,
+) -> Result<AuthMutationResult, String> {
+    let kind = provider_kind(provider)?;
+    auth_login_import_bytes_impl(kind, bytes, state).await
+}
+
 #[tauri::command]
 pub async fn auth_logout(
     id: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthLogoutResult, String> {
+    auth_logout_impl(&id, state.inner()).await
+}
+
+pub async fn auth_logout_impl(id: &str, state: &Arc<AppState>) -> Result<AuthLogoutResult, String> {
     let repository = Repository::new(state.db.pool.clone());
     // ADR-38: v1 deletion is local-only, no provider revoke endpoint.
     logout_local(&repository, &id).await
@@ -745,12 +909,19 @@ pub async fn auth_refresh_token(
     id: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthAccountDto, String> {
-    validate_account_id(&id)?;
-    match state.auth_service.force_refresh_account(&id).await {
+    auth_refresh_token_impl(&id, state.inner()).await
+}
+
+pub async fn auth_refresh_token_impl(
+    id: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthAccountDto, String> {
+    validate_account_id(id)?;
+    match state.auth_service.force_refresh_account(id).await {
         Ok(summary) => AuthAccountDto::try_from(summary).map_err(safe_error),
         Err(error) => {
             let repository = Repository::new(state.db.pool.clone());
-            let _ = repository.mark_invalid(&id, None, None).await;
+            let _ = repository.mark_invalid(id, None, None).await;
             Err(safe_error(error))
         }
     }
@@ -761,10 +932,17 @@ pub async fn auth_sync_models(
     id: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthAccountDto, String> {
-    validate_account_id(&id)?;
+    auth_sync_models_impl(&id, state.inner()).await
+}
+
+pub async fn auth_sync_models_impl(
+    id: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthAccountDto, String> {
+    validate_account_id(id)?;
     state
         .auth_service
-        .sync_models(&id)
+        .sync_models(id)
         .await
         .map_err(safe_error)
         .and_then(|summary| AuthAccountDto::try_from(summary).map_err(safe_error))
@@ -776,11 +954,19 @@ pub async fn auth_export_json(
     path: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthExportResult, String> {
-    validate_account_id(&id)?;
+    auth_export_json_impl(&id, &path, state.inner()).await
+}
+
+pub async fn auth_export_json_impl(
+    id: &str,
+    path: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthExportResult, String> {
+    validate_account_id(id)?;
     let path = PathBuf::from(path);
     let repository = Repository::new(state.db.pool.clone());
     let account = repository
-        .get_auth_account(&id)
+        .get_auth_account(id)
         .await
         .map_err(|_| storage_error())?;
     if account.provider != "codex" {
@@ -800,21 +986,48 @@ pub async fn auth_export_json(
     })
 }
 
+/// Explicit browser download equivalent of `auth_export_json`. The credential
+/// payload is returned only for this authenticated user action and is never
+/// logged or retained by the server bridge.
+pub async fn auth_export_content_impl(id: &str, state: &Arc<AppState>) -> Result<String, String> {
+    validate_account_id(id)?;
+    let repository = Repository::new(state.db.pool.clone());
+    let account = repository
+        .get_auth_account(id)
+        .await
+        .map_err(|_| storage_error())?;
+    if account.provider != "codex" {
+        return Err("Unsupported auth provider".to_owned());
+    }
+    let payload = serde_json::from_str(&account.payload_json)
+        .map(ProviderPayload::new)
+        .map_err(|_| safe_error(ProviderError::InvalidPayload))?;
+    CodexLogin::auth_json_content(&payload).map_err(safe_error)
+}
+
 #[tauri::command]
 pub async fn auth_toggle(
     id: String,
     disabled: bool,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthAccountDto, String> {
-    validate_account_id(&id)?;
+    auth_toggle_impl(&id, disabled, state.inner()).await
+}
+
+pub async fn auth_toggle_impl(
+    id: &str,
+    disabled: bool,
+    state: &Arc<AppState>,
+) -> Result<AuthAccountDto, String> {
+    validate_account_id(id)?;
     let repository = Repository::new(state.db.pool.clone());
     repository
-        .update_auth_account_disabled(&id, disabled)
+        .update_auth_account_disabled(id, disabled)
         .await
         .map_err(|_| storage_error())?;
     dto_from_account(
         repository
-            .get_auth_account(&id)
+            .get_auth_account(id)
             .await
             .map_err(|_| storage_error())?,
     )
@@ -825,10 +1038,17 @@ pub async fn auth_quota_status(
     id: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthQuotaStatus, String> {
-    validate_account_id(&id)?;
+    auth_quota_status_impl(&id, state.inner()).await
+}
+
+pub async fn auth_quota_status_impl(
+    id: &str,
+    state: &Arc<AppState>,
+) -> Result<AuthQuotaStatus, String> {
+    validate_account_id(id)?;
     let repository = Repository::new(state.db.pool.clone());
     let account = repository
-        .get_auth_account(&id)
+        .get_auth_account(id)
         .await
         .map_err(|_| storage_error())?;
     let quota = account
@@ -844,6 +1064,13 @@ pub async fn auth_quota_status(
 pub async fn auth_update(
     input: AuthUpdateInput,
     state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AuthAccountDto, String> {
+    auth_update_impl(input, state.inner()).await
+}
+
+pub async fn auth_update_impl(
+    input: AuthUpdateInput,
+    state: &Arc<AppState>,
 ) -> Result<AuthAccountDto, String> {
     // Validate here, before creating any repository call, so invalid user
     // values cannot cause even a no-op database write.
@@ -1154,9 +1381,27 @@ mod tests {
             Err("interactive_session_required".to_owned())
         );
         // The same guard lets the loopback provider through.
-        assert_eq!(
-            refuse_device_code_login(&ProviderKind::Codex),
-            Ok(())
+        assert_eq!(refuse_device_code_login(&ProviderKind::Codex), Ok(()));
+    }
+
+    #[test]
+    fn remote_codex_callback_forwarder_only_accepts_registered_loopback_targets() {
+        let url = normalize_codex_callback_url(
+            "http://localhost:1455/auth/callback?code=secret-code&state=csrf-state",
+        )
+        .unwrap();
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port(), Some(1455));
+        assert!(
+            normalize_codex_callback_url("https://evil.example/auth/callback?code=x&state=y")
+                .is_err()
+        );
+        assert!(
+            normalize_codex_callback_url("http://localhost:9999/auth/callback?code=x&state=y")
+                .is_err()
+        );
+        assert!(
+            normalize_codex_callback_url("http://localhost:1455/other?code=x&state=y").is_err()
         );
     }
 

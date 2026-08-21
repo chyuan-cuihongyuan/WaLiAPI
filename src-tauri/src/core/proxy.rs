@@ -2,13 +2,12 @@ use crate::adaptor::{get_adaptor, ProxyRequest, TokenUsage};
 use crate::core::dispatcher::Dispatcher;
 use crate::db::models::{Channel, RequestLog};
 use crate::db::repository::Repository;
+use crate::runtime::RuntimeHandle;
 use crate::security;
 use crate::utils;
 use rand::Rng;
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::AppHandle;
-use tauri_plugin_store::StoreExt;
 
 /// Multi-key load balancing for the legacy proxy path.  Selects a random
 /// enabled key from the channel's extra keys, weighted by `weight`.  The
@@ -63,7 +62,7 @@ pub struct ProxyResult {
 
 pub async fn handle_request(
     repo: &Arc<Repository>,
-    app: &AppHandle,
+    app: &RuntimeHandle,
     api_key_id: &str,
     api_key_name: &str,
     body: serde_json::Value,
@@ -454,17 +453,14 @@ pub async fn handle_request(
     ))
 }
 
-pub fn get_retry_settings(app: &AppHandle) -> (bool, i32) {
-    if let Ok(store) = app.store("settings.json") {
-        let enabled = store
-            .get("retry.enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let times = store
-            .get("retry.times")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(2) as i32;
-        return (enabled, times);
-    }
-    (true, 2)
+pub fn get_retry_settings(app: &RuntimeHandle) -> (bool, i32) {
+    let enabled = app
+        .setting("retry.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let times = app
+        .setting("retry.times")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(2) as i32;
+    (enabled, times)
 }

@@ -1,16 +1,15 @@
-use super::models::*;
 use super::project;
 use super::repository::WikiRepository;
 use crate::core::proxy;
 use crate::db::repository::Repository;
+use crate::runtime::RuntimeHandle;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
 
 /// Ingest a source file: read → parse → generate wiki pages via LLM → write to disk+DB.
 pub async fn ingest_source(
-    app: &AppHandle,
+    app: &RuntimeHandle,
     pool: &sqlx::SqlitePool,
     project_id: &str,
     source_id: &str,
@@ -267,7 +266,7 @@ struct GeneratedPage {
 
 /// Emit wiki source ingest progress event to frontend.
 fn emit_wiki_progress(
-    app: &AppHandle,
+    app: &RuntimeHandle,
     source_id: &str,
     project_id: &str,
     filename: &str,
@@ -416,7 +415,7 @@ fn parse_json(content: &str) -> Vec<ContentSection> {
 
 /// Generate wiki pages from content sections via LLM.
 async fn generate_wiki_pages(
-    app: &AppHandle,
+    app: &RuntimeHandle,
     db_repo: &Arc<Repository>,
     model: &str,
     channel_id: &str,
@@ -713,7 +712,7 @@ fn build_page(path: &str, raw_content: &str, source_filename: &str) -> Generated
     }
 }
 
-fn build_page_from_content(content: &str, source_filename: &str) -> Option<GeneratedPage> {
+fn build_page_from_content(content: &str, _source_filename: &str) -> Option<GeneratedPage> {
     let title = extract_title_from_content(content, "");
     if title.is_empty() {
         return None;
@@ -981,7 +980,6 @@ async fn resolve_wikilink_to_path(pool: &sqlx::SqlitePool, project_id: &str, lin
         return link.to_string();
     }
     // Try exact title match (case-insensitive)
-    let pattern = format!("%{}%", link);
     let title_match: Option<(String,)> = sqlx::query_as(
         "SELECT path FROM wiki_pages WHERE project_id = ? AND status = 'active' AND LOWER(title) = LOWER(?) LIMIT 1"
     )

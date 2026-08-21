@@ -1,4 +1,5 @@
 use crate::db::repository::Repository;
+use crate::runtime::RuntimeHandle;
 use crate::services::knowledge::{models::*, repository::KbRepository};
 use crate::AppState;
 use serde::Deserialize;
@@ -78,9 +79,13 @@ pub async fn reindex_kb_document(
     doc_id: String,
 ) -> Result<(), String> {
     let pool = state.db.pool.clone();
-    crate::services::knowledge::processor::reindex_document(&pool, &app, &doc_id)
-        .await
-        .map_err(|e| e)
+    crate::services::knowledge::processor::reindex_document(
+        &pool,
+        &RuntimeHandle::desktop(app),
+        &doc_id,
+    )
+    .await
+    .map_err(|e| e)
 }
 
 #[tauri::command]
@@ -89,13 +94,21 @@ pub async fn get_kb_tags(
     kb_id: String,
     #[allow(unused_variables)] limit: Option<usize>,
 ) -> Result<Vec<KbTag>, String> {
+    get_kb_tags_impl(state.inner(), &kb_id, limit).await
+}
+
+pub async fn get_kb_tags_impl(
+    state: &Arc<AppState>,
+    kb_id: &str,
+    limit: Option<usize>,
+) -> Result<Vec<KbTag>, String> {
     let pool = &state.db.pool;
     let limit = limit.unwrap_or(15);
 
     // Sample chunk contents for keyword extraction
     let chunks: Vec<(String,)> =
         sqlx::query_as("SELECT content FROM kb_chunks WHERE kb_id = ? ORDER BY RANDOM() LIMIT 200")
-            .bind(&kb_id)
+            .bind(kb_id)
             .fetch_all(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -316,7 +329,7 @@ pub async fn ask_knowledge_base(
             &input.model,
             input.top_k,
             input.max_rounds,
-            &app,
+            &RuntimeHandle::desktop(app.clone()),
         )
         .await
         .map_err(|e| e)
@@ -334,7 +347,7 @@ pub async fn ask_knowledge_base(
             input.top_k,
             false,
             &history,
-            &app,
+            &RuntimeHandle::desktop(app.clone()),
             vector_weight,
             keyword_weight,
             search_mode,
@@ -430,7 +443,7 @@ pub async fn upload_kb_document(
     let emb_model = kb.embedding_model.clone();
 
     let pool_clone = pool.clone();
-    let app_clone = app.clone();
+    let app_clone = RuntimeHandle::desktop(app.clone());
     let doc_id_clone = doc.id.clone();
     let filename_clone = input.filename.clone();
 
@@ -531,17 +544,29 @@ pub async fn import_kb_source(
     tokio::spawn(async move {
         let result = if source_type == "git" {
             crate::services::knowledge::importer::import_git_repo(
-                &pool, &app, &kb_id, &source_id, &input,
+                &pool,
+                &RuntimeHandle::desktop(app.clone()),
+                &kb_id,
+                &source_id,
+                &input,
             )
             .await
         } else if source_type == "url" {
             crate::services::knowledge::importer::import_url(
-                &pool, &app, &kb_id, &source_id, &input,
+                &pool,
+                &RuntimeHandle::desktop(app.clone()),
+                &kb_id,
+                &source_id,
+                &input,
             )
             .await
         } else if source_type == "local_dir" {
             crate::services::knowledge::importer::import_local_dir(
-                &pool, &app, &kb_id, &source_id, &input,
+                &pool,
+                &RuntimeHandle::desktop(app.clone()),
+                &kb_id,
+                &source_id,
+                &input,
             )
             .await
         } else {
@@ -606,7 +631,13 @@ pub async fn build_kb_index(
             }),
         );
 
-        match crate::services::knowledge::retriever::build_index(&pool, &kb_id_clone, &app).await {
+        match crate::services::knowledge::retriever::build_index(
+            &pool,
+            &kb_id_clone,
+            &RuntimeHandle::desktop(app.clone()),
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("HNSW index built successfully for KB {}", kb_id_clone);
                 let _ = app.emit(

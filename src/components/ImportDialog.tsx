@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { importExportApi, type ImportResult, type ScannedSource } from "../lib/api";
 import { X, Upload, FileJson, ScanLine, Check, AlertCircle, Loader2, ChevronDown, ChevronRight } from "lucide-react";
+import { isTauriRuntime } from "../lib/runtime";
 
 type ImportMode = "menu" | "walicode" | "waliapi" | "scan";
 
@@ -122,7 +123,7 @@ export function ImportDialog({ onClose, onImported }: {
             {mode === "menu" && "导入渠道"}
             {mode === "walicode" && "导入 WaLiCode 备份"}
             {mode === "waliapi" && "导入 WaLiAPI 导出文件"}
-            {mode === "scan" && "扫描本地 AI 配置"}
+            {mode === "scan" && (isTauriRuntime() ? "扫描本地 AI 配置" : "扫描服务器 AI 配置")}
           </h2>
           <button onClick={onClose} className="action-secondary px-3 py-2"><X size={18} /></button>
         </div>
@@ -171,8 +172,8 @@ export function ImportDialog({ onClose, onImported }: {
 
               <ImportOption
                 icon={<ScanLine size={20} />}
-                title="扫描本地 AI 配置"
-                description="自动扫描 Claude Code、Codex、Cursor 等本地配置并导入"
+                title={isTauriRuntime() ? "扫描本地 AI 配置" : "扫描服务器 AI 配置"}
+                description={`自动扫描 Claude Code、Codex、Cursor 等${isTauriRuntime() ? "本地" : "服务器挂载目录中的"}配置并导入`}
                 onClick={() => { setMode("scan"); setResult(null); setError(null); handleScan(); }}
               />
 
@@ -240,7 +241,7 @@ export function ImportDialog({ onClose, onImported }: {
           {mode === "scan" && (
             <div className="space-y-4">
               <div className="rounded-2xl border border-border bg-background/40 px-4 py-4 text-sm">
-                <p className="mb-2 font-medium">扫描本地 AI 配置</p>
+                <p className="mb-2 font-medium">{isTauriRuntime() ? "扫描本地 AI 配置" : "扫描 Linux 服务器 AI 配置"}</p>
                 <p className="text-muted-foreground text-xs">
                   自动扫描以下位置的配置文件：
                 </p>
