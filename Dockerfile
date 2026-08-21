@@ -15,7 +15,7 @@ COPY src ./src
 RUN mkdir -p src-tauri && mv updater-config.json src-tauri/
 RUN pnpm build
 
-FROM rust:1.88-bookworm AS server-builder
+FROM rust:1.96-bookworm AS server-builder
 WORKDIR /workspace
 # Tauri remains a dependency of the shared library, so keep its Linux build
 # dependencies until the server binary is split from the desktop entry point.
