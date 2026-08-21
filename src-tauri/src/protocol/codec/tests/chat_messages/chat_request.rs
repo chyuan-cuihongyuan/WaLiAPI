@@ -69,6 +69,65 @@ fn chat_request_function_tools_and_choice() {
 }
 
 #[test]
+fn chat_request_normalizes_store_false_and_stream_usage() {
+    // Exact OpenAI Chat request shape emitted by the client that routes through
+    // an Anthropic Messages-only channel.
+    let body = json!({
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+        "store": false,
+        "stream_options": {"include_usage": true}
+    });
+
+    let prepared = CodecRegistry::chat_to_messages("oc/deepseek-v4-flash-free", &body).unwrap();
+    let out = &prepared.encoded_request;
+    assert_eq!(out["model"], "oc/deepseek-v4-flash-free");
+    assert_eq!(out["stream"], true);
+    assert!(out.get("store").is_none());
+    assert!(out.get("stream_options").is_none());
+    assert_eq!(
+        prepared.report.normalized,
+        vec!["/store", "/stream_options"]
+    );
+}
+
+#[test]
+fn chat_request_rejects_unrepresentable_store_and_stream_options() {
+    let store_true = json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "u"}],
+        "store": true
+    });
+    let error = CodecRegistry::chat_to_messages("m", &store_true).unwrap_err();
+    assert!(error.json_pointers.iter().any(|p| p == "/store"));
+
+    let include_usage_false = json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "u"}],
+        "stream": true,
+        "stream_options": {"include_usage": false}
+    });
+    let error = CodecRegistry::chat_to_messages("m", &include_usage_false).unwrap_err();
+    assert!(error
+        .json_pointers
+        .iter()
+        .any(|p| p == "/stream_options/include_usage"));
+
+    let unknown_option = json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "u"}],
+        "stream": true,
+        "stream_options": {"include_usage": true, "future_option": true}
+    });
+    let error = CodecRegistry::chat_to_messages("m", &unknown_option).unwrap_err();
+    assert!(error
+        .json_pointers
+        .iter()
+        .any(|p| p == "/stream_options/future_option"));
+}
+
+#[test]
 fn chat_request_tool_calls_and_results_are_strict() {
     let body = json!({
         "model": "m",
