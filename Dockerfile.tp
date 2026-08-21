@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # Build the web UI and the Linux server in one reproducible image build.
 # TP-server variant: same stages as ./Dockerfile, but every base image and
 # package registry is swapped for a China-reachable mirror, because the tp
