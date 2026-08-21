@@ -188,7 +188,11 @@ pub struct LoginSessions {
 }
 
 struct SessionLoginRuntime {
-    inner: TauriLoginRuntime,
+    /// Desktop-only browser opener; headless builds have no shell to open a
+    /// browser with, so device-code flows rely on the URL + code already
+    /// surfaced in the polled session status.
+    #[cfg(feature = "desktop-ui")]
+    inner: Option<TauriLoginRuntime>,
     sessions: Arc<LoginSessions>,
     session_id: String,
     cancellation: watch::Receiver<bool>,
@@ -197,12 +201,19 @@ struct SessionLoginRuntime {
 #[async_trait::async_trait]
 impl LoginRuntime for SessionLoginRuntime {
     async fn open_browser(&self, url: &str) -> Result<(), ProviderError> {
-        self.inner.open_browser(url).await?;
-        // This is an actual opener success, not a timer-driven estimate.
-        self.sessions
-            .set_step(&self.session_id, LoginStep::Authorizing.as_str())
-            .await;
-        Ok(())
+        #[cfg(feature = "desktop-ui")]
+        if let Some(inner) = &self.inner {
+            inner.open_browser(url).await?;
+            // This is an actual opener success, not a timer-driven estimate.
+            self.sessions
+                .set_step(&self.session_id, LoginStep::Authorizing.as_str())
+                .await;
+            return Ok(());
+        }
+        // Headless (or no shell handle): opening a browser on the server is
+        // impossible/undesired; the user authorizes manually on any device.
+        // Kimi treats this failure as non-fatal by design.
+        Err(ProviderError::BrowserOpenFailed)
     }
 
     async fn set_step(&self, step: LoginStep) {
@@ -503,11 +514,16 @@ async fn run_provider_login_session(
     provider: ProviderKind,
     target: crate::auth_provider::LoginTarget,
     cancellation: watch::Receiver<bool>,
-    app: tauri::AppHandle,
+    app: Option<tauri::AppHandle>,
     service: Arc<crate::auth_provider::service::AuthService>,
 ) {
+    // Headless builds never construct the desktop opener; the AppHandle is
+    // only meaningful when the desktop shell exists.
+    #[cfg(not(feature = "desktop-ui"))]
+    let _ = &app;
     let runtime = SessionLoginRuntime {
-        inner: TauriLoginRuntime::new(app),
+        #[cfg(feature = "desktop-ui")]
+        inner: app.map(TauriLoginRuntime::new),
         sessions: sessions.clone(),
         session_id: session_id.clone(),
         cancellation,
@@ -616,15 +632,23 @@ pub async fn auth_login(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthMutationResult, String> {
-    let kind = provider_kind(Some(provider))?;
-    refuse_device_code_login(&kind)?;
-    let runtime = TauriLoginRuntime::new(app);
-    let summary = state
-        .auth_service
-        .login(kind, &runtime)
-        .await
-        .map_err(safe_error)?;
-    sync_after_login(&state.auth_service, summary, None).await
+    #[cfg(not(feature = "desktop-ui"))]
+    {
+        let _ = (&provider, &app, &state);
+        return Err("OAuth 登录仅桌面版可用，请使用 auth.json 导入".to_string());
+    }
+    #[cfg(feature = "desktop-ui")]
+    {
+        let kind = provider_kind(Some(provider))?;
+        refuse_device_code_login(&kind)?;
+        let runtime = TauriLoginRuntime::new(app);
+        let summary = state
+            .auth_service
+            .login(kind, &runtime)
+            .await
+            .map_err(safe_error)?;
+        sync_after_login(&state.auth_service, summary, None).await
+    }
 }
 
 /// Renderer-safe provider capability row for the login picker.
@@ -661,14 +685,28 @@ pub async fn auth_providers_list() -> Result<Vec<AuthProviderDto>, String> {
         .collect())
 }
 
-#[tauri::command]
-pub async fn auth_login_start(
+/// Pure gate: browser-callback OAuth needs the desktop shell (loopback
+/// listener + system browser); device-code providers also work headless
+/// because the verification URL + user code travel through the polled
+/// session status instead.
+fn login_requires_desktop_shell(kind: &ProviderKind) -> bool {
+    crate::auth_provider::spec::provider_spec(kind)
+        .is_some_and(|spec| spec.login_mode == crate::auth_provider::AuthLoginMode::BrowserCallback)
+}
+
+/// Shared core behind the `auth_login_start` command and the headless admin
+/// dispatch.  `app` is the desktop shell handle; headless callers pass `None`,
+/// which restricts the flow to device-code providers.
+pub(crate) async fn auth_login_start_with(
     provider: String,
     replace_account_id: Option<String>,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
+    app: Option<tauri::AppHandle>,
+    state: &Arc<AppState>,
 ) -> Result<AuthLoginStart, String> {
     let kind = provider_kind(Some(provider))?;
+    if app.is_none() && login_requires_desktop_shell(&kind) {
+        return Err("OAuth 登录仅桌面版可用，请使用 auth.json 导入".to_string());
+    }
     // Validate the local account id syntactically before spawning so a bad id
     // fails the command (not a background task).  The payload is never touched.
     let target = match replace_account_id {
@@ -690,6 +728,16 @@ pub async fn auth_login_start(
             .await;
     });
     Ok(AuthLoginStart { session_id })
+}
+
+#[tauri::command]
+pub async fn auth_login_start(
+    provider: String,
+    replace_account_id: Option<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AuthLoginStart, String> {
+    auth_login_start_with(provider, replace_account_id, Some(app), state.inner()).await
 }
 
 #[tauri::command]
@@ -717,6 +765,31 @@ pub async fn auth_login_import(
     let kind = provider_kind(provider)?;
     let path = import_path(path)?;
     let bytes = fs::read(path).map_err(|_| "Unable to read auth file".to_owned())?;
+    let summary = state
+        .auth_service
+        .import(kind, &bytes)
+        .await
+        .map_err(safe_error)?;
+    sync_after_login(
+        &state.auth_service,
+        summary,
+        Some(CODEX_IMPORT_NOTICE.to_owned()),
+    )
+    .await
+}
+
+/// Web 管理面板：直接以文件内容导入（浏览器 `<input type=file>` 上传，无服务器路径）。
+#[tauri::command]
+pub async fn auth_login_import_content(
+    provider: Option<String>,
+    content: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AuthMutationResult, String> {
+    let kind = provider_kind(provider)?;
+    let bytes = content.into_bytes();
+    if bytes.is_empty() {
+        return Err("Unable to read auth file".to_owned());
+    }
     let summary = state
         .auth_service
         .import(kind, &bytes)
@@ -798,6 +871,27 @@ pub async fn auth_export_json(
             .backup_path
             .map(|path| path.to_string_lossy().into_owned()),
     })
+}
+
+/// Web 管理面板：导出 auth.json 内容（由浏览器触发下载，不写服务器磁盘）。
+#[tauri::command]
+pub async fn auth_export_json_content(
+    id: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    validate_account_id(&id)?;
+    let repository = Repository::new(state.db.pool.clone());
+    let account = repository
+        .get_auth_account(&id)
+        .await
+        .map_err(|_| storage_error())?;
+    if account.provider != "codex" {
+        return Err("Unsupported auth provider".to_owned());
+    }
+    let payload = serde_json::from_str(&account.payload_json)
+        .map(ProviderPayload::new)
+        .map_err(|_| safe_error(ProviderError::InvalidPayload))?;
+    CodexLogin::export_auth_json_content(&payload).map_err(safe_error)
 }
 
 #[tauri::command]
@@ -1083,6 +1177,15 @@ mod tests {
         assert!(provider_kind(Some("nope".into())).is_err());
     }
 
+    #[test]
+    fn login_shell_gate_only_blocks_browser_callback_providers() {
+        // Device-code providers (Kimi) must be allowed headless (Docker/web
+        // admin panel); browser-callback providers (Codex) still require the
+        // desktop shell for the loopback listener + system browser.
+        assert!(!login_requires_desktop_shell(&ProviderKind::Kimi));
+        assert!(login_requires_desktop_shell(&ProviderKind::Codex));
+    }
+
     #[tokio::test]
     async fn session_stores_the_actual_provider_not_codex() {
         let sessions = LoginSessions::new();
@@ -1154,10 +1257,7 @@ mod tests {
             Err("interactive_session_required".to_owned())
         );
         // The same guard lets the loopback provider through.
-        assert_eq!(
-            refuse_device_code_login(&ProviderKind::Codex),
-            Ok(())
-        );
+        assert_eq!(refuse_device_code_login(&ProviderKind::Codex), Ok(()));
     }
 
     #[tokio::test]
