@@ -4,6 +4,8 @@
 # TP-server variant: same stages as ./Dockerfile, but every base image and
 # package registry is swapped for a China-reachable mirror, because the tp
 # build host cannot reach docker.io / deb.debian.org / crates.io.
+# NOTE: deliberately NO `# syntax=` directive — resolving it would hit
+# auth.docker.io, which is unreachable from the tp build network.
 # Keep in sync with ./Dockerfile when upstream stages change. Differences:
 #   1. FROM images prefixed with docker.m.daocloud.io/library/
 #   2. apt sources rewritten to mirrors.ustc.edu.cn (server-builder + runtime)
