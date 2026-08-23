@@ -207,10 +207,18 @@ pub fn encode_chat_to_messages(
     if let Some(effort) = body.get("reasoning_effort").and_then(Value::as_str) {
         let e = effort.to_ascii_lowercase();
         match e.as_str() {
+            // Some upstream models always reason and reject
+            // `thinking.type = disabled`.  Use their least-expensive accepted
+            // effort instead of turning a valid Chat request into an upstream
+            // 1210 error.
             "none" | "off" => {
                 claude.insert(
                     "thinking".to_string(),
-                    serde_json::json!({"type": "disabled"}),
+                    serde_json::json!({"type": "adaptive"}),
+                );
+                claude.insert(
+                    "output_config".to_string(),
+                    serde_json::json!({"effort": "low"}),
                 );
             }
             "auto" => {

@@ -265,7 +265,8 @@ fn chat_request_rejects_thinking_and_structured_output() {
 #[test]
 fn chat_request_reasoning_effort_maps_to_thinking() {
     // CPA ConvertOpenAIRequestToClaude + MapToClaudeEffort, exercised directly.
-    // none -> disabled
+    // none/off cannot disable thinking on always-thinking upstream models;
+    // fall back to their least-expensive supported effort.
     let body = json!({
         "model": "m",
         "messages": [{"role": "user", "content": "u"}],
@@ -274,8 +275,8 @@ fn chat_request_reasoning_effort_maps_to_thinking() {
     let out = &CodecRegistry::chat_to_messages("m", &body)
         .unwrap()
         .encoded_request;
-    assert_eq!(out["thinking"], json!({"type": "disabled"}));
-    assert!(out.get("output_config").is_none());
+    assert_eq!(out["thinking"], json!({"type": "adaptive"}));
+    assert_eq!(out["output_config"], json!({"effort": "low"}));
 
     // auto -> adaptive (no budget)
     let body = json!({
