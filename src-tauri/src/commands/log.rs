@@ -143,6 +143,13 @@ pub async fn get_logs(
     input: GetLogsInput,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<LogDto>, String> {
+    get_logs_impl(input, &*state).await
+}
+
+pub async fn get_logs_impl(
+    input: GetLogsInput,
+    state: &std::sync::Arc<AppState>,
+) -> Result<Vec<LogDto>, String> {
     let repo = Repository::new(state.db.pool.clone());
     let limit = input.limit.unwrap_or(50);
     let offset = input.offset.unwrap_or(0);
@@ -183,8 +190,12 @@ pub async fn get_log(
     id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<LogDto, String> {
+    get_log_impl(&id, &*state).await
+}
+
+pub async fn get_log_impl(id: &str, state: &std::sync::Arc<AppState>) -> Result<LogDto, String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.get_log(&id)
+    repo.get_log(id)
         .await
         .map_err(|e| e.to_string())
         .map(Into::into)
@@ -195,8 +206,15 @@ pub async fn get_log_security_findings(
     log_id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<SecurityFindingDto>, String> {
+    get_log_security_findings_impl(&log_id, &*state).await
+}
+
+pub async fn get_log_security_findings_impl(
+    log_id: &str,
+    state: &std::sync::Arc<AppState>,
+) -> Result<Vec<SecurityFindingDto>, String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.get_security_findings(&log_id)
+    repo.get_security_findings(log_id)
         .await
         .map_err(|e| e.to_string())
         .map(|fs| fs.into_iter().map(Into::into).collect())
@@ -207,8 +225,12 @@ pub async fn delete_log(
     id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
+    delete_log_impl(&id, &*state).await
+}
+
+pub async fn delete_log_impl(id: &str, state: &std::sync::Arc<AppState>) -> Result<(), String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.delete_log(&id).await.map_err(|e| e.to_string())
+    repo.delete_log(id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -216,8 +238,15 @@ pub async fn delete_logs_before(
     before_date: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<u64, String> {
+    delete_logs_before_impl(&before_date, &*state).await
+}
+
+pub async fn delete_logs_before_impl(
+    before_date: &str,
+    state: &std::sync::Arc<AppState>,
+) -> Result<u64, String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.delete_logs_before(&before_date)
+    repo.delete_logs_before(before_date)
         .await
         .map_err(|e| e.to_string())
 }
@@ -226,6 +255,10 @@ pub async fn delete_logs_before(
 pub async fn delete_all_logs(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<u64, String> {
+    delete_all_logs_impl(&*state).await
+}
+
+pub async fn delete_all_logs_impl(state: &std::sync::Arc<AppState>) -> Result<u64, String> {
     let repo = Repository::new(state.db.pool.clone());
     repo.delete_all_logs().await.map_err(|e| e.to_string())
 }
@@ -241,6 +274,13 @@ pub struct LogStatsDto {
 pub async fn get_log_stats(
     days: Option<i64>,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<LogStatsDto>, String> {
+    get_log_stats_impl(days, &*state).await
+}
+
+pub async fn get_log_stats_impl(
+    days: Option<i64>,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<Vec<LogStatsDto>, String> {
     let repo = Repository::new(state.db.pool.clone());
     let days = days.unwrap_or(7);

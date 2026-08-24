@@ -4,6 +4,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { channelApi, apiKeyApi, serverApi, authApi } from "../lib/api";
 import type { Channel, ApiKey, ServerStatus, AuthAccount } from "../types";
+import { isTauriRuntime, writeClipboard } from "../lib/runtime";
 import { AppConfigPanel, getAppIcon } from "./AppConfigPage";
 import {
   BookOpen, Copy, Check, Play, Loader2, Link2, KeyRound, Bot,
@@ -114,7 +115,9 @@ export function UsagePage() {
     return () => clearInterval(iv);
   }, []);
 
-  const baseUrl = ss?.running ? `${ss.url}/v1` : "http://127.0.0.1:8777/v1";
+  const baseUrl = isTauriRuntime()
+    ? (ss?.running ? `${ss.url}/v1` : "http://127.0.0.1:8777/v1")
+    : `${window.location.origin}/v1`;
 
   // Find the currently selected API key object.
   const selectedApiKey = useMemo(
@@ -189,8 +192,8 @@ export function UsagePage() {
     toastTimer.current = setTimeout(() => setToastMsg(null), 1800);
   };
 
-  const copy = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
+  const copy = async (text: string, id: string) => {
+    await writeClipboard(text);
     setCopied(id);
     showToast("已复制到剪贴板");
     setTimeout(() => setCopied(null), 2000);

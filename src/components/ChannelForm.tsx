@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { channelApi } from "../lib/api";
+import { writeClipboard } from "../lib/runtime";
 import type {
   Channel, CreateChannelInput, UpdateChannelInput,
   ChannelProtocol, ChannelProvider, ChannelEndpoint, ChannelAuthScheme,
@@ -90,10 +90,10 @@ function maskKey(key: string): string {
 /** 复制到剪贴板 */
 async function copyToClipboard(text: string) {
   try {
-    await invoke("plugin:clipboard-manager|write_text", { text });
+    await writeClipboard(text);
   } catch {
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboard(text);
     } catch {
       // ignore
     }
@@ -1207,5 +1207,3 @@ export function ChannelForm({ editing, duplicate = false, onClose, onSaved }: {
     </div>
   );
 }
-
-

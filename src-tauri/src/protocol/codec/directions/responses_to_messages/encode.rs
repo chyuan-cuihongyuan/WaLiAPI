@@ -87,13 +87,41 @@ pub fn encode_request(
                 ))
             }
         };
-        for (index, item) in items.iter().enumerate() {
+        let mut index = 0;
+        while index < items.len() {
+            let item = &items[index];
             let pointer = format!("/input/{index}");
             match item.get("type").and_then(Value::as_str) {
                 Some("message") => messages.push(response_message(item, &pointer)?),
-                Some("function_call") => messages.push(function_call_message(item, &pointer)?),
+                // Anthropic requires every `tool_result` user message to
+                // immediately follow ONE assistant message containing its
+                // corresponding `tool_use` blocks.  Responses represents each
+                // call/result as a separate item, so consecutive runs must be
+                // coalesced before crossing the protocol boundary.
+                Some("function_call") => {
+                    let mut blocks = Vec::new();
+                    while index < items.len()
+                        && items[index].get("type").and_then(Value::as_str) == Some("function_call")
+                    {
+                        let call_pointer = format!("/input/{index}");
+                        blocks.push(function_call_block(&items[index], &call_pointer)?);
+                        index += 1;
+                    }
+                    messages.push(serde_json::json!({"role":"assistant", "content":blocks}));
+                    continue;
+                }
                 Some("function_call_output") => {
-                    messages.push(function_output_message(item, &pointer)?)
+                    let mut blocks = Vec::new();
+                    while index < items.len()
+                        && items[index].get("type").and_then(Value::as_str)
+                            == Some("function_call_output")
+                    {
+                        let output_pointer = format!("/input/{index}");
+                        blocks.push(function_output_block(&items[index], &output_pointer)?);
+                        index += 1;
+                    }
+                    messages.push(serde_json::json!({"role":"user", "content":blocks}));
+                    continue;
                 }
                 Some("reasoning") => messages.push(reasoning_message(item, &pointer)?),
                 Some(other) => {
@@ -103,6 +131,18 @@ pub fn encode_request(
                         format!("Responses input item {other:?} is not representable"),
                     ))
                 }
+                // Responses accepts its convenient "easy input" message form:
+                // `{ role, content }` without a `type` discriminator.  It has
+                // an unambiguous message role, unlike a bare untyped object,
+                // so normalize it before applying the canonical item encoder.
+                None if item.get("type").is_none() && item.get("role").is_some() => {
+                    let (message, system_parts) =
+                        normalize_easy_input_message(item, &pointer, &mut normalized)?;
+                    system.extend(system_parts);
+                    if let Some(message) = message {
+                        messages.push(message);
+                    }
+                }
                 None => {
                     return Err(unsupported(
                         FeatureKind::UnknownBlock,
@@ -111,6 +151,7 @@ pub fn encode_request(
                     ))
                 }
             }
+            index += 1;
         }
     }
     let mut out = Map::new();
@@ -190,6 +231,75 @@ pub fn encode_request(
     );
     context.normalized = normalized;
     Ok((Value::Object(out), context))
+}
+
+/// Convert the shorthand Responses input-message form into its canonical
+/// counterpart.  System/developer messages have no Messages role equivalent,
+/// so their text is hoisted to the Messages top-level `system` field.
+fn normalize_easy_input_message(
+    item: &Value,
+    pointer: &str,
+    normalized: &mut Vec<String>,
+) -> Result<(Option<Value>, Vec<Value>), UnsupportedFeatures> {
+    let role = item.get("role").and_then(Value::as_str).ok_or_else(|| {
+        unsupported(
+            FeatureKind::UnknownRole,
+            format!("{pointer}/role"),
+            "easy input message requires a role",
+        )
+    })?;
+    let content = item.get("content").ok_or_else(|| {
+        unsupported(
+            FeatureKind::UnknownBlock,
+            format!("{pointer}/content"),
+            "easy input message requires content",
+        )
+    })?;
+    let content = match content {
+        Value::String(text) => {
+            normalized.push(format!("{pointer}/content"));
+            Value::Array(vec![serde_json::json!({"type":"input_text", "text":text})])
+        }
+        Value::Array(parts) => Value::Array(parts.clone()),
+        _ => {
+            return Err(unsupported(
+                FeatureKind::UnknownBlock,
+                format!("{pointer}/content"),
+                "easy input message content must be text or an array",
+            ))
+        }
+    };
+    normalized.push(format!("{pointer}/type"));
+
+    match role {
+        "user" | "assistant" => {
+            let mut canonical = item.as_object().cloned().ok_or_else(|| {
+                unsupported(
+                    FeatureKind::UnknownBlock,
+                    pointer,
+                    "easy input message must be an object",
+                )
+            })?;
+            canonical.insert("type".into(), Value::String("message".into()));
+            canonical.insert("content".into(), content);
+            Ok((
+                Some(response_message(&Value::Object(canonical), pointer)?),
+                Vec::new(),
+            ))
+        }
+        "system" | "developer" => {
+            normalized.push(format!("{pointer}/role"));
+            Ok((
+                None,
+                instructions_to_system(&content, &format!("{pointer}/content"))?,
+            ))
+        }
+        _ => Err(unsupported(
+            FeatureKind::UnknownRole,
+            format!("{pointer}/role"),
+            "easy input message role must be system, developer, user, or assistant",
+        )),
+    }
 }
 
 fn instructions_to_system(value: &Value, pointer: &str) -> Result<Vec<Value>, UnsupportedFeatures> {
@@ -394,7 +504,7 @@ fn response_image(part: &Value, pointer: &str) -> Result<Value, UnsupportedFeatu
     Ok(serde_json::json!({"type":"image", "source":{"type":"url", "url":url}}))
 }
 
-fn function_call_message(item: &Value, pointer: &str) -> Result<Value, UnsupportedFeatures> {
+fn function_call_block(item: &Value, pointer: &str) -> Result<Value, UnsupportedFeatures> {
     let id = required(item, "call_id", pointer)?;
     let name = required(item, "name", pointer)?;
     let args = item
@@ -421,16 +531,12 @@ fn function_call_message(item: &Value, pointer: &str) -> Result<Value, Unsupport
             "arguments must be a JSON object",
         ));
     }
-    Ok(
-        serde_json::json!({"role":"assistant", "content":[{"type":"tool_use", "id":id, "name":name, "input":input}]}),
-    )
+    Ok(serde_json::json!({"type":"tool_use", "id":id, "name":name, "input":input}))
 }
-fn function_output_message(item: &Value, pointer: &str) -> Result<Value, UnsupportedFeatures> {
+fn function_output_block(item: &Value, pointer: &str) -> Result<Value, UnsupportedFeatures> {
     let id = required(item, "call_id", pointer)?;
     let content = messages_tool_result_content(item.get("output"), &format!("{pointer}/output"))?;
-    Ok(
-        serde_json::json!({"role":"user", "content":[{"type":"tool_result", "tool_use_id":id, "content":content}]}),
-    )
+    Ok(serde_json::json!({"type":"tool_result", "tool_use_id":id, "content":content}))
 }
 
 fn messages_tool_result_content(
