@@ -63,7 +63,36 @@ fn parse_args(args: &[String]) -> Result<WebServerConfig, String> {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().init();
+    // 获取可执行文件所在目录
+    let exe_dir = std::env::current_exe()
+        .map(|path| path.parent().map(|p| p.to_path_buf()).unwrap_or(std::path::PathBuf::from(".")))
+        .unwrap_or(std::path::PathBuf::from("."));
+    
+    // 创建日志目录
+    let log_dir = exe_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+    
+    // 创建日志文件路径
+    let log_file_path = log_dir.join("waliapi-web.log");
+    
+    // 同时输出到控制台和文件
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .ok();
+    
+    let subscriber = tracing_subscriber::fmt();
+    
+    if let Some(file) = file {
+        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(
+            std::io::stdout.and(file)
+        );
+        subscriber.with_writer(writer).init();
+    } else {
+        subscriber.init();
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     // 帮助优先于参数路由：-h/--help（含 start 子命令后）打印用法并正常退出
