@@ -44,6 +44,10 @@ impl From<ApiKey> for ApiKeyDto {
 pub async fn get_api_keys(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<ApiKeyDto>, String> {
+    get_api_keys_impl(&*state).await
+}
+
+pub async fn get_api_keys_impl(state: &std::sync::Arc<AppState>) -> Result<Vec<ApiKeyDto>, String> {
     let repo = Repository::new(state.db.pool.clone());
     repo.get_all_api_keys()
         .await
@@ -55,6 +59,13 @@ pub async fn get_api_keys(
 pub async fn create_api_key(
     input: CreateApiKeyInput,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ApiKeyDto, String> {
+    create_api_key_impl(input, &*state).await
+}
+
+pub async fn create_api_key_impl(
+    input: CreateApiKeyInput,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ApiKeyDto, String> {
     let repo = Repository::new(state.db.pool.clone());
     repo.create_api_key(&input)
@@ -79,6 +90,13 @@ pub struct UpdateApiKeyInput {
 pub async fn update_api_key(
     input: UpdateApiKeyInput,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<(), String> {
+    update_api_key_impl(input, &*state).await
+}
+
+pub async fn update_api_key_impl(
+    input: UpdateApiKeyInput,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<(), String> {
     let repo = Repository::new(state.db.pool.clone());
     if let Some(name) = &input.name {
@@ -124,13 +142,23 @@ pub async fn delete_api_key(
     id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
+    delete_api_key_impl(&id, &*state).await
+}
+
+pub async fn delete_api_key_impl(id: &str, state: &std::sync::Arc<AppState>) -> Result<(), String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.delete_api_key(&id).await.map_err(|e| e.to_string())
+    repo.delete_api_key(id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_api_key_stats(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<ApiKeyStats>, String> {
+    get_api_key_stats_impl(&*state).await
+}
+
+pub async fn get_api_key_stats_impl(
+    state: &std::sync::Arc<AppState>,
 ) -> Result<Vec<ApiKeyStats>, String> {
     let repo = Repository::new(state.db.pool.clone());
     repo.get_api_key_stats().await.map_err(|e| e.to_string())

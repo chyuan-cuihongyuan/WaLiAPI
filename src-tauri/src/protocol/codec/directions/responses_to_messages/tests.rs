@@ -9,6 +9,31 @@ fn request_is_direct_and_preserves_tool_identity() {
     assert_eq!(out["messages"][0]["content"][0]["id"], "call_1");
     assert_eq!(out["max_tokens"], 32000);
 }
+
+#[test]
+fn request_groups_consecutive_tool_calls_and_outputs() {
+    let (out, _) = encode_request(
+        &serde_json::json!({"input":[
+            {"type":"function_call", "call_id":"call_1", "name":"glob", "arguments":"{}"},
+            {"type":"function_call", "call_id":"call_2", "name":"grep", "arguments":"{}"},
+            {"type":"function_call_output", "call_id":"call_1", "output":"first"},
+            {"type":"function_call_output", "call_id":"call_2", "output":"second"}
+        ]}),
+        "m",
+    )
+    .unwrap();
+
+    let messages = out["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
+    assert_eq!(messages[0]["content"][0]["id"], "call_1");
+    assert_eq!(messages[0]["content"][1]["id"], "call_2");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_1");
+    assert_eq!(messages[1]["content"][1]["tool_use_id"], "call_2");
+}
+
 #[test]
 fn request_preserves_readable_reasoning_and_item_order() {
     let (out, _) = encode_request(&serde_json::json!({"input":[
@@ -26,6 +51,46 @@ fn request_preserves_readable_reasoning_and_item_order() {
 
     assert!(encode_request(&serde_json::json!({"input":[{"type":"reasoning", "summary":[{"type":"encrypted_content"}]}]}), "m").is_err());
 }
+
+#[test]
+fn request_normalizes_easy_input_messages_and_hoists_system() {
+    // This is the Responses shape emitted by clients using easy input: input
+    // messages omit `type`, and the system prompt is a string.
+    let (out, context) = encode_request(
+        &serde_json::json!({"input":[
+            {"role":"system", "content":"follow the project rules"},
+            {"role":"user", "content":[{"type":"input_text", "text":"first"}]},
+            {"role":"user", "content":[{"type":"input_text", "text":"second"}]}
+        ]}),
+        "m",
+    )
+    .unwrap();
+
+    assert_eq!(out["system"][0]["text"], "follow the project rules");
+    assert_eq!(out["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(out["messages"][0]["role"], "user");
+    assert_eq!(out["messages"][1]["content"][0]["text"], "second");
+    for pointer in [
+        "/input/0/type",
+        "/input/0/content",
+        "/input/0/role",
+        "/input/1/type",
+        "/input/2/type",
+    ] {
+        assert!(
+            context.normalized.iter().any(|entry| entry == pointer),
+            "missing normalized pointer {pointer}"
+        );
+    }
+}
+
+#[test]
+fn request_keeps_untyped_non_messages_rejected() {
+    let error =
+        encode_request(&serde_json::json!({"input":[{"content":"ambiguous"}]}), "m").unwrap_err();
+    assert!(error.json_pointers.iter().any(|p| p == "/input/0/type"));
+}
+
 #[test]
 fn response_maps_tool_input() {
     let c = ConversionContext::new("r", "m", false);

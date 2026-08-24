@@ -38,18 +38,18 @@ export function ChannelTabs() {
         )}
       </NavLink>
       <NavLink
-        to="/channels/auth"
-        className={({ isActive }) =>
-          `${base} -mb-px ${isActive ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"}`
-        }
-      >
-        <KeyRound size={15} />
-        Auth 账号
-        {authCount !== null && (
-          <span className="rounded-full bg-blue-50 px-1.5 py-px text-[10px] font-bold leading-4 text-blue-600 tabular-nums">
-            {authCount}
-          </span>
-        )}
+          to="/channels/auth"
+          className={({ isActive }) =>
+            `${base} -mb-px ${isActive ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"}`
+          }
+        >
+          <KeyRound size={15} />
+          Auth 账号
+          {authCount !== null && (
+            <span className="rounded-full bg-blue-50 px-1.5 py-px text-[10px] font-bold leading-4 text-blue-600 tabular-nums">
+              {authCount}
+            </span>
+          )}
       </NavLink>
     </nav>
   );

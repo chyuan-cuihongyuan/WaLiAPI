@@ -116,7 +116,7 @@ impl McpResponse {
 
 // ── MCP tool definitions ──────────────────────────────────────────
 
-fn get_tools() -> Vec<serde_json::Value> {
+pub(crate) fn get_tools() -> Vec<serde_json::Value> {
     vec![
         // ── Read-only tools (existing) ───────────────────────────
         serde_json::json!({

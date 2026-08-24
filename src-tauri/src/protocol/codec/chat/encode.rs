@@ -21,6 +21,8 @@ const SUPPORTED_TOP_LEVEL: &[&str] = &[
     "tools",
     "tool_choice",
     "reasoning_effort",
+    "store",
+    "stream_options",
 ];
 
 /// Encode a Chat Completions request into an Anthropic Messages request.
@@ -32,8 +34,13 @@ pub fn encode_chat_to_messages(
     model: &str,
 ) -> Result<(Value, ConversionContext), UnsupportedFeatures> {
     let mut out = Vec::new();
+    // Controls accepted below are intentionally omitted from the Messages
+    // request.  Keep them observable in the conversion report rather than
+    // silently dropping them.
+    let mut normalized = Vec::new();
     let mut messages_out: Vec<Value> = Vec::new();
     let mut system_parts: Vec<String> = Vec::new();
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     // ---- top-level feature scan ----
     if let Some(obj) = body.as_object() {
@@ -54,6 +61,28 @@ pub fn encode_chat_to_messages(
                 );
                 continue;
             }
+            match key.as_str() {
+                // `store:false` is the OpenAI default and has no remote side
+                // effect.  Anthropic Messages has no wire equivalent, so it is
+                // safely normalized away.  `store:true` must remain rejected:
+                // its persistence semantics cannot be preserved.
+                "store" if value.as_bool() == Some(false) => {
+                    normalized.push("/store".to_owned());
+                }
+                "store" => request::reject(
+                    &mut out,
+                    FeatureKind::UnsupportedField,
+                    "/store",
+                    "store must be false when converting Chat to Messages",
+                ),
+                // The Messages -> Chat stream decoder always emits observed
+                // usage in the terminal Chat chunk.  That preserves the one
+                // OpenAI Chat stream option we can represent.
+                "stream_options" => {
+                    normalize_stream_options(value, stream, &mut normalized, &mut out)
+                }
+                _ => {}
+            }
             // Unknown finish reason never applies to requests; here we only
             // reject structural fields that are present with an unsupported
             // shape.
@@ -64,7 +93,6 @@ pub fn encode_chat_to_messages(
     }
 
     // ---- messages ----
-    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let messages = body.get("messages").and_then(Value::as_array);
     let messages = match messages {
         Some(arr) => arr,
@@ -179,10 +207,18 @@ pub fn encode_chat_to_messages(
     if let Some(effort) = body.get("reasoning_effort").and_then(Value::as_str) {
         let e = effort.to_ascii_lowercase();
         match e.as_str() {
+            // Some upstream models always reason and reject
+            // `thinking.type = disabled`.  Use their least-expensive accepted
+            // effort instead of turning a valid Chat request into an upstream
+            // 1210 error.
             "none" | "off" => {
                 claude.insert(
                     "thinking".to_string(),
-                    serde_json::json!({"type": "disabled"}),
+                    serde_json::json!({"type": "adaptive"}),
+                );
+                claude.insert(
+                    "output_config".to_string(),
+                    serde_json::json!({"effort": "low"}),
                 );
             }
             "auto" => {
@@ -210,8 +246,70 @@ pub fn encode_chat_to_messages(
     }
 
     claude.insert("messages".to_string(), Value::Array(messages_out));
-    let context = ConversionContext::new(request_id, model.to_string(), stream);
+    let mut context = ConversionContext::new(request_id, model.to_string(), stream);
+    context.normalized = normalized;
     Ok((Value::Object(claude), context))
+}
+
+/// Validate the Chat streaming control supported by the Messages response
+/// decoder.  Any option other than `include_usage:true` would alter the Chat
+/// response contract and is therefore rejected instead of silently dropped.
+fn normalize_stream_options(
+    value: &Value,
+    stream: bool,
+    normalized: &mut Vec<String>,
+    out: &mut Vec<super::super::error::RejectedField>,
+) {
+    let Some(options) = value.as_object() else {
+        request::reject(
+            out,
+            FeatureKind::UnsupportedField,
+            "/stream_options",
+            "stream_options must be an object",
+        );
+        return;
+    };
+
+    for key in options.keys() {
+        if key != "include_usage" {
+            request::reject(
+                out,
+                FeatureKind::UnsupportedField,
+                format!("/stream_options/{key}"),
+                format!("stream_options field {key:?} is not supported by chat_to_messages_v1"),
+            );
+        }
+    }
+
+    match options.get("include_usage") {
+        Some(Value::Bool(true)) if stream => {
+            normalized.push("/stream_options".to_owned());
+        }
+        Some(Value::Bool(true)) if !stream => request::reject(
+            out,
+            FeatureKind::UnsupportedField,
+            "/stream_options",
+            "stream_options.include_usage:true requires stream:true",
+        ),
+        Some(Value::Bool(false)) => request::reject(
+            out,
+            FeatureKind::UnsupportedField,
+            "/stream_options/include_usage",
+            "stream_options.include_usage:false cannot be preserved by chat_to_messages_v1",
+        ),
+        Some(_) => request::reject(
+            out,
+            FeatureKind::UnsupportedField,
+            "/stream_options/include_usage",
+            "stream_options.include_usage must be true",
+        ),
+        None => request::reject(
+            out,
+            FeatureKind::UnsupportedField,
+            "/stream_options/include_usage",
+            "stream_options.include_usage:true is required by chat_to_messages_v1",
+        ),
+    }
 }
 /// Convert a Chat `tools` array entry to an Anthropic tool.
 fn convert_chat_tool_to_anthropic(
