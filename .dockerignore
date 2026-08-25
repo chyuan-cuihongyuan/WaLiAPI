@@ -3,7 +3,9 @@
 .idea
 .vscode
 node_modules
+**/node_modules
 dist
+**/dist
 src-tauri/target
 src-tauri/gen
 *.db
