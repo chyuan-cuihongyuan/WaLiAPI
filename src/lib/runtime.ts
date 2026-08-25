@@ -23,12 +23,6 @@ export function setWebAdminToken(token: string): void {
   else window.sessionStorage.removeItem(ADMIN_TOKEN_KEY);
 }
 
-interface WebInvokeResponse<T> {
-  ok: boolean;
-  result?: T;
-  error?: string;
-}
-
 /**
  * Unified command transport. Desktop builds keep using Tauri IPC; browser builds
  * send the exact same command name and argument object to the protected Axum
@@ -38,24 +32,36 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   if (isTauriRuntime()) return tauriInvoke<T>(command, args);
 
   const token = getWebAdminToken();
-  const response = await fetch("/api/admin/invoke", {
+  const response = await fetch("/admin/api/invoke", {
     method: "POST",
     credentials: "same-origin",
     headers: {
       "content-type": "application/json",
+      "x-requested-with": "XMLHttpRequest",
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ command, args }),
+    body: JSON.stringify({ cmd: command, args }),
   });
 
-  const payload = (await response.json().catch(() => null)) as WebInvokeResponse<T> | null;
   if (response.status === 401) {
     window.dispatchEvent(new CustomEvent(WEB_UNAUTHORIZED_EVENT));
   }
-  if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error || `管理 API 请求失败（HTTP ${response.status}）`);
+
+  const text = await response.text();
+  let data: unknown = null;
+  if (text) {
+    try { data = JSON.parse(text); } catch { /* ignore */ }
   }
-  return payload.result as T;
+
+  if (!response.ok) {
+    const errMsg =
+      data && typeof data === "object" && "error" in data
+        ? String((data as { error: unknown }).error)
+        : `管理 API 请求失败（HTTP ${response.status}）`;
+    throw new Error(errMsg);
+  }
+
+  return data as T;
 }
 
 export async function webFetch<T>(
@@ -97,7 +103,7 @@ export async function listen<T>(
   const token = getWebAdminToken();
   void (async () => {
     try {
-      const response = await fetch("/api/admin/events", {
+      const response = await fetch("/admin/api/events", {
         headers: token ? { authorization: `Bearer ${token}` } : {},
         credentials: "same-origin",
         signal: controller.signal,

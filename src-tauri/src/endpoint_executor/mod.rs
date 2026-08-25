@@ -575,11 +575,12 @@ fn first_sse_data_json(bytes: &[u8]) -> Option<Value> {
     None
 }
 
-fn client(timeout_secs: i64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs.max(1) as u64))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+fn client(timeout_secs: i64, is_stream: bool) -> reqwest::Client {
+    if is_stream {
+        crate::adaptor::streaming_client()
+    } else {
+        crate::adaptor::blocking_client(timeout_secs.max(1) as u64)
+    }
 }
 
 fn is_stream_body(body: &Value) -> bool {
@@ -723,9 +724,9 @@ async fn send_request(
     safe_headers: &[(String, String)],
     query: Option<&str>,
 ) -> Result<reqwest::Response, AttemptFailure> {
-    let c = client(channel.timeout_secs);
     let is_gemini = identity.legacy_executor_override.as_deref() == Some("gemini_native");
     let stream = is_stream_body(&attempt.encoded_body);
+    let c = client(channel.timeout_secs, stream);
 
     if is_gemini {
         let url = gemini_url(

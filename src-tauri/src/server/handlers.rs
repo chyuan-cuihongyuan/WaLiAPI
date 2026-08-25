@@ -1229,10 +1229,11 @@ async fn native_anthropic_request(
     };
     let url = native_anthropic_url(config, path, query);
     let (mapped_body, upstream_model) = mapped_anthropic_body(body, &config.model_mapping);
-    let mut request = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.timeout_secs))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    // count_tokens is always non-streaming; native Anthropic Messages streams
+    // through this same function, so use a streaming client (connect-timeout
+    // only) to avoid cutting off long SSE generations.
+    let client = crate::adaptor::streaming_client();
+    let mut request = client
         .post(url)
         .header("x-api-key", &config.api_key)
         .header("content-type", "application/json");
@@ -1267,6 +1268,7 @@ fn native_anthropic_url(
 async fn openai_messages_request(
     config: &crate::adaptor::ChannelConfig,
     body: &serde_json::Value,
+    is_stream: bool,
 ) -> Result<(reqwest::Response, Option<String>), reqwest::Error> {
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
     // T09 (design 11.4): sample the array mapping EXACTLY ONCE here, bake the
@@ -1282,10 +1284,12 @@ async fn openai_messages_request(
     if let (Some(um), Some(obj)) = (upstream_model.as_ref(), mapped_body.as_object_mut()) {
         obj.insert("model".into(), serde_json::Value::String(um.clone()));
     }
-    let resp = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.timeout_secs))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    let client = if is_stream {
+        crate::adaptor::streaming_client()
+    } else {
+        crate::adaptor::blocking_client(config.timeout_secs)
+    };
+    let resp = client
         .post(url)
         .bearer_auth(&config.api_key)
         .header("content-type", "application/json")
@@ -1922,7 +1926,7 @@ pub async fn handle_messages(
             break;
         }
         upstream_attempts += 1;
-        match openai_messages_request(&config, &openai_body).await {
+        match openai_messages_request(&config, &openai_body, stream).await {
             Ok((response, upstream_model)) if response.status().is_success() && stream => {
                 return openai_sse_response(
                     response,
@@ -3083,15 +3087,12 @@ pub async fn handle_embeddings(
 
     let mut last_error = None;
     let start = std::time::Instant::now();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            selected_channels
-                .first()
-                .map(|ch| ch.timeout_secs.max(1) as u64)
-                .unwrap_or(60),
-        ))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = crate::adaptor::blocking_client(
+        selected_channels
+            .first()
+            .map(|ch| ch.timeout_secs.max(1) as u64)
+            .unwrap_or(60),
+    );
 
     for (attempt, channel) in selected_channels.into_iter().take(max_attempts).enumerate() {
         let config = Dispatcher::channel_to_config(&channel);

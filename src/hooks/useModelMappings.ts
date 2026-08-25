@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 
 // ── types ────────────────────────────────────────────────────────────────
 export interface MappingPair {
@@ -39,13 +39,33 @@ export function pairsToMapping(pairs: MappingPair[]): ModelMapping {
 }
 
 // ── hook: useModelMappings ───────────────────────────────────────────────
+// `initial` is used for initialization and external re-initialization
+// (e.g. switching editing target). Internal edits are NOT round-tripped
+// through the parent to avoid wiping incomplete rows: `pairsToMapping`
+// silently drops pairs with empty from/to, which would cascade back via
+// `onChange → form update → value prop → useEffect` and destroy the user's
+// in-progress input.
+//
+// Solution: a `skipNextSync` ref. When the parent's `onChange` fires with
+// our serialized output, the resulting `initial` prop change is ignored
+// once. Genuine external changes (e.g. switching editing target) produce a
+// different object that wasn't preceded by a `markSynced` call, so they
+// still trigger re-initialization.
 export function useModelMappings(initial?: ModelMapping | null) {
   const [mappings, setMappings] = useState<MappingPair[]>(() => mappingToPairs(initial));
+  const skipNextSyncRef = useRef(false);
 
-  // Keep mappings in sync if the initial value changes (e.g. when switching editing target)
   useEffect(() => {
+    if (skipNextSyncRef.current) {
+      skipNextSyncRef.current = false;
+      return;
+    }
     setMappings(mappingToPairs(initial));
   }, [initial]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const markSynced = useCallback(() => {
+    skipNextSyncRef.current = true;
+  }, []);
 
   const addMapping = useCallback((defaultTo: string) => {
     setMappings(prev => [...prev, { from: "", to: defaultTo }]);
@@ -65,7 +85,7 @@ export function useModelMappings(initial?: ModelMapping | null) {
 
   const existingFroms = Array.from(new Set(mappings.map(m => m.from).filter(Boolean))).sort();
 
-  return { mappings, addMapping, removeMapping, removeByTarget, updateMapping, existingFroms };
+  return { mappings, addMapping, removeMapping, removeByTarget, updateMapping, existingFroms, markSynced };
 }
 
 // ── hook: useGlobalFroms ─────────────────────────────────────────────────

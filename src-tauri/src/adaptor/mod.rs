@@ -7,6 +7,30 @@ pub mod openai;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Connect-timeout (10 s) shared by all clients.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Build a reqwest client for **non-streaming** requests: the total request
+/// duration (connect + send + receive) is capped at `timeout_secs`.
+pub fn blocking_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Build a reqwest client for **streaming** (SSE) requests: only the TCP
+/// connection establishment is capped at [`CONNECT_TIMEOUT_SECS`]; the
+/// response body is allowed to stream indefinitely so long LLM generations
+/// are not cut off by a premature total-timeout.
+pub fn streaming_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelConfig {
     pub base_url: String,

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./runtime";
 import type {
   Channel, CreateChannelInput, UpdateChannelInput, TestChannelResult,
   ChannelKey,

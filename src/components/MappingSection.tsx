@@ -27,21 +27,23 @@ export function MappingSection({
   label = "模型映射",
   hint = "左侧填映射名（客户端请求用），右侧选实际模型",
 }: MappingSectionProps) {
-  const { mappings, addMapping, removeMapping, updateMapping, existingFroms } = useModelMappings(value);
+  const { mappings, addMapping, removeMapping, updateMapping, existingFroms, markSynced } = useModelMappings(value);
   const globalFroms = useGlobalFroms();
 
   // Merge global + current-session froms for suggestions
   const allFroms = Array.from(new Set([...globalFroms, ...existingFroms])).sort();
 
-  // Serialize and bubble up on every change
+  // Serialize and bubble up on every change.
   const serialized = pairsToMapping(mappings);
 
-  // Notify parent whenever mappings change
+  // Notify parent whenever mappings change.
   const lastValueRef = useRef<string>(JSON.stringify(serialized));
   useEffect(() => {
     const next = JSON.stringify(serialized);
     if (next !== lastValueRef.current) {
       lastValueRef.current = next;
+      // Mark as self-produced so useModelMappings ignores the round-trip.
+      markSynced();
       onChange(serialized);
     }
   }, [serialized]); // eslint-disable-line react-hooks/exhaustive-deps

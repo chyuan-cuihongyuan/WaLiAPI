@@ -1148,7 +1148,7 @@ export function ChannelForm({ editing, duplicate = false, onClose, onSaved }: {
               onChange={e => onTimeoutChange(Math.max(1, parseInt(e.target.value) || 60))}
               className="w-full rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm"
             />
-            <p className="mt-1.5 text-xs text-muted-foreground">该渠道请求的超时时间，默认 60 秒。流式请求也受此限制。超时后会自动重试下一个渠道</p>
+            <p className="mt-1.5 text-xs text-muted-foreground">非流式请求的超时时间（默认 60 秒）。流式请求仅限制连接建立时间，不受此限制。超时后会自动重试下一个渠道</p>
           </div>
 
           {localError && (
