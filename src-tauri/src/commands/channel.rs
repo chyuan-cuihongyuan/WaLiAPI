@@ -323,7 +323,7 @@ fn validate_create_receipt(
         input.native_base_url.as_deref(),
         input.native_endpoints.as_deref(),
         &input.models,
-        input.timeout_secs.unwrap_or(60),
+        input.timeout_secs.unwrap_or(300),
         &input.api_key,
         &input.channel_type,
         &input.base_url,
@@ -424,7 +424,7 @@ pub async fn sync_upstream_models_impl(
 ) -> Result<UpstreamModelsResult, String> {
     let repo = Repository::new(state.db.pool.clone());
     let api_key = channel_test::resolve_draft_api_key(&input, &repo).await?;
-    let timeout = input.timeout_secs.unwrap_or(60).max(1) as u64;
+    let timeout = input.timeout_secs.unwrap_or(300).max(1) as u64;
     crate::services::upstream_models::fetch_upstream_models(&input, &api_key, timeout).await
 }
 

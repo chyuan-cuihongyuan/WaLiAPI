@@ -271,7 +271,7 @@ impl Repository {
         .bind(input.weight.unwrap_or(1))
         .bind(&config)
         .bind(&model_mapping)
-        .bind(input.timeout_secs.unwrap_or(60))
+        .bind(input.timeout_secs.unwrap_or(300))
         .bind(&identity.protocol)
         .bind(&identity.provider)
         .bind(&identity.native_base_url)

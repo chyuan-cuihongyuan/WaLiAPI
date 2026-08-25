@@ -73,7 +73,7 @@ fn default_retry_times() -> i32 {
     2
 }
 fn default_security_enabled() -> bool {
-    true
+    false
 }
 fn default_security_mode() -> String {
     "audit".to_string()
@@ -93,9 +93,9 @@ impl Default for Settings {
             retry_times: default_retry_times(),
             security_enabled: default_security_enabled(),
             security_mode: default_security_mode(),
-            security_scan_unicode: default_true(),
-            security_scan_tools: default_true(),
-            security_scan_network: default_true(),
+            security_scan_unicode: default_false(),
+            security_scan_tools: default_false(),
+            security_scan_network: default_false(),
             security_scan_response: default_false(),
             security_redact_secrets: default_false(),
             security_block_on_critical: default_false(),
@@ -158,11 +158,11 @@ pub async fn get_settings(state: tauri::State<'_, Arc<AppState>>) -> Result<Sett
         auto_start: get_bool(store, "general.auto_start", false),
         retry_enabled: get_bool(store, "retry.enabled", true),
         retry_times: get_u64(store, "retry.times", 2) as i32,
-        security_enabled: get_bool(store, "security.enabled", true),
+        security_enabled: get_bool(store, "security.enabled", false),
         security_mode: get_str(store, "security.mode", "audit"),
-        security_scan_unicode: get_bool(store, "security.scan_unicode", true),
-        security_scan_tools: get_bool(store, "security.scan_tools", true),
-        security_scan_network: get_bool(store, "security.scan_network", true),
+        security_scan_unicode: get_bool(store, "security.scan_unicode", false),
+        security_scan_tools: get_bool(store, "security.scan_tools", false),
+        security_scan_network: get_bool(store, "security.scan_network", false),
         security_scan_response: get_bool(store, "security.scan_response", false),
         security_redact_secrets: get_bool(store, "security.redact_secrets", false),
         security_block_on_critical: get_bool(store, "security.block_on_critical", false),

@@ -284,7 +284,7 @@ pub async fn import_walicode_backup_impl(
                         weight: 1,
                         config: Value::Object(Default::default()),
                         model_mapping: Value::Object(Default::default()),
-                        timeout_secs: 60,
+                        timeout_secs: 300,
                         // identity_revision 0 + NULL identity => resolver infers on read
                         identity_revision: 0,
                         ..Default::default()
@@ -336,7 +336,7 @@ pub async fn import_walicode_backup_impl(
                     weight: 1,
                     config: Value::Object(Default::default()),
                     model_mapping: Value::Object(Default::default()),
-                    timeout_secs: 60,
+                    timeout_secs: 300,
                     identity_revision: 0,
                     ..Default::default()
                 };
@@ -482,7 +482,7 @@ pub fn exported_channel_to_import(ch: &ExportedChannel) -> ImportChannelInput {
         weight: ch.weight.unwrap_or(1),
         config,
         model_mapping,
-        timeout_secs: ch.timeout_secs.unwrap_or(60),
+        timeout_secs: ch.timeout_secs.unwrap_or(300),
         protocol,
         provider,
         native_base_url,
@@ -836,7 +836,7 @@ pub async fn import_scanned_sources_impl(
             weight: 1,
             config: Value::Object(Default::default()),
             model_mapping: Value::Object(Default::default()),
-            timeout_secs: 60,
+            timeout_secs: 300,
             identity_revision: 0,
             ..Default::default()
         };

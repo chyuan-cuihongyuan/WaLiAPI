@@ -153,7 +153,7 @@ function initForm(editing: Channel | null, duplicate = false): FormState {
       model_mapping: editing.model_mapping ?? {},
       priority: editing.priority ?? 0,
       weight: editing.weight ?? 1,
-      timeout_secs: editing.timeout_secs ?? 60,
+      timeout_secs: editing.timeout_secs ?? 300,
       preset_revision: editing.preset_revision ?? null,
       legacy_executor_override: editing.legacy_executor_override ?? undefined,
       extra_keys: duplicate
@@ -181,7 +181,7 @@ function initForm(editing: Channel | null, duplicate = false): FormState {
     model_mapping: {},
     priority: 0,
     weight: 1,
-    timeout_secs: 60,
+    timeout_secs: 300,
     preset_revision: null,
     extra_keys: [],
   };
@@ -1148,7 +1148,7 @@ export function ChannelForm({ editing, duplicate = false, onClose, onSaved }: {
               onChange={e => onTimeoutChange(Math.max(1, parseInt(e.target.value) || 60))}
               className="w-full rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm"
             />
-            <p className="mt-1.5 text-xs text-muted-foreground">非流式请求的超时时间（默认 60 秒）。流式请求仅限制连接建立时间，不受此限制。超时后会自动重试下一个渠道</p>
+            <p className="mt-1.5 text-xs text-muted-foreground">非流式请求的超时时间（默认 300 秒）。流式请求仅限制连接建立时间，不受此限制。超时后会自动重试下一个渠道</p>
           </div>
 
           {localError && (

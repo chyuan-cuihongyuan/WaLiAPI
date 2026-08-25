@@ -117,13 +117,13 @@ pub struct SecuritySettings {
 impl Default for SecuritySettings {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             mode: "audit".to_string(),
-            scan_request: true,
+            scan_request: false,
             scan_response: false,
-            scan_unicode: true,
-            scan_tools: true,
-            scan_network: true,
+            scan_unicode: false,
+            scan_tools: false,
+            scan_network: false,
             redact_secrets: false,
             block_on_critical: false,
             max_scan_bytes: 1024 * 1024,
