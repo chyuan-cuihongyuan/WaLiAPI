@@ -70,9 +70,30 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    // 获取可执行文件所在目录
+    let exe_dir = std::env::current_exe()
+        .map(|path| path.parent().map(|p| p.to_path_buf()).unwrap_or(std::path::PathBuf::from(".")))
+        .unwrap_or(std::path::PathBuf::from("."));
+
+    // 创建日志目录
+    let log_dir = exe_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+
+    // 按天滚动日志：文件名前缀 waliapi.log（如 waliapi.log.2026-08-25），最多保留 7 个文件
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("waliapi.log")
+        .max_log_files(7)
+        .build(&log_dir)
+        .ok();
+
+    // 统一输出到文件；构建失败时回退到标准输出
+    let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO);
+    if let Some(file_appender) = file_appender {
+        subscriber.with_writer(file_appender).init();
+    } else {
+        subscriber.init();
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

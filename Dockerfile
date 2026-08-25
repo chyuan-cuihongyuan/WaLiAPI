@@ -4,15 +4,21 @@ ARG NODE_IMAGE=node:22-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 ARG DEBIAN_MIRROR=http://deb.debian.org/debian
 ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
+ARG RUSTUP_MIRROR=https://rsproxy.cn
+ARG CARGO_REGISTRY_MIRROR=sparse+https://rsproxy.cn/index/
 
 FROM ${NODE_IMAGE} AS builder
 
 ARG DEBIAN_MIRROR
 ARG DEBIAN_SECURITY_MIRROR
+ARG RUSTUP_MIRROR
+ARG CARGO_REGISTRY_MIRROR
 
 ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
+    RUSTUP_DIST_SERVER=${RUSTUP_MIRROR} \
+    RUSTUP_UPDATE_ROOT=${RUSTUP_MIRROR}/rustup \
     PATH=/usr/local/cargo/bin:$PATH
 
 # libwebkit2gtk-4.1-dev 等仅为编译期依赖（tauri/wry 的 sys crate 需要 pkg-config 探测），
@@ -33,7 +39,9 @@ RUN sed -i "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g;
         xdg-utils \
     && rm -rf /var/lib/apt/lists/* \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --no-modify-path
+        | sh -s -- -y --no-modify-path \
+    && mkdir -p ${CARGO_HOME} \
+    && printf '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "%s"\n' "${CARGO_REGISTRY_MIRROR}" > ${CARGO_HOME}/config.toml
 
 WORKDIR /app
 RUN corepack enable
