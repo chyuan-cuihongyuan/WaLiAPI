@@ -626,6 +626,29 @@ fn refuse_device_code_login(kind: &ProviderKind) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate and normalize a Codex OAuth loopback callback URL.
+///
+/// Only `localhost`/`127.0.0.1`/`::1` hosts on ports `1455`/`1457` with the exact
+/// `/auth/callback?code|error=&state=` shape are accepted. This blocks
+/// open-redirect / SSRF via a malicious callback URL before any forward.
+fn normalize_codex_callback_url(callback_url: &str) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(callback_url.trim())
+        .map_err(|_| "Invalid Codex callback URL".to_owned())?;
+    let valid_host = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let valid_port = matches!(url.port(), Some(1455 | 1457));
+    let has_callback = url.path() == "/auth/callback"
+        && url.query_pairs().any(|(key, _)| key == "state")
+        && url
+            .query_pairs()
+            .any(|(key, _)| key == "code" || key == "error");
+    if !valid_host || !valid_port || !has_callback {
+        return Err("Callback must be the localhost Codex OAuth redirect URL".to_owned());
+    }
+    url.set_host(Some("127.0.0.1"))
+        .map_err(|_| "Invalid Codex callback host".to_owned())?;
+    Ok(url)
+}
+
 #[tauri::command]
 pub async fn auth_login(
     provider: String,
@@ -1271,5 +1294,26 @@ mod tests {
         // Repeated cancel after a terminal state returns the same tombstone.
         let cancelled = sessions.cancel(&id).await.unwrap();
         assert_eq!(cancelled.state, first.state);
+    }
+
+    #[test]
+    fn remote_codex_callback_forwarder_only_accepts_registered_loopback_targets() {
+        let url = normalize_codex_callback_url(
+            "http://localhost:1455/auth/callback?code=secret-code&state=csrf-state",
+        )
+        .unwrap();
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port(), Some(1455));
+        assert!(
+            normalize_codex_callback_url("https://evil.example/auth/callback?code=x&state=y")
+                .is_err()
+        );
+        assert!(
+            normalize_codex_callback_url("http://localhost:9999/auth/callback?code=x&state=y")
+                .is_err()
+        );
+        assert!(
+            normalize_codex_callback_url("http://localhost:1455/other?code=x&state=y").is_err()
+        );
     }
 }

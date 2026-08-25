@@ -23,6 +23,12 @@ pub struct DashboardStatsDto {
 pub async fn get_dashboard_stats(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<DashboardStatsDto, String> {
+    get_dashboard_stats_impl(&*state).await
+}
+
+pub async fn get_dashboard_stats_impl(
+    state: &std::sync::Arc<AppState>,
+) -> Result<DashboardStatsDto, String> {
     let repo = Repository::new(state.db.pool.clone());
     let s = repo
         .get_dashboard_stats()

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { logApi } from "../lib/api";
 import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
+import { writeClipboard } from "../lib/runtime";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
   Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, Shield, Timer, Coins,
@@ -985,7 +986,7 @@ function LogDetail({ log }: { log: RequestLog }) {
               <button
                 onClick={async () => {
                   try {
-                    await navigator.clipboard.writeText(pretty);
+                    await writeClipboard(pretty);
                     setCopiedJsonKey('request-messages');
                     setTimeout(() => setCopiedJsonKey(null), 1500);
                   } catch {}
@@ -1044,7 +1045,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                             <button
                                onClick={async () => {
                                  try {
-                                   await navigator.clipboard.writeText(fullContent);
+                                   await writeClipboard(fullContent);
                                    setCopyingMessageKey(messageKey);
                                    setTimeout(() => setCopyingMessageKey(null), 1000);
                                  } catch {
@@ -1146,7 +1147,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                             onClick={async () => {
                                               setCopyingTool(toolKey);
                                               try {
-                                                await navigator.clipboard.writeText(fullJson);
+                                                await writeClipboard(fullJson);
                                                 setTimeout(() => setCopyingTool(null), 1000);
                                               } catch {
                                                 setCopyingTool(null);
@@ -1219,7 +1220,7 @@ function LogDetail({ log }: { log: RequestLog }) {
               <button
                 onClick={async () => {
                   try {
-                    await navigator.clipboard.writeText(pretty);
+                    await writeClipboard(pretty);
                     setCopiedJsonKey('request-body');
                     setTimeout(() => setCopiedJsonKey(null), 1500);
                   } catch {}
@@ -1265,7 +1266,7 @@ function LogDetail({ log }: { log: RequestLog }) {
               <button
                 onClick={async () => {
                   try {
-                    await navigator.clipboard.writeText(prettyChoices);
+                    await writeClipboard(prettyChoices);
                     setCopiedJsonKey('response-choices');
                     setTimeout(() => setCopiedJsonKey(null), 1500);
                   } catch {}
@@ -1354,7 +1355,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                          .replace(/\\r/g, '\r')
                                          .replace(/\\t/g, '\t');
                                        processed = processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                                       await navigator.clipboard.writeText(processed);
+                                       await writeClipboard(processed);
                                        setCopyingThinkingKey(thinkingKey);
                                        setTimeout(() => setCopyingThinkingKey(null), 1000);
                                      } catch {
@@ -1430,7 +1431,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                       .replace(/\\r/g, '\r')
                                       .replace(/\\t/g, '\t');
                                     processed = processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                                    await navigator.clipboard.writeText(processed);
+                                    await writeClipboard(processed);
                                     setCopyingContentKey(contentKey);
                                     setTimeout(() => setCopyingContentKey(null), 1000);
                                   } catch {
@@ -1521,7 +1522,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                             onClick={async () => {
                                               setCopyingTool(toolKey);
                                               try {
-                                                await navigator.clipboard.writeText(fullJson);
+                                                await writeClipboard(fullJson);
                                                 setTimeout(() => setCopyingTool(null), 1000);
                                               } catch {
                                                 setCopyingTool(null);
@@ -1593,7 +1594,7 @@ function LogDetail({ log }: { log: RequestLog }) {
               <button
                 onClick={async () => {
                   try {
-                    await navigator.clipboard.writeText(prettyChoices);
+                    await writeClipboard(prettyChoices);
                     setCopiedJsonKey('response-body');
                     setTimeout(() => setCopiedJsonKey(null), 1500);
                   } catch {}

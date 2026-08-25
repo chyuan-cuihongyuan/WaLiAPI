@@ -22,6 +22,7 @@ use crate::db::repository::Repository;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
 // ─── Export types ───────────────────────────────────────────────────────────
 
@@ -205,6 +206,10 @@ pub struct ImportResult {
 pub async fn export_channels(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
+    export_channels_impl(state.inner()).await
+}
+
+pub async fn export_channels_impl(state: &std::sync::Arc<AppState>) -> Result<String, String> {
     let repo = Repository::new(state.db.pool.clone());
     let channels = repo.get_all_channels().await.map_err(|e| e.to_string())?;
 
@@ -231,6 +236,13 @@ pub async fn export_channels(
 pub async fn import_walicode_backup(
     content: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ImportResult, String> {
+    import_walicode_backup_impl(&content, state.inner()).await
+}
+
+pub async fn import_walicode_backup_impl(
+    content: &str,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ImportResult, String> {
     let backup: WalicodeBackup =
         serde_json::from_str(&content).map_err(|e| format!("解析 walicode 备份文件失败: {}", e))?;
@@ -357,6 +369,13 @@ pub async fn import_walicode_backup(
 pub async fn import_waliapi_export(
     content: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ImportResult, String> {
+    import_waliapi_export_impl(&content, state.inner()).await
+}
+
+pub async fn import_waliapi_export_impl(
+    content: &str,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ImportResult, String> {
     let export: WaliapiExport =
         serde_json::from_str(&content).map_err(|e| format!("解析 waliapi 导出文件失败: {}", e))?;
@@ -539,7 +558,12 @@ fn is_known_endpoint(s: &str) -> bool {
 /// Scan local AI CLI tool configs (Claude Code, Codex, Cursor, etc.)
 #[tauri::command]
 pub async fn scan_local_ai_configs() -> Result<ScanResult, String> {
-    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
+    let home = std::env::var("WALIAPI_TARGET_HOME")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .ok_or("无法获取用户主目录")?;
     let mut sources: Vec<ScannedSource> = Vec::new();
 
     // 1. Claude Code: ~/.claude/settings.json
@@ -686,12 +710,25 @@ pub async fn scan_local_ai_configs() -> Result<ScanResult, String> {
     }
 
     // 3. Cursor: ~/.cursor/config or ~/Library/Application Support/Cursor/User/settings.json
-    let cursor_settings = home
-        .join("Library")
-        .join("Application Support")
-        .join("Cursor")
-        .join("User")
-        .join("settings.json");
+    let cursor_settings = [
+        home.join(".config")
+            .join("Cursor")
+            .join("User")
+            .join("settings.json"),
+        home.join("Library")
+            .join("Application Support")
+            .join("Cursor")
+            .join("User")
+            .join("settings.json"),
+        home.join("AppData")
+            .join("Roaming")
+            .join("Cursor")
+            .join("User")
+            .join("settings.json"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .unwrap_or_else(|| home.join(".config/Cursor/User/settings.json"));
     if cursor_settings.exists() {
         if let Ok(content) = std::fs::read_to_string(&cursor_settings) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -758,6 +795,13 @@ pub async fn scan_local_ai_configs() -> Result<ScanResult, String> {
 pub async fn import_scanned_sources(
     sources: Vec<ScannedSource>,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ImportResult, String> {
+    import_scanned_sources_impl(sources, state.inner()).await
+}
+
+pub async fn import_scanned_sources_impl(
+    sources: Vec<ScannedSource>,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ImportResult, String> {
     let repo = Repository::new(state.db.pool.clone());
     let existing = repo.get_all_channels().await.map_err(|e| e.to_string())?;
