@@ -1,9 +1,10 @@
 [package]
 name = "waliapi"
-version = "0.2.1"
+version = "0.2.2"
 description = "WaLiAPI - Local LLM API Gateway"
 authors = ["xiaofuge"]
 edition = "2021"
+default-run = "waliapi"
 
 [lib]
 name = "waliapi_lib"
@@ -52,6 +53,7 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+tracing-appender = "0.2"
 rand = "0.9"
 dirs = "5"
 async-trait = "0.1"
