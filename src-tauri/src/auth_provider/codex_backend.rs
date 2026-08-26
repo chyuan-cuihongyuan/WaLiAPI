@@ -12,7 +12,8 @@ use reqwest::{header, StatusCode};
 use serde_json::Value;
 
 use super::{
-    codex_login::CodexLogin, LoginResult, LoginRuntime, Provider, ProviderError, ProviderKind,
+    codex_login::{AuthFileFormat, CodexLogin},
+    LoginResult, LoginRuntime, MultiImportResult, Provider, ProviderError, ProviderKind,
     ProviderLoginContext, ProviderModels, ProviderPayload, ProviderRequest, RefreshedPayload,
 };
 use crate::db::models::{AuthAccount, ModelState, QuotaLimit, QuotaState, QuotaWindow};
@@ -157,6 +158,39 @@ impl Provider for CodexProvider {
 
     async fn import(&self, bytes: &[u8]) -> Result<LoginResult, ProviderError> {
         self.login.import_auth_json(bytes).await
+    }
+
+    async fn import_all(
+        &self,
+        bytes: &[u8],
+        format: Option<&str>,
+    ) -> Result<MultiImportResult, ProviderError> {
+        let format = match format {
+            Some(name) => AuthFileFormat::from_name(name)?,
+            None => AuthFileFormat::Codex,
+        };
+        if format != AuthFileFormat::Sub2api {
+            let result = self
+                .login
+                .import_auth_json_with_format(bytes, format)
+                .await?;
+            return Ok(MultiImportResult {
+                results: vec![result],
+                skipped: 0,
+            });
+        }
+        let (accounts, total) = CodexLogin::parse_sub2api_accounts(bytes)?;
+        let mut skipped = total - accounts.len();
+        let mut results = Vec::new();
+        for account in accounts {
+            // One unusable account (e.g. expired token whose refresh fails)
+            // must not sink the rest of the file; it counts as skipped.
+            match self.login.import_codex_account(account).await {
+                Ok(result) => results.push(result),
+                Err(_) => skipped += 1,
+            }
+        }
+        Ok(MultiImportResult { skipped, results })
     }
 
     async fn refresh(&self, payload: &ProviderPayload) -> Result<RefreshedPayload, ProviderError> {
@@ -388,6 +422,28 @@ pub fn quota_from_headers(
     Some(quota)
 }
 
+/// One `/wham/usage` window object -> a [`QuotaWindow`] (seconds -> minutes,
+/// epoch -> RFC3339), or `None` when the field is absent or carries no data.
+fn usage_window(value: Option<&Value>) -> Option<QuotaWindow> {
+    let value = value?;
+    let used_percent = value.get("used_percent")?.as_f64()?;
+    let window_minutes = value.get("limit_window_seconds")?.as_i64()? / 60;
+    let reset_at = value
+        .get("reset_at")
+        .and_then(Value::as_i64)
+        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
+        .map(|time| time.to_rfc3339());
+    // Same `has_data` rule as the header parser: an all-empty window must not
+    // manufacture an empty bar.
+    let has_data =
+        used_percent != 0.0 || window_minutes != 0 || reset_at.is_some();
+    has_data.then(|| QuotaWindow {
+        used_percent: Some(used_percent),
+        window_minutes: Some(window_minutes),
+        reset_at,
+    })
+}
+
 /// Parse the dedicated `GET /backend-api/wham/usage` payload into a
 /// [`QuotaState`].  Unlike response headers (minutes / RFC3339), this endpoint
 /// reports `limit_window_seconds` in seconds and `reset_at` as a UNIX epoch
@@ -395,42 +451,46 @@ pub fn quota_from_headers(
 /// previously persisted (a failed probe never wipes known state).
 pub fn quota_from_usage_payload(payload: &Value) -> Option<QuotaState> {
     let rate_limit = payload.get("rate_limit")?;
-    let primary_window = rate_limit.get("primary_window")?;
-    let used_percent = primary_window.get("used_percent")?.as_f64()?;
-    let window_seconds = primary_window.get("limit_window_seconds")?.as_i64()?;
-    let reset_at = primary_window
-        .get("reset_at")
-        .and_then(Value::as_i64)
-        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
-        .map(|time| time.to_rfc3339());
+    let primary = usage_window(rate_limit.get("primary_window"))?;
 
-    // Only carry the primary window.  `secondary_window` is null on both
-    // current plans, and dropping it keeps the card from rendering an empty
-    // secondary bar (same rule as the header parser's `has_data`).
+    // Both windows are kept when present: plus/pro plans now report a 5h
+    // primary and a weekly secondary, and the card renders them together.
+    // Each window independently passes through the `has_data` filter above.
     let limit = QuotaLimit {
         limit_id: "codex".to_owned(),
         limit_name: None,
-        primary: Some(QuotaWindow {
-            used_percent: Some(used_percent),
-            window_minutes: Some(window_seconds / 60),
-            reset_at: reset_at.clone(),
-        }),
-        secondary: None,
+        primary: Some(primary),
+        secondary: usage_window(rate_limit.get("secondary_window")),
         credits: None,
     };
-    let has_data = limit.primary.as_ref().is_some_and(|window| {
-        window.used_percent.is_some_and(|used| used != 0.0)
-            || window.window_minutes.is_some_and(|minutes| minutes != 0)
-            || window.reset_at.is_some()
-    });
-    if !has_data {
+    if limit.primary.is_none() && limit.secondary.is_none() {
         return None;
     }
 
-    let exhausted = used_percent >= 100.0;
-    let exceeded =
-        rate_limit.get("limit_reached").and_then(Value::as_bool) == Some(true) || exhausted;
-    let next_recover_at = if exceeded { reset_at.clone() } else { None };
+    let exceeded = rate_limit.get("limit_reached").and_then(Value::as_bool) == Some(true)
+        || [Some(&limit.primary), Some(&limit.secondary)]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|window| window.used_percent.is_some_and(|used| used >= 100.0));
+    let next_recover_at = if exceeded {
+        // Earliest exhausted-window reset; when none parses (e.g.
+        // limit_reached with a null reset), fall back to the soonest known
+        // window reset so routing still gets a retry hint.
+        quota_exhausted_reset(&limit)
+            .map(|time| time.to_rfc3339())
+            .or_else(|| {
+                [limit.primary.as_ref(), limit.secondary.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|window| window.reset_at.as_deref())
+                    .filter_map(|value| DateTime::parse_from_rfc3339(value).ok())
+                    .min()
+                    .map(|time| time.to_rfc3339())
+            })
+    } else {
+        None
+    };
     Some(QuotaState {
         version: 1,
         exceeded,
@@ -439,6 +499,18 @@ pub fn quota_from_usage_payload(payload: &Value) -> Option<QuotaState> {
         backoff_level: 0,
         limits: vec![limit],
     })
+}
+
+/// Earliest RFC3339 reset among a limit's windows that are actually exhausted.
+fn quota_exhausted_reset(limit: &QuotaLimit) -> Option<DateTime<Utc>> {
+    [limit.primary.as_ref(), limit.secondary.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter(|window| window.used_percent.is_some_and(|used| used >= 100.0))
+        .filter_map(|window| window.reset_at.as_deref())
+        .filter_map(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| time.with_timezone(&Utc))
+        .min()
 }
 
 fn retry_after(headers: &header::HeaderMap, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -1228,22 +1300,28 @@ mod tests {
     }
 
     #[test]
-    fn usage_payload_parses_plus_weekly_window() {
-        // Real `/wham/usage` shape for a plus account: 604800s = 7d weekly
-        // window, UNIX-epoch reset.  The parser normalizes seconds -> minutes
-        // and epoch -> RFC3339.
+    fn usage_payload_parses_5h_and_weekly_windows() {
+        // Real `/wham/usage` shape for a plus account: a 5h primary window and
+        // a 7d (604800s) weekly secondary window, UNIX-epoch resets.  The
+        // parser normalizes seconds -> minutes and epoch -> RFC3339, keeping
+        // both windows so the card can render the two limits together.
         let payload = json!({
             "plan_type": "plus",
             "rate_limit": {
                 "allowed": true,
                 "limit_reached": false,
                 "primary_window": {
+                    "used_percent": 12,
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 12345,
+                    "reset_at": 1786837084
+                },
+                "secondary_window": {
                     "used_percent": 58,
                     "limit_window_seconds": 604800,
                     "reset_after_seconds": 574587,
                     "reset_at": 1786867084
-                },
-                "secondary_window": null
+                }
             },
             "credits": { "has_credits": true, "unlimited": false, "balance": "1908.09" },
             "spend_control": { "reached": false, "individual_limit": null }
@@ -1255,10 +1333,13 @@ mod tests {
         let limit = &quota.limits[0];
         assert_eq!(limit.limit_id, "codex");
         let primary = limit.primary.as_ref().unwrap();
-        assert_eq!(primary.window_minutes, Some(10_080)); // 604800 / 60
-        assert_eq!(primary.used_percent, Some(58.0));
+        assert_eq!(primary.window_minutes, Some(300)); // 18000 / 60 = 5h
+        assert_eq!(primary.used_percent, Some(12.0));
+        let secondary = limit.secondary.as_ref().unwrap();
+        assert_eq!(secondary.window_minutes, Some(10_080)); // 604800 / 60 = 7d
+        assert_eq!(secondary.used_percent, Some(58.0));
         // 1786867084 epoch -> 2026-08-16T...Z
-        assert!(primary
+        assert!(secondary
             .reset_at
             .as_deref()
             .unwrap()

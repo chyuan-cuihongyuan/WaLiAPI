@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { CircleAlert, KeyRound, Loader2, Upload, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, CircleAlert, FileJson, KeyRound, Loader2, Upload, X } from "lucide-react";
 import { authApi } from "../lib/api";
 import { downloadTextFile, isWebRuntime, pickFileAsText } from "../lib/web";
 import type { AuthAccount, AuthMutationResult, AuthProviderInfo } from "../types";
@@ -12,6 +12,41 @@ import { ChannelTabs } from "../components/layout/ChannelTabs";
 
 type Confirmation = { kind: "delete"; account: AuthAccount };
 
+/// 与后端 `AuthFileFormat` 对齐的导入格式。sub2api 为多账号批量导入。
+type ImportFormat = "codex" | "sub2api" | "cpa";
+
+const IMPORT_OPTIONS: { format: ImportFormat; label: string; description: string }[] = [
+  { format: "codex", label: "Codex auth.json", description: "~/.codex/auth.json（单账号）" },
+  { format: "sub2api", label: "sub2api.json", description: "批量导入其中 openai 平台账号" },
+  { format: "cpa", label: "cpa.json", description: "CLIProxyAPI 认证文件（type: codex）" },
+];
+
+function optionLabel(format: ImportFormat) {
+  return IMPORT_OPTIONS.find((option) => option.format === format)?.label ?? "Codex auth.json";
+}
+
+/// 「导入」触发按钮 + 三格式下拉菜单。头部与空状态卡片共用，
+/// 各自持有打开状态并在点击外部时收起。
+function ImportDropdown({ busy, onSelect }: { busy: boolean; onSelect: (format: ImportFormat) => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("touchstart", onPointerDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("touchstart", onPointerDown);
+    };
+  }, [open]);
+  return <div className="relative" ref={menuRef}><button onClick={() => setOpen((value) => !value)} disabled={busy} aria-haspopup="menu" aria-expanded={open} className="action-secondary">{busy ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}导入<ChevronDown size={14} className="opacity-60" /></button>{open && <div role="menu" className="absolute right-0 top-full z-40 mt-2 w-72 overflow-hidden rounded-2xl border border-border bg-card shadow-xl">{IMPORT_OPTIONS.map((option) => <button key={option.format} role="menuitem" onClick={() => { setOpen(false); onSelect(option.format); }} className="flex w-full flex-col items-start gap-0.5 px-4 py-3 text-left hover:bg-muted disabled:opacity-50"><span className="flex items-center gap-2 text-sm font-medium"><FileJson size={15} className="text-muted-foreground" />{option.label}</span><span className="text-xs text-muted-foreground">{option.description}</span></button>)}</div>}</div>;
+}
+
 function exportFileName(account: AuthAccount) {
   const base = (account.label || account.email || account.account_id || "codex-auth")
     .replace(/[\\/:*?"<>|]/g, "-")
@@ -19,10 +54,10 @@ function exportFileName(account: AuthAccount) {
   return `${base || "codex-auth"}.json`;
 }
 
-function EmptyAccountSlot({ provider, onLogin, onImport, busy }: { provider: AuthProviderInfo; onLogin: () => void; onImport: () => void; busy: boolean }) {
+function EmptyAccountSlot({ provider, onLogin, onSelectImportFormat, busy }: { provider: AuthProviderInfo; onLogin: () => void; onSelectImportFormat: (format: ImportFormat) => void; busy: boolean }) {
   const isKimi = provider.loginMode === "device_code";
   const displayName = provider.displayName;
-  return <section className="flex min-h-80 flex-col items-center justify-center rounded-[24px] border border-dashed border-border bg-card/50 p-6 text-center"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/10 text-xl font-bold text-success">{isKimi ? "☾" : "⌘"}</div><h2 className="mt-4 font-semibold">＋ 登录 {displayName} 账号</h2><p className="mt-2 max-w-xs text-sm leading-6 text-muted-foreground">{isKimi ? "设备码授权：在浏览器确认后返回。" : "浏览器 OAuth 登录（PKCE），或导入 Codex auth.json / Sub2API 导出文件"}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onLogin} disabled={busy} className="action-primary"><KeyRound size={16} />登录</button>{!isKimi && <button onClick={onImport} disabled={busy} className="action-secondary"><Upload size={16} />导入</button>}</div></section>;
+  return <section className="flex min-h-80 flex-col items-center justify-center rounded-[24px] border border-dashed border-border bg-card/50 p-6 text-center"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/10 text-xl font-bold text-success">{isKimi ? "☾" : "⌘"}</div><h2 className="mt-4 font-semibold">＋ 登录 {displayName} 账号</h2><p className="mt-2 max-w-xs text-sm leading-6 text-muted-foreground">{isKimi ? "设备码授权：在浏览器确认后返回。" : "浏览器 OAuth 登录（PKCE）或从本机 ~/.codex/auth.json 导入"}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onLogin} disabled={busy} className="action-primary"><KeyRound size={16} />登录</button>{!isKimi && <ImportDropdown busy={busy} onSelect={onSelectImportFormat} />}</div></section>;
 }
 
 function ConfirmationDialog({ confirmation, pending, onCancel, onConfirm }: { confirmation: Confirmation; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
@@ -89,18 +124,18 @@ export function AuthChannelsPage() {
     setNotice(result.warning ? { kind: "warning", message: "账号已保存但暂不参与路由：模型同步失败。" } : { kind: "success", message: `${displayName} 账号登录完成。` });
     void load();
   };
-  const importAuth = async () => {
+  const importAuth = async (format: ImportFormat) => {
     // Web 版：浏览器文件选择器读取内容后按内容导入
     if (isWebRuntime()) {
       const content = await pickFileAsText(".json,application/json");
       if (content === null) return; // 用户取消 → 静默 no-op
-      setPendingId("import"); setNotice({ kind: "success", message: "正在导入账号文件 …" });
+      setPendingId("import"); setNotice({ kind: "success", message: "正在导入 …" });
       try {
-        const result = await authApi.loginImportContent("codex", content);
-        setNotice(result.warning ? { kind: "warning", message: `${result.notice ? `${result.notice} ` : ""}账号已保存但暂不参与路由：模型同步失败。` } : { kind: "success", message: result.notice || "已导入账号。" });
+        const result = await authApi.loginImportContent("codex", content, format);
+        setNotice(result.warning ? { kind: "warning", message: "账号已保存但暂不参与路由：模型同步失败。" } : { kind: "success", message: result.notice || "已导入账号。" });
         await load();
       } catch (_) {
-        setNotice({ kind: "error", message: "导入失败，请确认 Codex auth.json 或 Sub2API 导出文件字段完整。" });
+        setNotice({ kind: "error", message: `导入失败，请确认所选文件是有效的${optionLabel(format)}。` });
       } finally { setPendingId(null); }
       return;
     }
@@ -108,14 +143,17 @@ export function AuthChannelsPage() {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       let defaultPath: string | undefined;
-      try {
-        defaultPath = await authApi.defaultImportPath();
-      } catch {
-        // 默认路径解析失败(无 home)时回退为不带 defaultPath 弹框,仍可手动选文件
+      if (format === "codex") {
+        try {
+          defaultPath = await authApi.defaultImportPath();
+        } catch {
+          // 默认路径解析失败(无 home)时回退为不带 defaultPath 弹框,仍可手动选文件
+        }
       }
+      const fileLabel = optionLabel(format);
       path = await open({
-        title: "选择 Codex auth.json 或 Sub2API 导出文件",
-        filters: [{ name: "账号导出 JSON", extensions: ["json"] }],
+        title: format === "codex" ? "选择 Codex auth.json 文件" : `选择 ${fileLabel} 文件`,
+        filters: [{ name: fileLabel, extensions: ["json"] }],
         multiple: false,
         defaultPath,
       });
@@ -126,11 +164,11 @@ export function AuthChannelsPage() {
     const label = path; // 实际选中路径
     setPendingId("import"); setNotice({ kind: "success", message: `正在读取 ${label} …` });
     try {
-      const result = await authApi.loginImport("codex", path);
+      const result = await authApi.loginImport("codex", path, format);
       setNotice(result.warning ? { kind: "warning", message: "账号已保存但暂不参与路由：模型同步失败。" } : { kind: "success", message: result.notice || `已从 ${label} 导入账号。` });
       await load();
     } catch (_) {
-      setNotice({ kind: "error", message: "导入失败，请确认 Codex auth.json 或 Sub2API 导出文件可读且字段完整。" });
+      setNotice({ kind: "error", message: `导入失败，请确认所选文件是有效的${optionLabel(format)}。` });
     } finally { setPendingId(null); }
   };
   const confirmAction = async () => {
@@ -189,11 +227,11 @@ export function AuthChannelsPage() {
     }
   };
 
-  return <div className="page-shell space-y-3"><div className="page-header sticky top-0 z-30 -mx-7 -mt-7 mb-2 flex-col bg-card/90 px-7 pt-3 backdrop-blur-md"><div className="flex w-full items-start justify-between gap-4 pb-1.5"><div><h1 className="page-title">渠道管理</h1><p className="page-subtitle mt-0.5">登录各厂商订阅账号，作为上游路由候选</p></div><div className="flex items-center gap-2"><button onClick={() => { setReloginAccount(null); setShowLogin(true); }} disabled={pendingId === "import"} className="action-primary"><KeyRound size={16} />登录账号</button>{activeProvider.supportsImport && <button onClick={importAuth} disabled={pendingId === "import"} className="action-secondary">{pendingId === "import" ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}导入账号文件（codex、sub2api）</button>}</div></div><ChannelTabs /></div>
+  return <div className="page-shell space-y-3"><div className="page-header sticky top-0 z-30 -mx-7 -mt-7 mb-2 flex-col bg-card/90 px-7 pt-3 backdrop-blur-md"><div className="flex w-full items-start justify-between gap-4 pb-1.5"><div><h1 className="page-title">渠道管理</h1><p className="page-subtitle mt-0.5">登录各厂商订阅账号，作为上游路由候选</p></div><div className="flex items-center gap-2"><button onClick={() => { setReloginAccount(null); setShowLogin(true); }} disabled={pendingId === "import"} className="action-primary"><KeyRound size={16} />登录账号</button>{activeProvider.supportsImport && <ImportDropdown busy={pendingId === "import"} onSelect={(format) => void importAuth(format)} />}</div></div><ChannelTabs /></div>
     {notice && <div role="status" className={`flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm ${notice.kind === "error" ? "border-destructive/25 bg-destructive/10 text-destructive" : notice.kind === "warning" ? "border-warning/25 bg-warning/10 text-warning" : "border-success/25 bg-success/10 text-success"}`}><span>{notice.message}</span><button onClick={() => setNotice(null)} aria-label="关闭提示"><X size={16} /></button></div>}
     <ProviderPills selected={selectedProvider} onSelect={setSelectedProvider} /><p className="text-sm text-muted-foreground">登录后作为路由候选并消耗订阅额度；开启 Auth 账号优先后，将优先使用。</p>
     <div className="flex gap-2 rounded-2xl border border-destructive/25 bg-destructive/10 px-4 py-3 text-xs leading-5 text-destructive"><CircleAlert className="mt-0.5 shrink-0" size={16} /><p>⚠️ 风险提示：此提供商使用的订阅 / OAuth 会话未获官方授权用于代理 / 路由器使用。账户可能被限制或封禁。使用风险自负。</p></div>
-    {loading ? <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 size={18} className="animate-spin" />加载 Auth 账号…</div> : <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">{visibleAccounts.map(account => <AccountCard key={account.id} account={account} pending={pendingId === account.id} onEdit={() => setEditAccount(account)} onToggle={() => void runFor(account.id, account.disabled ? "账号已启用。" : "账号已停用。", () => authApi.toggle(account.id, !account.disabled).then(() => undefined))} onDelete={() => setConfirmation({ kind: "delete", account })} onRefresh={() => void runFor(account.id, "令牌刷新完成。", () => authApi.refreshToken(account.id).then(() => undefined))} onSync={() => setSyncAccount(account)} onExport={() => void exportAuth(account)} onRelogin={() => { setReloginAccount(account); setSelectedProvider(account.provider); setShowLogin(true); }} />)}{visibleAccounts.length === 0 && <EmptyAccountSlot provider={activeProvider} onLogin={() => { setReloginAccount(null); setShowLogin(true); }} onImport={() => void importAuth()} busy={pendingId === "import"} />}</div>}
+    {loading ? <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 size={18} className="animate-spin" />加载 Auth 账号…</div> : <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">{visibleAccounts.map(account => <AccountCard key={account.id} account={account} pending={pendingId === account.id} onEdit={() => setEditAccount(account)} onToggle={() => void runFor(account.id, account.disabled ? "账号已启用。" : "账号已停用。", () => authApi.toggle(account.id, !account.disabled).then(() => undefined))} onDelete={() => setConfirmation({ kind: "delete", account })} onRefresh={() => void runFor(account.id, "令牌刷新完成。", () => authApi.refreshToken(account.id).then(() => undefined))} onSync={() => setSyncAccount(account)} onExport={() => void exportAuth(account)} onRelogin={() => { setReloginAccount(account); setSelectedProvider(account.provider); setShowLogin(true); }} />)}{visibleAccounts.length === 0 && <EmptyAccountSlot provider={activeProvider} onLogin={() => { setReloginAccount(null); setShowLogin(true); }} onSelectImportFormat={(format) => void importAuth(format)} busy={pendingId === "import"} />}</div>}
     {showLogin && <LoginModal provider={activeProvider} replaceAccountId={reloginAccount?.id} onClose={() => { setShowLogin(false); setReloginAccount(null); }} onCompleted={completeLogin} />}
     {editAccount && <EditModal account={editAccount} pending={pendingId === editAccount.id} onClose={() => setEditAccount(null)} onSave={async input => { await runFor(input.id, "账号配置已保存。", () => authApi.update(input).then(() => undefined)); setEditAccount(null); }} />}
     {syncAccount && <ModelSyncModal account={syncAccount} onClose={() => setSyncAccount(null)} onSynced={() => { void load(); setNotice({ kind: "success", message: "模型同步完成。" }); }} />}

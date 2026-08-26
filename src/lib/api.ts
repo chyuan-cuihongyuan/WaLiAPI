@@ -119,11 +119,12 @@ export const authApi = {
     }),
   loginStatus: (sessionId: string) => invoke<AuthLoginSessionStatus>("auth_login_status", { sessionId }),
   loginCancel: (sessionId: string) => invoke<AuthLoginSessionStatus>("auth_login_cancel", { sessionId }),
-  loginImport: (provider?: string, path?: string) =>
-    invoke<AuthMutationResult>("auth_login_import", { provider, path }),
-  /** Web 版：直接上传 auth.json 内容导入（无服务器文件路径）。 */
-  loginImportContent: (provider: string, content: string) =>
-    invoke<AuthMutationResult>("auth_login_import_content", { provider, content }),
+  /** format: "codex"（默认）| "sub2api" | "cpa"，见 AuthFileFormat。 */
+  loginImport: (provider?: string, path?: string, format?: string) =>
+    invoke<AuthMutationResult>("auth_login_import", { provider, path, format }),
+  /** Web 版：直接上传 auth 文件内容导入（无服务器文件路径）。 */
+  loginImportContent: (provider: string, content: string, format?: string) =>
+    invoke<AuthMutationResult>("auth_login_import_content", { provider, content, format }),
   defaultImportPath: () => invoke<string>("auth_default_import_path"),
   logout: (id: string) => invoke<AuthLogoutResult>("auth_logout", { id }),
   refreshToken: (id: string) => invoke<AuthAccount>("auth_refresh_token", { id }),
