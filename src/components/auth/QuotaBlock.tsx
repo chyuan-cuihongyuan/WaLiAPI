@@ -67,7 +67,10 @@ export function QuotaBlock({ quota }: { quota: NonNullable<import("../../types")
   ].filter((entry): entry is { limit: AuthQuotaLimit; window: AuthQuotaWindow } => {
     if (!entry) return false;
     return hasWindowData(entry.window);
-  }));
+  }))
+    // Shorter windows first (5H before weekly/monthly) so the card always
+    // reads in the same order regardless of which slot upstream fills.
+    .sort((a, b) => (a.window.window_minutes ?? 0) - (b.window.window_minutes ?? 0));
 
   if (quota.exceeded && windows.length === 0) {
     return <div className="rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2.5 text-xs font-medium text-destructive">已踢出路由 · {quota.reason || "订阅限额已耗尽"}</div>;
