@@ -4,7 +4,7 @@
 
 ### 本地 LLM API 网关 · 多协议接入 · 知识库 RAG · MCP 工具服务
 
-[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-安装使用)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -477,6 +477,49 @@ WaLiAPI/
 ---
 
 ## 📌 版本历史
+
+### v0.2.2 (2026-08-26)
+
+#### Web 管理面板（Docker / headless 部署）
+
+- ✨ **Linux headless 服务器部署**：新增 `waliapi-web` 二进制（无桌面窗口），支持 Docker 和 systemd 两种部署方式，适合放在 Linux 服务器上长期运行
+- ✨ **Web 管理面板**：浏览器访问完整管理界面，与桌面版业务能力一致——仪表盘、渠道管理、密钥管理、日志审计、安全规则、知识库、Wiki、MCP、导入导出、应用配置等
+- ✨ **多阶段 Docker 构建**：Node/pnpm 编译前端 → Rust 编译 `waliapi-server` → 运行时使用非 root 用户，SQLite 数据持久化到 `/data`
+- ✨ **GitHub Actions 发布**：推送 `web-v*` 标签自动创建 Release、上传二进制包、发布 Docker 镜像到 GHCR
+- ✨ **systemd 部署支持**：提供 systemd unit 文件和环境变量配置示例，适合不用 Docker 的场景
+- ✨ **Web 管理面板用户设置**：支持修改管理员用户名和密码
+- 🔧 **桌面版自动启动内嵌服务**：移除"随应用启动内嵌服务"开关，桌面版启动后自动运行 HTTP 服务
+- 🔧 **后端重构分离桌面版与 Web 服务**：同一 Rust 代码库编译出桌面版（Tauri 窗口）和 headless 版（纯 HTTP 服务）
+
+#### Web 适配层修复
+
+- 🐛 **`api.ts` 绕过 runtime 适配层**：`api.ts` 直接用 `@tauri-apps/api/core` 的 `invoke`，浏览器环境无 Tauri IPC 全部失败，改为统一走 `runtime.ts` 适配层
+- 🐛 **`runtime.ts` 请求路径和格式不匹配后端**：修正 fetch 路径、body 字段名、响应解析逻辑、补齐 CSRF 头、SSE 路径同步修正
+- 🐛 **`default-run` 缺失导致 `cargo run` 报错**：补上 `default-run = "waliapi"`
+
+#### 流式请求超时修复（502 问题）
+
+- 🐛 **流式请求被总超时掐断**：`reqwest` 的 `.timeout()` 是整个请求总超时（含 SSE 传输），大量对话时 LLM 生成时间超过 `timeout_secs` 连接被掐断，客户端收到 502
+- 🔧 **分离流式/非流式超时策略**：新增 `streaming_client()`（仅 `connect_timeout` 10s，不设总超时）和 `blocking_client()`（`connect_timeout` + 总超时 `timeout_secs`），流式请求不再受总超时限制
+- 🔧 **全链路覆盖**：5 个 adaptor 的 `forward_stream` + `endpoint_executor` + `handlers.rs` + embeddings 全部切换到对应 client
+
+#### 模型映射编辑修复
+
+- 🐛 **模型映射编辑输入丢失**：`useModelMappings` 的 `useEffect` 在每次 prop 变化时重置内部状态，引入 `skipNextSyncRef` + `markSynced()` 跳过内部变更的 round-trip
+
+#### Codec 加固
+
+- 🔧 **Chat store/stream_options 归一化**：归一化 Chat 请求的 `store` 和 `stream_options` 字段
+- 🐛 **thinking none/off 映射修复**：thinking 设为 none/off 时映射为 adaptive + low effort
+- 🐛 **`--help` 参数路由修复**
+
+#### Docker 构建修复
+
+- 🐛 **Rust 基础镜像升级**：rust 1.88 → 1.96
+- 🐛 **Dockerfile.tp 兼容国内镜像**
+- 🔧 **tauri.conf.json 显式指定 mainBinaryName**
+
+- 版本号统一升级至 0.2.2（package.json / Cargo.toml / tauri.conf.json）
 
 ### v0.2.1 (2026-08-18)
 
