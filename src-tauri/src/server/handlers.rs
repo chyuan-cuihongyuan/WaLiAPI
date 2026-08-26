@@ -43,7 +43,7 @@ fn audit_original(
         .get("stream")
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
-    let settings = security::get_security_settings(&shared.app);
+    let settings = security::get_security_settings(&shared.state.settings);
     match security::gate::gate_original(
         protocol,
         endpoint,
@@ -112,7 +112,7 @@ async fn maybe_route_plan(
     sanitized_log_body: &str,
     trace_id: Option<String>,
 ) -> Result<Option<Response>, Response> {
-    let flags = feature_flags::read_feature_flags(&shared.app);
+    let flags = feature_flags::read_feature_flags(&shared.state.settings);
     // Auth accounts are request-scoped route candidates. They force the mixed
     // RoutePlan rollout while the global Channel rollout flag is off; absent a
     // usable account, retain the legacy pure-Channel path unchanged.
@@ -545,7 +545,7 @@ pub async fn handle_chat_completions(
     } else {
         match proxy::handle_request(
             &repo,
-            &shared.app,
+            &shared.state.settings,
             &key_record.id,
             &key_record.name,
             forward_json,
@@ -790,7 +790,7 @@ async fn handle_stream(
         return (StatusCode::SERVICE_UNAVAILABLE, "No channel for model").into_response();
     }
 
-    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.app);
+    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.state.settings);
     let max_attempts = if retry_enabled {
         (retry_times.max(0) as usize + 1).min(selected_channels.len())
     } else {
@@ -1229,10 +1229,11 @@ async fn native_anthropic_request(
     };
     let url = native_anthropic_url(config, path, query);
     let (mapped_body, upstream_model) = mapped_anthropic_body(body, &config.model_mapping);
-    let mut request = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.timeout_secs))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    // count_tokens is always non-streaming; native Anthropic Messages streams
+    // through this same function, so use a streaming client (connect-timeout
+    // only) to avoid cutting off long SSE generations.
+    let client = crate::adaptor::streaming_client();
+    let mut request = client
         .post(url)
         .header("x-api-key", &config.api_key)
         .header("content-type", "application/json");
@@ -1267,6 +1268,7 @@ fn native_anthropic_url(
 async fn openai_messages_request(
     config: &crate::adaptor::ChannelConfig,
     body: &serde_json::Value,
+    is_stream: bool,
 ) -> Result<(reqwest::Response, Option<String>), reqwest::Error> {
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
     // T09 (design 11.4): sample the array mapping EXACTLY ONCE here, bake the
@@ -1282,10 +1284,12 @@ async fn openai_messages_request(
     if let (Some(um), Some(obj)) = (upstream_model.as_ref(), mapped_body.as_object_mut()) {
         obj.insert("model".into(), serde_json::Value::String(um.clone()));
     }
-    let resp = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.timeout_secs))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    let client = if is_stream {
+        crate::adaptor::streaming_client()
+    } else {
+        crate::adaptor::blocking_client(config.timeout_secs)
+    };
+    let resp = client
         .post(url)
         .bearer_auth(&config.api_key)
         .header("content-type", "application/json")
@@ -1828,7 +1832,7 @@ pub async fn handle_messages(
             format!("No channel for model: {model}"),
         );
     }
-    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.app);
+    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.state.settings);
     let max_attempts = if retry_enabled {
         (retry_times.max(0) as usize + 1).min(selected.len())
     } else {
@@ -1922,7 +1926,7 @@ pub async fn handle_messages(
             break;
         }
         upstream_attempts += 1;
-        match openai_messages_request(&config, &openai_body).await {
+        match openai_messages_request(&config, &openai_body, stream).await {
             Ok((response, upstream_model)) if response.status().is_success() && stream => {
                 return openai_sse_response(
                     response,
@@ -2254,7 +2258,7 @@ pub async fn handle_messages_count_tokens(
         .into_iter()
         .filter(crate::endpoint_executor::driver::supports_count_tokens)
         .collect();
-    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.app);
+    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.state.settings);
     let max_attempts = if retry_enabled {
         (retry_times.max(0) as usize + 1).min(native_channels.len())
     } else {
@@ -2447,7 +2451,7 @@ pub async fn handle_responses(
     } else {
         match proxy::handle_request(
             &repo,
-            &shared.app,
+            &shared.state.settings,
             &key_record.id,
             &key_record.name,
             openai_body,
@@ -2620,7 +2624,7 @@ async fn handle_responses_stream(
         return (StatusCode::SERVICE_UNAVAILABLE, "No channel for model").into_response();
     }
 
-    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.app);
+    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.state.settings);
     let max_attempts = if retry_enabled {
         (retry_times.max(0) as usize + 1).min(selected_channels.len())
     } else {
@@ -3074,7 +3078,7 @@ pub async fn handle_embeddings(
         return (StatusCode::SERVICE_UNAVAILABLE, "No channel for model").into_response();
     }
 
-    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.app);
+    let (retry_enabled, retry_times) = proxy::get_retry_settings(&shared.state.settings);
     let max_attempts = if retry_enabled {
         (retry_times.max(0) as usize + 1).min(selected_channels.len())
     } else {
@@ -3083,15 +3087,12 @@ pub async fn handle_embeddings(
 
     let mut last_error = None;
     let start = std::time::Instant::now();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            selected_channels
-                .first()
-                .map(|ch| ch.timeout_secs.max(1) as u64)
-                .unwrap_or(60),
-        ))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = crate::adaptor::blocking_client(
+        selected_channels
+            .first()
+            .map(|ch| ch.timeout_secs.max(1) as u64)
+            .unwrap_or(60),
+    );
 
     for (attempt, channel) in selected_channels.into_iter().take(max_attempts).enumerate() {
         let config = Dispatcher::channel_to_config(&channel);

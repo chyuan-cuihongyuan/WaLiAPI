@@ -3,10 +3,12 @@ import { channelApi, importExportApi } from "../lib/api";
 import type { ChannelStats } from "../lib/api";
 import type { Channel } from "../types";
 import { getProtocolLabel, getChannelProviderLabel, formatTime, formatNumber, formatDuration } from "../lib/constants";
+import { downloadTextFile, isWebRuntime } from "../lib/web";
 import { Plus, Radio, Trash2, Zap, Power, Edit, Download, ChevronDown, Upload, Loader2, X, Activity, Clock, GripVertical, Eye, EyeOff, Copy, Check, AlertCircle } from "lucide-react";
 import { ChannelForm } from "../components/ChannelForm";
 import { ImportDialog } from "../components/ImportDialog";
 import { ChannelTabs } from "../components/layout/ChannelTabs";
+import { writeClipboard } from "../lib/runtime";
 
 export function ChannelsPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -66,7 +68,12 @@ export function ChannelsPage() {
     try {
       const content = await importExportApi.exportChannels();
       const timestamp = new Date().toISOString().slice(0, 10);
-      await importExportApi.saveExportFile(content, `waliapi-export-${timestamp}.json`);
+      const filename = `waliapi-export-${timestamp}.json`;
+      if (isWebRuntime()) {
+        downloadTextFile(content, filename);
+      } else {
+        await importExportApi.saveExportFile(content, filename);
+      }
     } catch (e) {
       console.error("Export failed:", e);
     }
@@ -148,7 +155,7 @@ export function ChannelsPage() {
   // 复制 API Key
   const handleCopyModel = async (model: string) => {
     try {
-      await navigator.clipboard.writeText(model);
+      await writeClipboard(model);
       setCopiedModel(model);
       setTimeout(() => setCopiedModel(null), 2000);
     } catch {}
@@ -157,7 +164,7 @@ export function ChannelsPage() {
   const handleCopyKey = async (ch: Channel) => {
     const keyToCopy = fullKeyMap[ch.id] || ch.api_key;
     try {
-      await navigator.clipboard.writeText(keyToCopy);
+      await writeClipboard(keyToCopy);
       setCopiedKey(ch.id);
       setTimeout(() => setCopiedKey(null), 2000);
     } catch (e) {
@@ -213,7 +220,7 @@ export function ChannelsPage() {
             <p className="page-subtitle mt-0.5">配置上游 API 供应商与调度优先级</p>
           </div>
         <div className="flex items-center gap-2">
-          <button onClick={handleExport} disabled={exporting} className="action-secondary flex items-center gap-1.5">
+          <><button onClick={handleExport} disabled={exporting} className="action-secondary flex items-center gap-1.5">
             {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
             导出
           </button>
@@ -237,7 +244,7 @@ export function ChannelsPage() {
                 </button>
               </div>
             )}
-          </div>
+          </div></>
           <button onClick={() => { setEditing(null); setDuplicating(false); setShowForm(true); }} className="action-primary">
             <Plus size={16} /> 新建渠道
           </button>
@@ -384,7 +391,7 @@ export function ChannelsPage() {
                 {result && (
                   <div className={`mt-2 flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs ${result.success ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
                     {result.success ? <><span className="text-emerald-500">✓</span> 连接成功</> : <><span className="text-red-500">✗</span> {result.message}</>}
-                    <span className="text-slate-400">({result.latency_ms.toFixed(2)}ms)</span>
+                    <span className={result.success ? "text-emerald-600" : "text-red-600"}>({result.latency_ms.toFixed(2)}ms)</span>
                   </div>
                 )}
 

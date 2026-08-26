@@ -51,6 +51,12 @@ struct AppDef {
 }
 
 fn home_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("WALIAPI_TARGET_HOME") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -312,6 +318,12 @@ fn restore_config(config_path: &PathBuf) -> Result<(), String> {
 // ── 获取 WaLiAPI 网关信息 ──
 
 async fn get_waliapi_url(state: &Arc<AppState>) -> String {
+    if let Ok(public_url) = std::env::var("WALIAPI_PUBLIC_URL") {
+        let public_url = public_url.trim().trim_end_matches('/');
+        if !public_url.is_empty() {
+            return public_url.to_string();
+        }
+    }
     let port = *state.server_port.read().await;
     format!("http://127.0.0.1:{}", port)
 }
@@ -798,7 +810,10 @@ fn detect_applied(config_path: &PathBuf, app_name: &str) -> bool {
 pub async fn get_app_configs(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Vec<AppInfo>, String> {
-    let _ = &state;
+    get_app_configs_impl(state.inner()).await
+}
+
+pub async fn get_app_configs_impl(_state: &Arc<AppState>) -> Result<Vec<AppInfo>, String> {
     let apps: Vec<AppInfo> = APPS
         .iter()
         .map(|app| {
@@ -831,7 +846,16 @@ pub async fn apply_app_config(
     model: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<ApplyResult, String> {
-    let waliapi_url = get_waliapi_url(&state).await;
+    apply_app_config_impl(&app_name, &api_key, &model, state.inner()).await
+}
+
+pub async fn apply_app_config_impl(
+    app_name: &str,
+    api_key: &str,
+    model: &str,
+    state: &Arc<AppState>,
+) -> Result<ApplyResult, String> {
+    let waliapi_url = get_waliapi_url(state).await;
 
     let app_def = APPS
         .iter()
@@ -843,7 +867,7 @@ pub async fn apply_app_config(
 
     let _ = backup_config(&config_path);
 
-    let result = match app_name.as_str() {
+    let result = match app_name {
         "claude-code" => write_claude_code(&config_dir, &waliapi_url, &api_key, &model),
         "codex" => write_codex(&config_dir, &waliapi_url, &api_key, &model),
         "gemini-cli" => write_gemini_cli(&config_dir, &waliapi_url, &api_key, &model),
@@ -881,6 +905,10 @@ pub async fn apply_app_config(
 
 #[tauri::command]
 pub async fn clear_app_config(app_name: String) -> Result<ApplyResult, String> {
+    clear_app_config_impl(&app_name).await
+}
+
+pub async fn clear_app_config_impl(app_name: &str) -> Result<ApplyResult, String> {
     let app_def = APPS
         .iter()
         .find(|a| a.name == app_name)
@@ -903,6 +931,10 @@ pub async fn clear_app_config(app_name: String) -> Result<ApplyResult, String> {
 
 #[tauri::command]
 pub async fn get_app_config_content(app_name: String) -> Result<ConfigContent, String> {
+    get_app_config_content_impl(&app_name).await
+}
+
+pub async fn get_app_config_content_impl(app_name: &str) -> Result<ConfigContent, String> {
     let app_def = APPS
         .iter()
         .find(|a| a.name == app_name)
@@ -950,23 +982,7 @@ pub async fn get_app_config_content(app_name: String) -> Result<ConfigContent, S
 
 #[tauri::command]
 pub async fn open_config_folder(app_name: String) -> Result<(), String> {
-    let app_def = APPS
-        .iter()
-        .find(|a| a.name == app_name)
-        .ok_or_else(|| format!("不支持的应用: {app_name}"))?;
-
-    let config_dir = (app_def.config_dir_fn)();
-
-    // 如果目录不存在，尝试创建
-    if !config_dir.exists() {
-        fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
-
-    // 如果配置文件不存在，先创建一个空文件
-    let config_path = config_dir.join(app_def.config_file);
-    if !config_path.exists() {
-        atomic_write(&config_path, b"{}")?;
-    }
+    let config_dir = prepare_app_config_path_impl(&app_name).await?;
 
     #[cfg(target_os = "macos")]
     {
@@ -991,4 +1007,29 @@ pub async fn open_config_folder(app_name: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Prepare and return the server-side configuration directory. Browser clients
+/// cannot open a native file manager on a remote Linux host, so the Web bridge
+/// returns this path while still preserving the desktop command's behavior.
+pub async fn prepare_app_config_path_impl(app_name: &str) -> Result<String, String> {
+    let app_def = APPS
+        .iter()
+        .find(|a| a.name == app_name)
+        .ok_or_else(|| format!("不支持的应用: {app_name}"))?;
+
+    let config_dir = (app_def.config_dir_fn)();
+
+    // 如果目录不存在，尝试创建
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+
+    // 如果配置文件不存在，先创建一个空文件
+    let config_path = config_dir.join(app_def.config_file);
+    if !config_path.exists() {
+        atomic_write(&config_path, b"{}")?;
+    }
+
+    Ok(config_dir.to_string_lossy().to_string())
 }

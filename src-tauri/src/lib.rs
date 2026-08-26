@@ -11,18 +11,41 @@ mod protocol;
 #[cfg(test)]
 mod rollout_integration_tests;
 pub mod security;
-mod server;
+pub mod server;
+pub mod settings_store;
 pub mod services;
 pub mod utils;
+pub mod web_server;
+
+/// 应用标识符（与 tauri.conf.json 一致），用于 headless 数据目录解析。
+pub const APP_IDENTIFIER: &str = "waliapi.xiaofuge.cn";
 
 use std::sync::Arc;
+#[cfg(feature = "desktop-ui")]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, RunEvent,
 };
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_store::StoreExt;
 use tokio::sync::RwLock;
+
+/// 桌面端设置后端：tauri-plugin-store（settings.json）。
+struct TauriSettingsBackend(AppHandle);
+
+impl settings_store::SettingsBackend for TauriSettingsBackend {
+    fn get(&self, key: &str) -> Option<serde_json::Value> {
+        self.0.store("settings.json").ok()?.get(key)
+    }
+
+    fn set_many(&self, entries: &[(String, serde_json::Value)]) -> Result<(), String> {
+        let store = self.0.store("settings.json").map_err(|e| e.to_string())?;
+        for (key, value) in entries {
+            store.set(key.clone(), value.clone());
+        }
+        store.save().map_err(|e| e.to_string())
+    }
+}
 
 pub struct AppState {
     pub db: Arc<db::Database>,
@@ -30,18 +53,47 @@ pub struct AppState {
     pub login_sessions: Arc<commands::auth::LoginSessions>,
     pub server_port: Arc<RwLock<u16>>,
     pub server_running: Arc<std::sync::atomic::AtomicBool>,
-    pub server_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    pub server_handle: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
     /// T07: short-lived, in-process test-run receipt store used to validate
     /// `test_run_id + draft_fingerprint + force_save` at channel save time.
     /// Process restart clears it → every receipt expires → re-test required.
     pub test_receipts: Arc<crate::services::channel_test::TestReceiptStore>,
+    /// Web 管理面板：管理员会话（内存存储，重启失效）。
+    pub admin_sessions: Arc<server::admin_auth::SessionStore>,
+    /// 统一事件出口（桌面 Webview + Web SSE 桥）。
+    pub events: server::event_bridge::EventSink,
+    /// 设置存储（桌面 tauri-plugin-store / headless JSON 文件）。
+    pub settings: settings_store::SettingsStore,
+    /// 应用数据目录（KB 文件等落盘位置）。
+    pub data_dir: std::path::PathBuf,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    // 获取可执行文件所在目录
+    let exe_dir = std::env::current_exe()
+        .map(|path| path.parent().map(|p| p.to_path_buf()).unwrap_or(std::path::PathBuf::from(".")))
+        .unwrap_or(std::path::PathBuf::from("."));
+
+    // 创建日志目录
+    let log_dir = exe_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+
+    // 按天滚动日志：文件名前缀 waliapi.log（如 waliapi.log.2026-08-25），最多保留 7 个文件
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("waliapi.log")
+        .max_log_files(7)
+        .build(&log_dir)
+        .ok();
+
+    // 统一输出到文件；构建失败时回退到标准输出
+    let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO);
+    if let Some(file_appender) = file_appender {
+        subscriber.with_writer(file_appender).init();
+    } else {
+        subscriber.init();
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -70,33 +122,36 @@ pub fn run() {
             None::<Vec<&str>>,
         ))
         .setup(|app| {
-            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            #[cfg(feature = "desktop-ui")]
+            {
+                let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-            TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .tooltip("WaLiAPI - Local LLM API Gateway")
-                .show_menu_on_left_click(false)
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let _ = restore_main_window(tray.app_handle());
-                    }
-                })
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
-                    "show" => {
-                        let _ = restore_main_window(app);
-                    }
-                    _ => {}
-                })
-                .build(app)?;
+                TrayIconBuilder::with_id("main")
+                    .icon(app.default_window_icon().unwrap().clone())
+                    .menu(&menu)
+                    .tooltip("WaLiAPI - Local LLM API Gateway")
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let _ = restore_main_window(tray.app_handle());
+                        }
+                    })
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "quit" => app.exit(0),
+                        "show" => {
+                            let _ = restore_main_window(app);
+                        }
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
 
             if let Some(window) = app.get_webview_window("main") {
                 let app_handle = app.handle().clone();
@@ -111,16 +166,32 @@ pub fn run() {
                     }
                     _ => {}
                 });
+
+                if env_flag("WALIAPI_HIDE_WINDOW") {
+                    let _ = window.hide();
+                }
             }
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::block_on(async move {
+                let data_dir = app_handle
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
                 let db = db::Database::new(&app_handle).await;
                 let db = Arc::new(db);
+                if let Err(e) = server::admin_auth::ensure_initial_admin(&db.pool, &data_dir).await
+                {
+                    log::error!("初始化 Web 管理员账号失败: {e}");
+                }
                 let auth_service = Arc::new(auth_provider::service::AuthService::new(
                     Arc::new(db::repository::Repository::new(db.pool.clone())),
                     auth_provider::ProviderRegistry::new(),
                 ));
+                let (event_tx, _) = tokio::sync::broadcast::channel(
+                    server::event_bridge::EVENT_CHANNEL_CAPACITY,
+                );
+                let emit_handle = app_handle.clone();
                 let state = Arc::new(AppState {
                     db,
                     auth_service: auth_service.clone(),
@@ -131,6 +202,17 @@ pub fn run() {
                     test_receipts: Arc::new(crate::services::channel_test::TestReceiptStore::new(
                         std::time::Duration::from_secs(30 * 60),
                     )),
+                    admin_sessions: server::admin_auth::SessionStore::new(),
+                    events: server::event_bridge::EventSink::desktop(
+                        move |event, payload| {
+                            let _ = emit_handle.emit(event, payload);
+                        },
+                        event_tx,
+                    ),
+                    settings: settings_store::SettingsStore::new(Arc::new(TauriSettingsBackend(
+                        app_handle.clone(),
+                    ))),
+                    data_dir,
                 });
                 app_handle.manage(state.clone());
 
@@ -138,10 +220,16 @@ pub fn run() {
                     auth_provider::maintenance::run_maintenance_loop(auth_service).await;
                 });
 
-                let handle = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = server::start_server(handle, state).await;
+                // 桌面版启动即自动拉起内嵌服务（LLM 网关 + /admin/api）；
+                // Web 管理面板 SPA 仅在 embed-web 构建（waliapi-web / Docker）中提供。
+                let state_clone = state.clone();
+                let app_clone = app_handle.clone();
+                let handle = tauri::async_runtime::spawn(async move {
+                    if let Err(e) = server::start_server(state_clone, Some(app_clone)).await {
+                        log::error!("内嵌服务启动失败: {e}");
+                    }
                 });
+                *state.server_handle.write().await = Some(handle);
             });
 
             Ok(())
@@ -176,11 +264,13 @@ pub fn run() {
             commands::auth::auth_login_status,
             commands::auth::auth_login_cancel,
             commands::auth::auth_login_import,
+            commands::auth::auth_login_import_content,
             commands::auth::auth_default_import_path,
             commands::auth::auth_logout,
             commands::auth::auth_refresh_token,
             commands::auth::auth_sync_models,
             commands::auth::auth_export_json,
+            commands::auth::auth_export_json_content,
             commands::auth::auth_toggle,
             commands::auth::auth_quota_status,
             commands::auth::auth_update,
@@ -295,4 +385,10 @@ fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
         .ok()
         .and_then(|store| store.get("general.close_to_tray").and_then(|v| v.as_bool()))
         .unwrap_or(true)
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }

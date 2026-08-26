@@ -79,10 +79,7 @@ impl Adaptor for GeminiAdaptor {
         let openai_body = &request.body;
         let gemini_body = convert_openai_to_gemini(openai_body);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::adaptor::blocking_client(config.timeout_secs);
         let resp = client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -90,7 +87,7 @@ impl Adaptor for GeminiAdaptor {
             .send()
             .await?;
         let status = resp.status().as_u16();
-        let gemini_json: serde_json::Value = resp.json().await?;
+        let gemini_json: serde_json::Value = resp.json().await?;;
 
         let openai_response = convert_gemini_to_openai(&gemini_json, model);
         let usage = openai_response.get("usage").and_then(|u| {
@@ -124,10 +121,7 @@ impl Adaptor for GeminiAdaptor {
         let openai_body = &request.body;
         let gemini_body = convert_openai_to_gemini(openai_body);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::adaptor::streaming_client();
         let resp = client
             .post(&url)
             .header("Content-Type", "application/json")

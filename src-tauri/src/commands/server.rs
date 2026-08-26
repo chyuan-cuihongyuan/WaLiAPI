@@ -13,6 +13,10 @@ pub struct ServerStatus {
 pub async fn get_server_status(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<ServerStatus, String> {
+    get_server_status_impl(&*state).await
+}
+
+pub async fn get_server_status_impl(state: &Arc<AppState>) -> Result<ServerStatus, String> {
     let running = state
         .server_running
         .load(std::sync::atomic::Ordering::SeqCst);
@@ -41,9 +45,10 @@ pub async fn restart_server(
     // Start new server
     let app_clone = app.clone();
     let state_clone = state.inner().clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = crate::server::start_server(app_clone, state_clone).await;
+    let handle = tauri::async_runtime::spawn(async move {
+        let _ = crate::server::start_server(state_clone, Some(app_clone)).await;
     });
+    *handle_guard = Some(handle);
 
     Ok(())
 }

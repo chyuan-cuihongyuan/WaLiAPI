@@ -13,7 +13,6 @@ use crate::services::channel_test::{
 use crate::services::upstream_models::UpstreamModelsResult;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 
 /// Output DTO for a channel. Always returns the NORMALIZED protocol identity
 /// (via `resolve_channel_identity`), including the previously omitted
@@ -111,7 +110,7 @@ impl From<Channel> for ChannelDto {
 }
 
 /// Build a ChannelDto with extra keys populated from the database.
-async fn to_dto_with_keys(repo: &Repository, c: Channel) -> Result<ChannelDto, String> {
+pub(crate) async fn to_dto_with_keys(repo: &Repository, c: Channel) -> Result<ChannelDto, String> {
     let keys = repo
         .get_channel_api_keys(&c.id)
         .await
@@ -136,6 +135,12 @@ fn to_dto(c: Channel) -> ChannelDto {
 pub async fn get_channels(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<ChannelDto>, String> {
+    get_channels_impl(&*state).await
+}
+
+pub async fn get_channels_impl(
+    state: &std::sync::Arc<AppState>,
+) -> Result<Vec<ChannelDto>, String> {
     let repo = Repository::new(state.db.pool.clone());
     let channels = repo.get_all_channels().await.map_err(|e| e.to_string())?;
     let mut dtos = Vec::with_capacity(channels.len());
@@ -150,8 +155,15 @@ pub async fn get_channel(
     id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<ChannelDto, String> {
+    get_channel_impl(&id, &*state).await
+}
+
+pub async fn get_channel_impl(
+    id: &str,
+    state: &std::sync::Arc<AppState>,
+) -> Result<ChannelDto, String> {
     let repo = Repository::new(state.db.pool.clone());
-    let c = repo.get_channel(&id).await.map_err(|e| e.to_string())?;
+    let c = repo.get_channel(id).await.map_err(|e| e.to_string())?;
     to_dto_with_keys(&repo, c).await
 }
 
@@ -167,8 +179,15 @@ pub async fn get_channel_api_key(
     id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
+    get_channel_api_key_impl(&id, &*state).await
+}
+
+pub async fn get_channel_api_key_impl(
+    id: &str,
+    state: &std::sync::Arc<AppState>,
+) -> Result<String, String> {
     let repo = Repository::new(state.db.pool.clone());
-    let channel = repo.get_channel(&id).await.map_err(|e| e.to_string())?;
+    let channel = repo.get_channel(id).await.map_err(|e| e.to_string())?;
     Ok(channel.api_key)
 }
 
@@ -176,6 +195,13 @@ pub async fn get_channel_api_key(
 pub async fn create_channel(
     input: CreateChannelInput,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ChannelDto, String> {
+    create_channel_impl(input, &*state).await
+}
+
+pub async fn create_channel_impl(
+    input: CreateChannelInput,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ChannelDto, String> {
     // T07: validate the save-time receipt (test_run_id + draft_fingerprint +
     // force_save). Returns Ok(None) for legacy payloads without these fields.
@@ -203,6 +229,13 @@ pub async fn create_channel(
 pub async fn update_channel(
     input: UpdateChannelInput,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ChannelDto, String> {
+    update_channel_impl(input, &*state).await
+}
+
+pub async fn update_channel_impl(
+    input: UpdateChannelInput,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ChannelDto, String> {
     let repo = Repository::new(state.db.pool.clone());
     // T07: validate the save-time receipt against the EFFECTIVE draft (None
@@ -255,8 +288,7 @@ pub async fn update_channel(
         );
         validate_save_receipt(&state, &input, &computed)?
     };
-    let channel = repo
-        .update_channel(&input)
+    repo.update_channel(&input)
         .await
         .map_err(|e| e.to_string())?;
     if let Some(check) = receipt_check {
@@ -291,7 +323,7 @@ fn validate_create_receipt(
         input.native_base_url.as_deref(),
         input.native_endpoints.as_deref(),
         &input.models,
-        input.timeout_secs.unwrap_or(60),
+        input.timeout_secs.unwrap_or(300),
         &input.api_key,
         &input.channel_type,
         &input.base_url,
@@ -362,6 +394,13 @@ pub async fn test_channel_draft(
     input: DraftChannelTestInput,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<DraftChannelTestResult, String> {
+    test_channel_draft_impl(input, &*state).await
+}
+
+pub async fn test_channel_draft_impl(
+    input: DraftChannelTestInput,
+    state: &std::sync::Arc<AppState>,
+) -> Result<DraftChannelTestResult, String> {
     let repo = Repository::new(state.db.pool.clone());
     let api_key = channel_test::resolve_draft_api_key(&input, &repo).await?;
     let config = channel_test::DraftTestConfig::default();
@@ -376,9 +415,16 @@ pub async fn sync_upstream_models(
     input: DraftChannelTestInput,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<UpstreamModelsResult, String> {
+    sync_upstream_models_impl(input, &*state).await
+}
+
+pub async fn sync_upstream_models_impl(
+    input: DraftChannelTestInput,
+    state: &std::sync::Arc<AppState>,
+) -> Result<UpstreamModelsResult, String> {
     let repo = Repository::new(state.db.pool.clone());
     let api_key = channel_test::resolve_draft_api_key(&input, &repo).await?;
-    let timeout = input.timeout_secs.unwrap_or(60).max(1) as u64;
+    let timeout = input.timeout_secs.unwrap_or(300).max(1) as u64;
     crate::services::upstream_models::fetch_upstream_models(&input, &api_key, timeout).await
 }
 
@@ -388,8 +434,16 @@ pub async fn toggle_channel(
     status: i64,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
+    toggle_channel_impl(&id, status, &*state).await
+}
+
+pub async fn toggle_channel_impl(
+    id: &str,
+    status: i64,
+    state: &std::sync::Arc<AppState>,
+) -> Result<(), String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.update_channel_status(&id, status)
+    repo.update_channel_status(id, status)
         .await
         .map_err(|e| e.to_string())
 }
@@ -399,13 +453,23 @@ pub async fn delete_channel(
     id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
+    delete_channel_impl(&id, &*state).await
+}
+
+pub async fn delete_channel_impl(id: &str, state: &std::sync::Arc<AppState>) -> Result<(), String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.delete_channel(&id).await.map_err(|e| e.to_string())
+    repo.delete_channel(id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_channel_stats(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<ChannelStats>, String> {
+    get_channel_stats_impl(&*state).await
+}
+
+pub async fn get_channel_stats_impl(
+    state: &std::sync::Arc<AppState>,
 ) -> Result<Vec<ChannelStats>, String> {
     let repo = Repository::new(state.db.pool.clone());
     repo.get_channel_stats().await.map_err(|e| e.to_string())
@@ -423,8 +487,15 @@ pub async fn test_channel(
     id: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<TestChannelResult, String> {
+    test_channel_impl(&id, &*state).await
+}
+
+pub async fn test_channel_impl(
+    id: &str,
+    state: &std::sync::Arc<AppState>,
+) -> Result<TestChannelResult, String> {
     let repo = Repository::new(state.db.pool.clone());
-    let channel = repo.get_channel(&id).await.map_err(|e| e.to_string())?;
+    let channel = repo.get_channel(id).await.map_err(|e| e.to_string())?;
 
     let config = ChannelConfig {
         base_url: channel.base_url.clone(),
@@ -440,7 +511,7 @@ pub async fn test_channel(
     let adaptor = get_adaptor(&channel.channel_type);
     let result = adaptor.test(&config).await.map_err(|e| e.to_string())?;
 
-    repo.update_channel_test_result(&id, result.success)
+    repo.update_channel_test_result(id, result.success)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -456,8 +527,15 @@ pub async fn reorder_channels(
     ordered_ids: Vec<String>,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<(), String> {
+    reorder_channels_impl(&ordered_ids, &*state).await
+}
+
+pub async fn reorder_channels_impl(
+    ordered_ids: &[String],
+    state: &std::sync::Arc<AppState>,
+) -> Result<(), String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.reorder_channels(&ordered_ids)
+    repo.reorder_channels(ordered_ids)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())

@@ -57,10 +57,7 @@ impl Adaptor for DeepSeekAdaptor {
     ) -> Result<(u16, serde_json::Value, Option<TokenUsage>), anyhow::Error> {
         let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
         let body = super::openai::apply_model_mapping(&request.body, &config.model_mapping);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::adaptor::blocking_client(config.timeout_secs);
         let resp = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", config.api_key))
@@ -69,7 +66,7 @@ impl Adaptor for DeepSeekAdaptor {
             .send()
             .await?;
         let status = resp.status().as_u16();
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await?;;
         let usage = json.get("usage").and_then(|u| {
             Some(TokenUsage {
                 prompt_tokens: u.get("prompt_tokens")?.as_u64()?,
@@ -87,10 +84,7 @@ impl Adaptor for DeepSeekAdaptor {
     ) -> Result<reqwest::Response, anyhow::Error> {
         let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
         let body = super::openai::apply_model_mapping(&request.body, &config.model_mapping);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::adaptor::streaming_client();
         let resp = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", config.api_key))

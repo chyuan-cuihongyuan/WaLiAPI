@@ -22,6 +22,7 @@ use crate::db::repository::Repository;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
 // ─── Export types ───────────────────────────────────────────────────────────
 
@@ -205,6 +206,10 @@ pub struct ImportResult {
 pub async fn export_channels(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<String, String> {
+    export_channels_impl(state.inner()).await
+}
+
+pub async fn export_channels_impl(state: &std::sync::Arc<AppState>) -> Result<String, String> {
     let repo = Repository::new(state.db.pool.clone());
     let channels = repo.get_all_channels().await.map_err(|e| e.to_string())?;
 
@@ -231,6 +236,13 @@ pub async fn export_channels(
 pub async fn import_walicode_backup(
     content: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ImportResult, String> {
+    import_walicode_backup_impl(&content, state.inner()).await
+}
+
+pub async fn import_walicode_backup_impl(
+    content: &str,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ImportResult, String> {
     let backup: WalicodeBackup =
         serde_json::from_str(&content).map_err(|e| format!("解析 walicode 备份文件失败: {}", e))?;
@@ -272,7 +284,7 @@ pub async fn import_walicode_backup(
                         weight: 1,
                         config: Value::Object(Default::default()),
                         model_mapping: Value::Object(Default::default()),
-                        timeout_secs: 60,
+                        timeout_secs: 300,
                         // identity_revision 0 + NULL identity => resolver infers on read
                         identity_revision: 0,
                         ..Default::default()
@@ -324,7 +336,7 @@ pub async fn import_walicode_backup(
                     weight: 1,
                     config: Value::Object(Default::default()),
                     model_mapping: Value::Object(Default::default()),
-                    timeout_secs: 60,
+                    timeout_secs: 300,
                     identity_revision: 0,
                     ..Default::default()
                 };
@@ -357,6 +369,13 @@ pub async fn import_walicode_backup(
 pub async fn import_waliapi_export(
     content: String,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<ImportResult, String> {
+    import_waliapi_export_impl(&content, state.inner()).await
+}
+
+pub async fn import_waliapi_export_impl(
+    content: &str,
+    state: &std::sync::Arc<AppState>,
 ) -> Result<ImportResult, String> {
     let export: WaliapiExport =
         serde_json::from_str(&content).map_err(|e| format!("解析 waliapi 导出文件失败: {}", e))?;
@@ -463,7 +482,7 @@ pub fn exported_channel_to_import(ch: &ExportedChannel) -> ImportChannelInput {
         weight: ch.weight.unwrap_or(1),
         config,
         model_mapping,
-        timeout_secs: ch.timeout_secs.unwrap_or(60),
+        timeout_secs: ch.timeout_secs.unwrap_or(300),
         protocol,
         provider,
         native_base_url,
@@ -539,7 +558,12 @@ fn is_known_endpoint(s: &str) -> bool {
 /// Scan local AI CLI tool configs (Claude Code, Codex, Cursor, etc.)
 #[tauri::command]
 pub async fn scan_local_ai_configs() -> Result<ScanResult, String> {
-    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
+    let home = std::env::var("WALIAPI_TARGET_HOME")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .ok_or("无法获取用户主目录")?;
     let mut sources: Vec<ScannedSource> = Vec::new();
 
     // 1. Claude Code: ~/.claude/settings.json
@@ -686,12 +710,25 @@ pub async fn scan_local_ai_configs() -> Result<ScanResult, String> {
     }
 
     // 3. Cursor: ~/.cursor/config or ~/Library/Application Support/Cursor/User/settings.json
-    let cursor_settings = home
-        .join("Library")
-        .join("Application Support")
-        .join("Cursor")
-        .join("User")
-        .join("settings.json");
+    let cursor_settings = [
+        home.join(".config")
+            .join("Cursor")
+            .join("User")
+            .join("settings.json"),
+        home.join("Library")
+            .join("Application Support")
+            .join("Cursor")
+            .join("User")
+            .join("settings.json"),
+        home.join("AppData")
+            .join("Roaming")
+            .join("Cursor")
+            .join("User")
+            .join("settings.json"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .unwrap_or_else(|| home.join(".config/Cursor/User/settings.json"));
     if cursor_settings.exists() {
         if let Ok(content) = std::fs::read_to_string(&cursor_settings) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -759,6 +796,13 @@ pub async fn import_scanned_sources(
     sources: Vec<ScannedSource>,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<ImportResult, String> {
+    import_scanned_sources_impl(sources, state.inner()).await
+}
+
+pub async fn import_scanned_sources_impl(
+    sources: Vec<ScannedSource>,
+    state: &std::sync::Arc<AppState>,
+) -> Result<ImportResult, String> {
     let repo = Repository::new(state.db.pool.clone());
     let existing = repo.get_all_channels().await.map_err(|e| e.to_string())?;
     let existing_names: std::collections::HashSet<String> =
@@ -792,7 +836,7 @@ pub async fn import_scanned_sources(
             weight: 1,
             config: Value::Object(Default::default()),
             model_mapping: Value::Object(Default::default()),
-            timeout_secs: 60,
+            timeout_secs: 300,
             identity_revision: 0,
             ..Default::default()
         };
@@ -813,22 +857,30 @@ pub async fn import_scanned_sources(
 /// Open a file dialog and return the file content (for import)
 #[tauri::command]
 pub async fn pick_import_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
+    #[cfg(not(feature = "desktop-ui"))]
+    {
+        let _ = &app;
+        return Err("文件对话框仅桌面版可用".to_string());
+    }
+    #[cfg(feature = "desktop-ui")]
+    {
+        use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .add_filter("JSON files", &["json"])
-        .pick_file(move |file_path| {
-            let result = file_path.and_then(|f| {
-                let path = f.into_path().ok()?;
-                std::fs::read_to_string(&path).ok()
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .file()
+            .add_filter("JSON files", &["json"])
+            .pick_file(move |file_path| {
+                let result = file_path.and_then(|f| {
+                    let path = f.into_path().ok()?;
+                    std::fs::read_to_string(&path).ok()
+                });
+                let _ = tx.send(result);
             });
-            let _ = tx.send(result);
-        });
 
-    let result = rx.await.map_err(|_| "对话框取消".to_string())?;
-    Ok(result)
+        let result = rx.await.map_err(|_| "对话框取消".to_string())?;
+        Ok(result)
+    }
 }
 
 /// Save a file dialog and return whether save was successful (for export)
@@ -838,33 +890,41 @@ pub async fn save_export_file(
     content: String,
     default_name: String,
 ) -> Result<bool, String> {
-    use tauri_plugin_dialog::DialogExt;
+    #[cfg(not(feature = "desktop-ui"))]
+    {
+        let _ = (&app, &content, &default_name);
+        return Err("文件对话框仅桌面版可用".to_string());
+    }
+    #[cfg(feature = "desktop-ui")]
+    {
+        use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .set_file_name(&default_name)
-        .add_filter("JSON files", &["json"])
-        .save_file(move |file_path| {
-            if let Some(path) = file_path {
-                if let Some(p) = path.as_path() {
-                    match std::fs::write(p, &content) {
-                        Ok(_) => {
-                            let _ = tx.send(true);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .file()
+            .set_file_name(&default_name)
+            .add_filter("JSON files", &["json"])
+            .save_file(move |file_path| {
+                if let Some(path) = file_path {
+                    if let Some(p) = path.as_path() {
+                        match std::fs::write(p, &content) {
+                            Ok(_) => {
+                                let _ = tx.send(true);
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to save export file: {}", e);
+                                let _ = tx.send(false);
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to save export file: {}", e);
-                            let _ = tx.send(false);
-                        }
+                        return;
                     }
-                    return;
                 }
-            }
-            let _ = tx.send(false);
-        });
+                let _ = tx.send(false);
+            });
 
-    let result = rx.await.map_err(|_| "对话框取消".to_string())?;
-    Ok(result)
+        let result = rx.await.map_err(|_| "对话框取消".to_string())?;
+        Ok(result)
+    }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
