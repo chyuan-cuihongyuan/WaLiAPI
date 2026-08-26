@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.3 (2026-08-26)
+
+- 📝 **README 文档完善**：更新代码贡献者信息表，补齐 v0.2.2 Docker / Web 管理面板贡献者 Fla1337，同步各贡献者最新提交量与代码变更统计
+- 🔧 **版本号统一升级至 0.2.3**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ## v0.2.2 (2026-08-26)
 
 ### Web 管理面板（Docker / headless 部署）

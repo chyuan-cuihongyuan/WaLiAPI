@@ -1167,6 +1167,17 @@ impl Repository {
         Ok(routeable)
     }
 
+    /// Read-only list of active, enabled auth accounts (the same routeable filter
+    /// as `list_route_accounts` but WITHOUT quota recovery writes).  Used by the
+    /// `/v1/models` endpoint to surface auth-account-only models.
+    pub async fn list_active_auth_accounts(&self) -> Result<Vec<AuthAccount>, sqlx::Error> {
+        sqlx::query_as::<_, AuthAccount>(
+            "SELECT * FROM auth_accounts WHERE disabled = 0 AND status = 'active' ORDER BY priority ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
     // ==================== Request Log ====================
 
     pub async fn create_log(&self, log: &RequestLog) -> Result<(), sqlx::Error> {

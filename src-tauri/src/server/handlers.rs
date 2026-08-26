@@ -3366,6 +3366,46 @@ fn collect_config_models(channels: &[crate::db::models::Channel]) -> Vec<ConfigM
     out
 }
 
+/// Aggregate models from auth accounts: each account's synced model snapshot
+/// (only entries with `status == "available"` and `!unavailable`) and the
+/// source keys of its `model_mapping` (mapping values are upstream names and
+/// are NOT exposed).  `owned_by` is the account provider.  Dedup is shared with
+/// the channel aggregator via `seen` so a model advertised by both a channel
+/// and an account is listed once (channel wins, preserving `owned_by`).
+fn collect_auth_account_models(
+    accounts: &[crate::db::models::AuthAccount],
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<ConfigModel> {
+    let mut out: Vec<ConfigModel> = Vec::new();
+    for account in accounts {
+        if let Ok(states) = account.model_states() {
+            for state in &states.models {
+                if state.status == "available" && !state.unavailable
+                    && seen.insert(state.id.clone())
+                {
+                    out.push(ConfigModel {
+                        id: state.id.clone(),
+                        owned_by: account.provider.clone(),
+                    });
+                }
+            }
+        }
+        if let Ok(mapping) = account.model_mapping() {
+            if let Some(obj) = mapping.as_object() {
+                for key in obj.keys() {
+                    if seen.insert(key.clone()) {
+                        out.push(ConfigModel {
+                            id: key.clone(),
+                            owned_by: account.provider.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// OpenAI `/v1/models` response body: `{"object":"list","data":[...]}`.
 fn openai_models_response(models: &[ConfigModel]) -> serde_json::Value {
     let data: Vec<serde_json::Value> = models
@@ -3472,7 +3512,24 @@ async fn list_models_impl(pool: SqlitePool, headers: &HeaderMap) -> Response {
             )
         }
     };
-    let models = collect_config_models(&channels);
+    let accounts = match repo.list_active_auth_accounts().await {
+        Ok(accounts) => accounts,
+        Err(_) => {
+            return models_error(
+                anthropic,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Failed to load auth accounts",
+            )
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut models = collect_config_models(&channels);
+    // Track channel-advertised IDs so auth-account duplicates are skipped.
+    for m in &models {
+        seen.insert(m.id.clone());
+    }
+    models.extend(collect_auth_account_models(&accounts, &mut seen));
     let body = if anthropic {
         anthropic_models_response(&models)
     } else {
@@ -4041,5 +4098,228 @@ mod list_models_tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["error"]["type"], "rate_limit_error");
         assert_eq!(json["error"]["code"], "429");
+    }
+
+    /// Insert an auth account directly via SQL (mirrors migration 019/021
+    /// schema) so `list_models_impl` can surface its models.
+    async fn seed_auth_account(
+        pool: &SqlitePool,
+        id: &str,
+        provider: &str,
+        model_states: serde_json::Value,
+        mapping: serde_json::Value,
+    ) {
+        let now = "2026-01-01T00:00:00.000Z";
+        sqlx::query(
+            "INSERT INTO auth_accounts
+             (id, provider, label, account_id, status, disabled, priority, weight,
+              quota_json, model_states_json, model_mapping_json, attributes_json,
+              payload_json, last_refreshed_at, last_models_sync_at,
+              next_refresh_after, next_retry_after, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'active', 0, 1, 1, NULL, ?, ?, '{}',
+                     '{}', NULL, NULL, NULL, NULL, ?, ?)",
+        )
+        .bind(id)
+        .bind(provider)
+        .bind(format!("label-{id}"))
+        .bind(format!("remote-{id}"))
+        .bind(model_states.to_string())
+        .bind(mapping.to_string())
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_account_available_models_are_listed() {
+        let (pool, api_key) = seed_test_db().await;
+        seed_auth_account(
+            &pool,
+            "acc-1",
+            "codex",
+            serde_json::json!({
+                "version": 1,
+                "models": [
+                    {"id": "gpt-5-codex", "status": "available", "unavailable": false,
+                     "next_retry_after": null, "last_error": null},
+                    {"id": "o4-mini", "status": "available", "unavailable": false,
+                     "next_retry_after": null, "last_error": null}
+                ]
+            }),
+            serde_json::json!({}),
+        )
+        .await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", api_key.key).parse().unwrap(),
+        );
+        let resp = list_models_impl(pool, &headers).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<&str> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        // Channel models (gpt-4o, gpt-4o-mini, alias-1, alias-2) + auth-account
+        // models (gpt-5-codex, o4-mini).
+        assert!(ids.contains(&"gpt-5-codex"));
+        assert!(ids.contains(&"o4-mini"));
+        assert!(ids.contains(&"gpt-4o"));
+        // Auth-account model keeps channel models intact.
+        assert!(ids.contains(&"alias-1"));
+        assert_eq!(ids.len(), 6);
+        // owned_by reflects the auth-account provider.
+        let codex = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "gpt-5-codex")
+            .unwrap();
+        assert_eq!(codex["owned_by"], "codex");
+    }
+
+    #[tokio::test]
+    async fn auth_account_unavailable_models_are_skipped() {
+        let (pool, api_key) = seed_test_db().await;
+        seed_auth_account(
+            &pool,
+            "acc-2",
+            "codex",
+            serde_json::json!({
+                "version": 1,
+                "models": [
+                    {"id": "good", "status": "available", "unavailable": false,
+                     "next_retry_after": null, "last_error": null},
+                    {"id": "bad-status", "status": "disabled", "unavailable": false,
+                     "next_retry_after": null, "last_error": null},
+                    {"id": "bad-unavail", "status": "available", "unavailable": true,
+                     "next_retry_after": null, "last_error": null}
+                ]
+            }),
+            serde_json::json!({}),
+        )
+        .await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", api_key.key).parse().unwrap(),
+        );
+        let resp = list_models_impl(pool, &headers).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<&str> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"good"));
+        assert!(!ids.contains(&"bad-status"));
+        assert!(!ids.contains(&"bad-unavail"));
+    }
+
+    #[tokio::test]
+    async fn auth_account_mapping_keys_are_listed_and_deduped() {
+        let (pool, api_key) = seed_test_db().await;
+        seed_auth_account(
+            &pool,
+            "acc-3",
+            "kimi",
+            serde_json::json!({
+                "version": 1,
+                "models": [
+                    {"id": "kimi-k2", "status": "available", "unavailable": false,
+                     "next_retry_after": null, "last_error": null}
+                ]
+            }),
+            // "gpt-4o" duplicates a channel model → skipped; "kimi-alias" is new.
+            serde_json::json!({"gpt-4o": "kimi-k2", "kimi-alias": "kimi-k2"}),
+        )
+        .await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", api_key.key).parse().unwrap(),
+        );
+        let resp = list_models_impl(pool, &headers).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<&str> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"kimi-k2"));
+        assert!(ids.contains(&"kimi-alias"));
+        // No duplicate gpt-4o.
+        assert_eq!(ids.iter().filter(|&&m| m == "gpt-4o").count(), 1);
+        // owned_by of the deduped gpt-4o stays with the channel (openai).
+        let gpt4o = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "gpt-4o")
+            .unwrap();
+        assert_eq!(gpt4o["owned_by"], "openai");
+    }
+
+    #[tokio::test]
+    async fn disabled_auth_account_models_are_not_listed() {
+        let (pool, api_key) = seed_test_db().await;
+        // Insert a disabled account directly.
+        let now = "2026-01-01T00:00:00.000Z";
+        sqlx::query(
+            "INSERT INTO auth_accounts
+             (id, provider, label, account_id, status, disabled, priority, weight,
+              quota_json, model_states_json, model_mapping_json, attributes_json,
+              payload_json, last_refreshed_at, last_models_sync_at,
+              next_refresh_after, next_retry_after, created_at, updated_at)
+             VALUES ('acc-off', 'codex', 'off', 'remote-off', 'active', 1, 1, 1,
+                     NULL, ?, '{}', '{}', '{}', NULL, NULL, NULL, NULL, ?, ?)",
+        )
+        .bind(
+            serde_json::json!({
+                "version": 1,
+                "models": [{"id": "should-not-show", "status": "available",
+                            "unavailable": false, "next_retry_after": null,
+                            "last_error": null}]
+            })
+            .to_string(),
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", api_key.key).parse().unwrap(),
+        );
+        let resp = list_models_impl(pool, &headers).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<&str> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert!(!ids.contains(&"should-not-show"));
     }
 }
