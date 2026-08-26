@@ -196,6 +196,15 @@ impl fmt::Debug for LoginResult {
     }
 }
 
+/// Outcome of a format-aware import: successfully imported accounts plus the
+/// number of file entries that were skipped (other platforms, entries without
+/// usable credentials, per-account failures).
+#[derive(Clone, Debug)]
+pub struct MultiImportResult {
+    pub results: Vec<LoginResult>,
+    pub skipped: usize,
+}
+
 /// Credential material returned after a successful provider refresh.
 #[derive(Clone, Debug)]
 pub struct RefreshedPayload {

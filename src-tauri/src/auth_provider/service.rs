@@ -200,6 +200,28 @@ impl AuthService {
         self.upsert_login_result(kind, result).await
     }
 
+    /// Format-aware import (codex / cpa / sub2api).  Single-account formats
+    /// return one summary; sub2api files persist every importable account and
+    /// report how many entries were skipped.  A file where nothing could be
+    /// imported fails with `ImportFailed`.
+    pub async fn import_all(
+        &self,
+        kind: ProviderKind,
+        bytes: &[u8],
+        format: Option<&str>,
+    ) -> Result<(Vec<AuthAccountSummary>, usize), ProviderError> {
+        let provider = self.registry.get(&kind)?;
+        let outcome = provider.import_all(bytes, format).await?;
+        if outcome.results.is_empty() {
+            return Err(ProviderError::ImportFailed);
+        }
+        let mut summaries = Vec::with_capacity(outcome.results.len());
+        for result in outcome.results {
+            summaries.push(self.upsert_login_result(kind.clone(), result).await?);
+        }
+        Ok((summaries, outcome.skipped))
+    }
+
     async fn upsert_login_result(
         &self,
         kind: ProviderKind,
