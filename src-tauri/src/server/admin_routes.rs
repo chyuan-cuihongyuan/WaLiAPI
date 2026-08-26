@@ -487,6 +487,7 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
                 commands::auth::auth_login_import(
                     arg(&args, "provider")?,
                     arg(&args, "path")?,
+                    arg(&args, "format")?,
                     state,
                 )
                 .await,
@@ -497,6 +498,7 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
                 commands::auth::auth_login_import_content(
                     arg(&args, "provider")?,
                     arg(&args, "content")?,
+                    arg(&args, "format")?,
                     state,
                 )
                 .await,

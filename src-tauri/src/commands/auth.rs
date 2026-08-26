@@ -783,22 +783,13 @@ pub async fn auth_login_cancel(
 pub async fn auth_login_import(
     provider: Option<String>,
     path: Option<String>,
+    format: Option<String>,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthMutationResult, String> {
     let kind = provider_kind(provider)?;
     let path = import_path(path)?;
     let bytes = fs::read(path).map_err(|_| "Unable to read auth file".to_owned())?;
-    let summary = state
-        .auth_service
-        .import(kind, &bytes)
-        .await
-        .map_err(safe_error)?;
-    sync_after_login(
-        &state.auth_service,
-        summary,
-        Some(CODEX_IMPORT_NOTICE.to_owned()),
-    )
-    .await
+    import_and_sync(&state.auth_service, kind, bytes, format.as_deref()).await
 }
 
 /// Web 管理面板：直接以文件内容导入（浏览器 `<input type=file>` 上传，无服务器路径）。
@@ -806,6 +797,7 @@ pub async fn auth_login_import(
 pub async fn auth_login_import_content(
     provider: Option<String>,
     content: String,
+    format: Option<String>,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthMutationResult, String> {
     let kind = provider_kind(provider)?;
@@ -813,17 +805,56 @@ pub async fn auth_login_import_content(
     if bytes.is_empty() {
         return Err("Unable to read auth file".to_owned());
     }
-    let summary = state
-        .auth_service
-        .import(kind, &bytes)
+    import_and_sync(&state.auth_service, kind, bytes, format.as_deref()).await
+}
+
+/// Shared import tail: persist every account in the file (single- or
+/// multi-account formats), then model-sync each one.  The notice aggregates
+/// skip counts for multi-account files.
+async fn import_and_sync(
+    service: &crate::auth_provider::service::AuthService,
+    kind: ProviderKind,
+    bytes: Vec<u8>,
+    format: Option<&str>,
+) -> Result<AuthMutationResult, String> {
+    let (summaries, skipped) = service
+        .import_all(kind.clone(), &bytes, format)
         .await
         .map_err(safe_error)?;
-    sync_after_login(
-        &state.auth_service,
-        summary,
-        Some(CODEX_IMPORT_NOTICE.to_owned()),
-    )
-    .await
+    let mut warning = None;
+    for summary in &summaries {
+        if let Err(error) = service.sync_models(&summary.id).await {
+            tracing::warn!(
+                account_id = %summary.id,
+                provider = %kind,
+                error = ?error.failure_class(),
+                "model sync failed after import; account will not route until sync succeeds"
+            );
+            warning = Some(
+                "Accounts saved, but model sync failed; they will not route until sync succeeds."
+                    .to_owned(),
+            );
+        }
+    }
+    // The primary account drives the UI refresh; extra accounts appear on reload.
+    let account = AuthAccountDto::try_from(summaries[0].clone()).map_err(safe_error)?;
+    let mut notice = CODEX_IMPORT_NOTICE.to_owned();
+    if summaries.len() > 1 || skipped > 0 {
+        notice = format!(
+            "成功导入 {} 个账号{}。",
+            summaries.len(),
+            if skipped > 0 {
+                format!("，跳过 {skipped} 个非 Codex 或无效条目")
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(AuthMutationResult {
+        account,
+        warning,
+        notice: Some(notice),
+    })
 }
 
 #[tauri::command]

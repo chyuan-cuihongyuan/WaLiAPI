@@ -17,9 +17,9 @@ use async_trait::async_trait;
 pub use crate::db::models::{AuthAccount, QuotaState};
 pub use spec::{AuthLoginMode, AuthNonStreamFraming, ProviderSpec};
 pub use types::{
-    AuthAccountSummary, AuthenticatedLogin, LoginResult, ProviderError, ProviderKind,
-    ProviderLoginContext, ProviderModels, ProviderPayload, ProviderRequest, RefreshedPayload,
-    ReplacementContext,
+    AuthAccountSummary, AuthenticatedLogin, LoginResult, MultiImportResult, ProviderError,
+    ProviderKind, ProviderLoginContext, ProviderModels, ProviderPayload, ProviderRequest,
+    RefreshedPayload, ReplacementContext,
 };
 
 /// Progress marker for an interactive provider login.  Concrete providers map
@@ -98,6 +98,22 @@ pub trait Provider: Send + Sync {
     ) -> Result<LoginResult, ProviderError>;
 
     async fn import(&self, bytes: &[u8]) -> Result<LoginResult, ProviderError>;
+
+    /// Format-aware import.  Single-account formats (codex, cpa) yield exactly
+    /// one result; sub2api admin-data exports may yield several, and entries
+    /// that cannot be imported (other platforms, failed refreshes) are counted
+    /// in `skipped` instead of failing the whole file.
+    async fn import_all(
+        &self,
+        bytes: &[u8],
+        _format: Option<&str>,
+    ) -> Result<MultiImportResult, ProviderError> {
+        let result = self.import(bytes).await?;
+        Ok(MultiImportResult {
+            results: vec![result],
+            skipped: 0,
+        })
+    }
 
     async fn refresh(&self, payload: &ProviderPayload) -> Result<RefreshedPayload, ProviderError>;
 

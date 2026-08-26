@@ -321,22 +321,79 @@ impl CodexLogin {
     /// Parse the real, nested Codex CLI file. An expired JWT access token is refreshed before
     /// it becomes an import result; refresh tokens stay opaque strings throughout.
     pub async fn import_auth_json(&self, bytes: &[u8]) -> Result<LoginResult, ProviderError> {
+        self.import_auth_json_with_format(bytes, AuthFileFormat::Codex)
+            .await
+    }
+
+    /// Format-aware variant of [`Self::import_auth_json`].  `sub2api` files are
+    /// multi-account; use [`Self::import_codex_accounts`] for them.
+    pub async fn import_auth_json_with_format(
+        &self,
+        bytes: &[u8],
+        format: AuthFileFormat,
+    ) -> Result<LoginResult, ProviderError> {
         let parsed: Value =
             serde_json::from_slice(bytes).map_err(|_| ProviderError::ImportFailed)?;
-        let payload = parse_auth_json(&parsed)?;
-        let (payload, refreshed_at) = if token_expired(&payload) {
-            let refreshed = self.refresh_payload(&payload).await?;
-            (refreshed.payload, refreshed.last_refreshed_at)
-        } else {
-            (
-                payload,
-                parsed
+        let (payload, last_refresh) = match format {
+            AuthFileFormat::Codex => {
+                let last_refresh = parsed
                     .get("last_refresh")
                     .and_then(Value::as_str)
-                    .map(str::to_owned),
-            )
+                    .map(str::to_owned);
+                (parse_auth_json(&parsed)?, last_refresh)
+            }
+            AuthFileFormat::Cpa => {
+                // CLIProxyAPI keeps its own bookkeeping in `last_refresh`; both
+                // formats agree on that field name.
+                let last_refresh = parsed
+                    .get("last_refresh")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                (parse_cpa_auth_json(&parsed)?, last_refresh)
+            }
+            AuthFileFormat::Sub2api => {
+                return Err(ProviderError::ImportFailed);
+            }
+        };
+        self.import_codex_account(CodexAccountPayload { label: None, payload })
+            .await
+            .map(|result| LoginResult {
+                last_refreshed_at: last_refresh.or(result.last_refreshed_at),
+                ..result
+            })
+    }
+
+    /// Shared tail of every import path: refresh an expired token, then turn
+    /// the normalized payload into a login result.
+    pub async fn import_codex_account(
+        &self,
+        account: CodexAccountPayload,
+    ) -> Result<LoginResult, ProviderError> {
+        let (payload, refreshed_at) = if token_expired(&account.payload) {
+            let refreshed = self.refresh_payload(&account.payload).await?;
+            (refreshed.payload, refreshed.last_refreshed_at)
+        } else {
+            (account.payload, None)
         };
         login_result_from_payload(payload, refreshed_at)
+    }
+
+    /// Extract every Codex-usable account from a sub2api admin-data export.
+    /// Returns the importable accounts plus the total entry count so the
+    /// caller can report how many were skipped (non-Codex platforms,
+    /// credential-less entries, and per-account failures).
+    pub fn parse_sub2api_accounts(
+        bytes: &[u8],
+    ) -> Result<(Vec<CodexAccountPayload>, usize), ProviderError> {
+        let parsed: Value =
+            serde_json::from_slice(bytes).map_err(|_| ProviderError::ImportFailed)?;
+        let total = parsed
+            .get("accounts")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let accounts = sub2api_codex_accounts(&parsed)?;
+        Ok((accounts, total))
     }
 
     /// Refresh a token using the OAuth crate. ID/account information is retained from the
@@ -559,6 +616,50 @@ fn parse_auth_json(value: &Value) -> Result<ProviderPayload, ProviderError> {
     }
     let _last_refresh = required_string(value, "last_refresh", ProviderError::ImportFailed)?;
     let tokens = value.get("tokens").ok_or(ProviderError::ImportFailed)?;
+    codex_payload_from_tokens(tokens)
+}
+
+/// CLIProxyAPI (`auths/*.json`) stores the same Codex token set flattened to
+/// the top level.  `type` must say `codex`; its extra bookkeeping fields
+/// (`email`, `expired`) are ignored.
+fn parse_cpa_auth_json(value: &Value) -> Result<ProviderPayload, ProviderError> {
+    if value.get("type").and_then(Value::as_str) != Some("codex") {
+        return Err(ProviderError::ImportFailed);
+    }
+    codex_payload_from_tokens(value)
+}
+
+/// One normalized Codex credential set extracted from an auth file, with the
+/// optional display label the source format carries (sub2api account names).
+#[derive(Debug)]
+pub struct CodexAccountPayload {
+    pub label: Option<String>,
+    pub payload: ProviderPayload,
+}
+
+/// Supported third-party auth-file layouts for the import dropdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthFileFormat {
+    /// Native Codex CLI `auth.json` (nested under `tokens`).
+    Codex,
+    /// CLIProxyAPI flat token file (`auths/*.json`, `type: "codex"`).
+    Cpa,
+    /// sub2api admin-data export (multi-account, `accounts[].platform`).
+    Sub2api,
+}
+
+impl AuthFileFormat {
+    pub fn from_name(name: &str) -> Result<Self, ProviderError> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "codex" => Ok(Self::Codex),
+            "cpa" => Ok(Self::Cpa),
+            "sub2api" => Ok(Self::Sub2api),
+            _ => Err(ProviderError::ImportFailed),
+        }
+    }
+}
+
+fn codex_payload_from_tokens(tokens: &Value) -> Result<ProviderPayload, ProviderError> {
     let id_token = required_string(tokens, "id_token", ProviderError::ImportFailed)?;
     let access_token = required_string(tokens, "access_token", ProviderError::ImportFailed)?;
     let refresh_token = required_string(tokens, "refresh_token", ProviderError::ImportFailed)?;
@@ -571,6 +672,35 @@ fn parse_auth_json(value: &Value) -> Result<ProviderPayload, ProviderError> {
         "account_id": account_id,
         "expires_at": expires_at_from_jwt(tokens.get("access_token").and_then(Value::as_str).unwrap_or_default()),
     })))
+}
+
+/// Extract every importable Codex account from a parsed sub2api admin-data
+/// export.  Only `platform == "openai"` accounts whose credentials carry the
+/// full four-field token set qualify; everything else is skipped (the command
+/// layer surfaces the skip count).
+fn sub2api_codex_accounts(
+    value: &Value,
+) -> Result<Vec<CodexAccountPayload>, ProviderError> {
+    let mut accounts = Vec::new();
+    for entry in value.get("accounts").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+        if entry.get("platform").and_then(Value::as_str) != Some("openai") {
+            continue;
+        }
+        let credentials = match entry.get("credentials").and_then(Value::as_object) {
+            Some(credentials) => credentials,
+            None => continue,
+        };
+        let Ok(payload) = codex_payload_from_tokens(&Value::Object(credentials.clone())) else {
+            continue;
+        };
+        let label = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned);
+        accounts.push(CodexAccountPayload { label, payload });
+    }
+    Ok(accounts)
 }
 
 fn login_result_from_payload(
@@ -1191,5 +1321,145 @@ mod tests {
         assert_eq!(written["tokens"]["account_id"], "account-1");
         assert!(result.backup_path.is_none());
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// CLIProxyAPI `auths/*.json` fixture: the Codex tokens flattened to the
+    /// top level plus its own bookkeeping fields (`type`, `email`, `expired`).
+    fn cpa_fixture() -> Value {
+        json!({
+            "id_token": ID, "access_token": ACCESS, "refresh_token": REFRESH,
+            "account_id": "cpa-account-1", "last_refresh": "2026-08-20T00:00:00Z",
+            "email": "cpa@example.test", "type": "codex", "expired": "2026-09-01T00:00:00Z"
+        })
+    }
+
+    #[test]
+    fn cpa_flat_auth_imports_into_the_same_payload_shape() {
+        let parsed: Value = cpa_fixture();
+        let payload = parse_cpa_auth_json(&parsed).unwrap();
+        assert_eq!(payload.as_value()["account_id"], "cpa-account-1");
+        assert_eq!(payload.as_value()["refresh_token"], REFRESH);
+        assert_eq!(payload.as_value()["access_token"], ACCESS);
+        assert_eq!(payload.as_value()["id_token"], ID);
+    }
+
+    #[test]
+    fn cpa_rejects_non_codex_type_and_missing_fields() {
+        let mut wrong_type = cpa_fixture();
+        wrong_type["type"] = json!("claude");
+        assert_eq!(
+            parse_cpa_auth_json(&wrong_type).unwrap_err(),
+            ProviderError::ImportFailed
+        );
+        let mut missing = cpa_fixture();
+        missing.as_object_mut().unwrap().remove("refresh_token");
+        assert_eq!(
+            parse_cpa_auth_json(&missing).unwrap_err(),
+            ProviderError::ImportFailed
+        );
+    }
+
+    #[test]
+    fn sub2api_openai_accounts_are_extracted_and_others_skipped() {
+        let fixture = json!({
+            "type": "accounts", "version": 1,
+            "accounts": [
+                {
+                    "name": "codex-main",
+                    "platform": "openai", "type": "oauth",
+                    "credentials": {
+                        "access_token": ACCESS, "refresh_token": REFRESH,
+                        "id_token": ID, "account_id": "sub2api-a"
+                    }
+                },
+                {
+                    "name": "claude-side",
+                    "platform": "anthropic", "type": "oauth",
+                    "credentials": {"session_key": "sk-ant-..."}
+                },
+                {
+                    "name": "no-credentials",
+                    "platform": "openai", "type": "oauth",
+                    "credentials": {}
+                }
+            ]
+        });
+        let accounts = sub2api_codex_accounts(&fixture).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].label.as_deref(), Some("codex-main"));
+        assert_eq!(accounts[0].payload.as_value()["account_id"], "sub2api-a");
+    }
+
+    #[test]
+    fn sub2api_without_any_importable_account_reports_skip_count() {
+        let only_claude = json!({
+            "accounts": [{"name": "x", "platform": "anthropic", "type": "oauth", "credentials": {}}]
+        });
+        assert!(sub2api_codex_accounts(&only_claude).unwrap().is_empty());
+        assert!(sub2api_codex_accounts(&json!({"accounts": []}))
+            .unwrap()
+            .is_empty());
+        assert!(sub2api_codex_accounts(&json!({})).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_dispatches_by_format() {
+        let (token_url, _hits, server) = mock_oauth().await;
+        let login = CodexLogin::with_endpoints("http://127.0.0.1/authorize", token_url);
+
+        // codex format (default) still works.
+        let nested = json!({
+            "auth_mode": "chatgpt", "OPENAI_API_KEY": null, "last_refresh": "2026-08-20T00:00:00Z",
+            "tokens": {"id_token": ID, "access_token": ACCESS, "refresh_token": REFRESH, "account_id": "fmt-codex"}
+        });
+        let imported = login
+            .import_auth_json_with_format(
+                &serde_json::to_vec(&nested).unwrap(),
+                AuthFileFormat::Codex,
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.account_id, "fmt-codex");
+
+        // cpa flat format maps onto the same payload.
+        let imported = login
+            .import_auth_json_with_format(
+                &serde_json::to_vec(&cpa_fixture()).unwrap(),
+                AuthFileFormat::Cpa,
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.account_id, "cpa-account-1");
+
+        // Unknown format is rejected as a plain parse failure.
+        assert!(matches!(
+            AuthFileFormat::from_name("yaml"),
+            Err(ProviderError::ImportFailed)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sub2api_import_refreshes_expired_token_and_keeps_label() {
+        let (token_url, hits, server) = mock_oauth().await;
+        let login = CodexLogin::with_endpoints("http://127.0.0.1/authorize", token_url);
+        let expired = jwt(json!({"exp": 1, "email": "person@example.test", "plan_type": "plus"}));
+        let fixture = json!({
+            "accounts": [
+                {"name": "expired-one", "platform": "openai", "type": "oauth",
+                 "credentials": {"access_token": expired, "refresh_token": REFRESH,
+                                 "id_token": expired, "account_id": "sub2api-exp"}}
+            ]
+        });
+        let mut accounts = sub2api_codex_accounts(&fixture).unwrap();
+        assert_eq!(accounts.len(), 1);
+        let result = login
+            .import_codex_account(accounts.remove(0))
+            .await
+            .unwrap();
+        assert_eq!(result.account_id, "sub2api-exp");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "expired token must refresh");
+        assert_eq!(result.label, "person@example.test");
+        server.abort();
     }
 }
