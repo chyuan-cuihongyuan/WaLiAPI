@@ -133,6 +133,9 @@ jobs:
             "${IMAGE}:${VERSION}-amd64" \
             "${IMAGE}:${VERSION}-arm64"
 
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
       - name: Update Docker Hub description
         uses: peter-evans/dockerhub-description@v4
         with:

@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-安装使用)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-使用方式)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
 
 </div>
@@ -21,11 +21,11 @@
 ## 📑 目录
 
 - [贡献者](#-贡献者)
+- [使用方式](#-使用方式)
 - [工作原理](#-工作原理)
 - [核心功能](#-核心功能)
 - [多协议接入](#-多协议接入)
 - [技术栈](#-技术栈)
-- [安装使用](#-安装使用)
 - [项目结构](#-项目结构)
 - [版本历史](#-版本历史)
 - [许可证](#-许可证)
@@ -49,7 +49,162 @@
 
 ---
 
-## 🧭 工作原理
+## 🚀 使用方式
+
+WaLiAPI 提供两种部署方式：**桌面端安装**（适合个人开发者在本地使用）和 **Docker 部署**（适合团队或云服务器长期运行）。
+
+### 方式一：桌面端安装（推荐个人使用）
+
+#### 1. 下载安装包
+
+从 GitHub Releases 或网盘下载对应平台安装包：
+
+- GitHub: [https://github.com/fuzhengwei/WaLiAPI/releases](https://github.com/fuzhengwei/WaLiAPI/releases)
+- 网盘: [https://drive.weixin.qq.com/s?k=ACMA4AfQABU4S23jg8#/](https://drive.weixin.qq.com/s?k=ACMA4AfQABU4S23jg8#/)
+
+| 平台 | 格式 | 架构 |
+|:---|:---|:---|
+| macOS | `.dmg` | ARM64 (Apple Silicon) |
+| Windows | `.msi` / `.exe` | x64 |
+| Linux | `.deb` / `.AppImage` | x64 |
+
+#### 2. 配置渠道
+
+打开 WaLiAPI →「渠道管理」→「新建渠道」→ 填写名称、Base URL、API Key、支持的模型 → 保存。
+
+#### 3. 创建密钥
+
+「API 密钥」→「新建密钥」→ 生成 `sk-waliapi-*` 格式的本地访问令牌。
+
+#### 4. 下游接入
+
+在 ChatBox / NextChat / OpenAI SDK / WaLiCode 中配置：
+
+- **Base URL**: `http://127.0.0.1:8777/v1`
+- **API Key**: 创建的 `sk-waliapi-...` 密钥
+
+#### 5. 应用配置（可选）
+
+在「应用配置」页面选择已安装的 AI 编程工具，一键写入网关地址和密钥，无需手动编辑配置文件。
+
+### 方式二：Docker 部署（推荐云服务器/团队使用）
+
+WaLiAPI 提供 Docker 镜像，适合部署到 Linux 云服务器长期运行。镜像采用多阶段构建：Node/pnpm 编译前端，Rust 编译服务端二进制，运行时使用非 root 用户；SQLite 数据持久化在 `/data`。
+
+#### 快速启动
+
+使用 Docker Hub 镜像 `fuzhengwei/waliapi` 一键部署：
+
+```bash
+# 拉取镜像
+docker pull fuzhengwei/waliapi:latest
+
+# 生成管理令牌
+export WALIAPI_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export WALIAPI_MCP_TOKEN="$(openssl rand -hex 32)"
+
+# 启动容器
+docker run -d --name waliapi \
+  -p 127.0.0.1:8777:8777 \
+  -v waliapi-data:/data \
+  -e WALIAPI_ADMIN_TOKEN \
+  -e WALIAPI_MCP_TOKEN \
+  fuzhengwei/waliapi:latest
+
+# 验证服务
+ curl http://127.0.0.1:8777/health
+```
+
+#### 使用 Docker Compose
+
+从源码构建部署（也可直接使用上面的镜像）：
+
+```bash
+git clone https://github.com/fuzhengwei/WaLiAPI.git
+cd WaLiAPI
+export WALIAPI_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export WALIAPI_MCP_TOKEN="$(openssl rand -hex 32)"
+docker compose up -d --build
+curl http://127.0.0.1:8777/health
+```
+
+#### 配置说明
+
+| 环境变量 | 说明 | 默认值 |
+|:---|:---|:---|
+| `WALIAPI_HOST` | 监听地址 | `0.0.0.0`（Docker）/ `127.0.0.1`（桌面） |
+| `WALIAPI_PORT` | 监听端口 | `8777` |
+| `WALIAPI_DATA_DIR` | 数据目录（SQLite + 知识库索引） | `/data` |
+| `WALIAPI_ADMIN_TOKEN` | 管理面 + KB/Wiki REST 认证令牌（≥32 字符） | 必填 |
+| `WALIAPI_MCP_TOKEN` | MCP 端点认证令牌（≥32 字符，须与 ADMIN 不同） | 必填 |
+| `WALIAPI_PUBLIC_URL` | 公网访问地址（生成客户端配置时使用） | — |
+| `WALIAPI_WEB_DIR` | 前端静态资源目录 | `/app/dist` |
+
+#### 反向代理与 HTTPS
+
+Compose 默认只发布到宿主机 `127.0.0.1`，生产环境不要把端口直接暴露到公网。推荐使用 Caddy 或 Nginx 终止 HTTPS 后反代到 `127.0.0.1:8777`。Caddy 配置域名后会自动申请和续期证书，示例配置见 [`deploy/caddy/Caddyfile.example`](deploy/caddy/Caddyfile.example)。
+
+#### 认证体系
+
+Web 管理面、MCP 和 `/v1` 数据面使用三个互不通用的凭证域：
+
+- **后台管理 + KB/Wiki REST**：`WALIAPI_ADMIN_TOKEN`
+- **外部 Agent MCP**：`WALIAPI_MCP_TOKEN`（权限隔离）
+- **数据面 API**：后台创建的 `sk-waliapi-*` 密钥
+
+所有管理/服务路由都不继承数据面的宽松 CORS。反向代理只负责 TLS 和转发，不得移除或绕过认证头。
+
+<details>
+<summary>📦 不使用 Docker：systemd 部署</summary>
+
+先执行 `pnpm build` 和 `cargo build --release --manifest-path src-tauri/Cargo.toml --bin waliapi-server`。将 release 二进制和前端 `dist/` 放到 `/opt/waliapi/`，创建 `waliapi` 系统用户。systemd 沙箱通过 `StateDirectory=waliapi` 创建并授权固定的数据目录 `/var/lib/waliapi`；若确需改到其他目录，必须同步修改 unit 的可写路径。
+
+用仅 root 可读的权限安装环境文件，再填写管理员 token：
+
+```bash
+sudo install -Dm600 deploy/systemd/waliapi.env.example /etc/waliapi/waliapi.env
+sudo chown root:root /etc/waliapi/waliapi.env
+sudoedit /etc/waliapi/waliapi.env
+```
+
+然后安装服务：
+
+```bash
+sudo install -Dm644 deploy/systemd/waliapi.service /etc/systemd/system/waliapi.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now waliapi
+sudo systemctl status waliapi
+```
+
+</details>
+
+<details>
+<summary>🔧 GitHub Actions 发布</summary>
+
+[`release-web.yml`](.github/workflows/release-web.yml) 可以直接生成两类 Linux Web 产物：
+
+- `waliapi-web-<version>-linux-x86_64.tar.gz`：包含 `waliapi-server`、`dist/`、systemd 和 Caddy 示例；每次手动运行都会保存为 Workflow Artifact。
+- `ghcr.io/<owner>/<repository>:<version>`：通过 GHCR 发布的 `linux/amd64` Docker 镜像。
+
+推送 `web-v*` 标签会创建 GitHub Release、上传二进制包，并发布带版本号和 `latest` 标签的镜像：
+
+```bash
+git tag web-v0.2.1
+git push origin web-v0.2.1
+```
+
+也可以从 Actions 页面手动运行；默认只构建和验证 Docker 镜像，勾选 `publish_image` 才会推送到 GHCR。工作流不需要、也不会读取管理员 token。镜像和二进制包都是无密钥的通用产物，必须在运行时注入。
+
+</details>
+
+#### 数据备份与运维
+
+- 保持单实例运行（SQLite 不支持多个写入实例共享同一数据目录）
+- 定期在停机窗口或使用 SQLite 一致性备份方式备份 `/data`（systemd 部署为 `/var/lib/waliapi`）
+- 升级前保留可回滚副本
+- 管理员 token、渠道密钥和数据库备份都属于敏感数据，应限制文件权限并通过 HTTPS 传输
+
+---
 
 WaLiAPI 作为本地网关，在下游 AI 应用和上游模型供应商之间做协议翻译、负载均衡、安全审计和日志记录。同时内置知识库引擎、Wiki 知识引擎和 MCP Server，让 AI Agent 能直接检索私有知识。
 
@@ -107,6 +262,9 @@ graph TD
 
 ### 知识库 RAG 流程
 
+<details>
+<summary>📁 点击展开详情</summary>
+
 ```mermaid
 flowchart TD
     A[用户上传文档] --> B[文档解析器<br/>Markdown / Code / PDF / JSON / YAML]
@@ -124,7 +282,12 @@ flowchart TD
     G --> H[RAG 生成阶段<br/>组装 Top-K 片段 + 对话历史<br/>→ 通过网关转发至 LLM<br/>→ 生成回答 + 来源引用]
 ```
 
+</details>
+
 ### MCP 工具服务
+
+<details>
+<summary>🔗 点击展开详情</summary>
 
 WaLiAPI 内置 MCP (Model Context Protocol) Server，通过 Streamable HTTP + SSE 端点对外暴露 **29 个工具**（知识库 13 个 + Wiki 16 个），任何支持 MCP 的 AI Agent 均可接入：
 
@@ -160,6 +323,8 @@ flowchart LR
 
     MCP --> KB[(知识库 + Wiki<br/>SQLite + HNSW)]
 ```
+
+</details>
 
 ---
 
@@ -313,122 +478,6 @@ curl http://127.0.0.1:8777/v1/messages \
 | 知识库 | tree-sitter (7 语言) + HNSW + FTS5 + bincode | — |
 | Wiki | Markdown + frontmatter 解析 + wikilinks 图谱 + SQLite | — |
 | 打包 | Tauri bundler（.dmg / .msi / .deb / .AppImage） | 2.x |
-
----
-
-## 📦 安装使用
-
-### 1. 下载安装包
-
-从 GitHub Releases 或网盘下载对应平台安装包：
-
-- GitHub: [https://github.com/fuzhengwei/WaLiAPI/releases](https://github.com/fuzhengwei/WaLiAPI/releases)
-- 网盘: [https://drive.weixin.qq.com/s?k=ACMA4AfQABU4S23jg8#/](https://drive.weixin.qq.com/s?k=ACMA4AfQABU4S23jg8#/)
-
-| 平台 | 格式 | 架构 |
-|:---|:---|:---|
-| macOS | `.dmg` | ARM64 (Apple Silicon) |
-| Windows | `.msi` / `.exe` | x64 |
-| Linux | `.deb` / `.AppImage` | x64 |
-
-### 2. 配置渠道
-
-打开 WaLiAPI →「渠道管理」→「新建渠道」→ 填写名称、Base URL、API Key、支持的模型 → 保存。
-
-### 3. 创建密钥
-
-「API 密钥」→「新建密钥」→ 生成 `sk-waliapi-*` 格式的本地访问令牌。
-
-### 4. 下游接入
-
-在 ChatBox / NextChat / OpenAI SDK / WaLiCode 中配置：
-
-- **Base URL**: `http://127.0.0.1:8777/v1`
-- **API Key**: 创建的 `sk-waliapi-...` 密钥
-
-### 5. 应用配置（可选）
-
-在「应用配置」页面选择已安装的 AI 编程工具，一键写入网关地址和密钥，无需手动编辑配置文件。
-
-### Linux Web 部署（Docker，推荐）
-
-Linux Web 版本由同一个 Rust 服务提供 API 和 `dist/` 静态资源，适合放在一台 Linux 服务器上长期运行。Docker 构建是多阶段构建：Node/pnpm 编译前端，Rust 编译 `waliapi-server`，运行时使用非 root 用户；SQLite 数据持久化在 `/data`。
-
-```bash
-git clone https://github.com/fuzhengwei/WaLiAPI.git
-cd WaLiAPI
-export WALIAPI_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export WALIAPI_MCP_TOKEN="$(openssl rand -hex 32)"
-docker compose up -d --build
-curl http://127.0.0.1:8777/health
-```
-
-可选地将 `WALIAPI_PORT` 设置为其他端口。Compose 默认只发布到宿主机 `127.0.0.1`；生产环境不要使用示例 token，也不要把管理端口直接暴露到公网。用 Caddy（见 [`deploy/caddy/Caddyfile.example`](deploy/caddy/Caddyfile.example)）或 Nginx 终止 HTTPS 后反代到 `127.0.0.1:8777`。Caddy 配置域名后会自动申请和续期证书。
-
-Web 管理面、MCP 和 `/v1` 数据面使用三个互不通用的凭证域：后台管理与 KB/Wiki REST 使用 `WALIAPI_ADMIN_TOKEN`，外部 Agent 的 `/mcp` 使用权限隔离的 `WALIAPI_MCP_TOKEN`，数据面使用后台创建的 `sk-waliapi-*` 密钥。两个环境变量令牌均要求至少 32 个字符且必须不同；所有管理/服务路由都不继承数据面的宽松 CORS。反向代理只负责 TLS 和转发，不得移除或绕过认证头。建议在防火墙中仅开放 HTTPS 端口。
-
-Web 版提供与桌面版一致的业务能力：仪表盘、API/Auth 渠道、下游密钥、日志与安全规则、知识库、Wiki、MCP、Skills、导入导出、服务器侧应用配置以及全部路由/重试设置。浏览器文件选择、下载和进度事件分别由浏览器文件 API、下载和认证 SSE 适配。Linux 进程相关能力采用部署等价语义：监听地址/端口由 `WALIAPI_HOST` / `WALIAPI_PORT` 控制，自启动和更新由 systemd、Docker 与 GitHub Release 管理。
-
-远程 Codex OAuth 完成授权后若浏览器无法打开 `localhost:1455` 回调页，可复制地址栏中的完整回调 URL，粘贴回登录窗口完成令牌交换；也可直接上传 Codex `auth.json`。Kimi 使用设备码流程，不依赖本地回调。Web 的“本地目录扫描”和应用配置均指 Linux 服务器/容器文件系统：Docker 中先挂载目录，再填写容器内路径。生成的客户端配置默认持久化到 `/data/managed-home`；Wiki 页面与源文件统一持久化到 `WALIAPI_DATA_DIR/wiki`。设置 `WALIAPI_PUBLIC_URL=https://waliapi.example.com` 可让生成配置使用公网 HTTPS 地址。
-
-#### GitHub Actions 发布
-
-[`release-web.yml`](.github/workflows/release-web.yml) 可以直接生成两类 Linux Web 产物：
-
-- `waliapi-web-<version>-linux-x86_64.tar.gz`：包含 `waliapi-server`、`dist/`、systemd 和 Caddy 示例；每次手动运行都会保存为 Workflow Artifact。
-- `ghcr.io/<owner>/<repository>:<version>`：通过 GHCR 发布的 `linux/amd64` Docker 镜像。
-
-推送 `web-v*` 标签会创建 GitHub Release、上传二进制包，并发布带版本号和 `latest` 标签的镜像：
-
-```bash
-git tag web-v0.2.1
-git push origin web-v0.2.1
-```
-
-也可以从 Actions 页面手动运行；默认只构建和验证 Docker 镜像，勾选 `publish_image` 才会推送到 GHCR。工作流不需要、也不会读取管理员 token。镜像和二进制包都是无密钥的通用产物，必须在运行时注入：
-
-```bash
-export WALIAPI_ADMIN_TOKEN="$(openssl rand -hex 32)"
-export WALIAPI_MCP_TOKEN="$(openssl rand -hex 32)"
-docker run -d --name waliapi \
-  -p 127.0.0.1:8777:8777 \
-  -v waliapi-data:/data \
-  -e WALIAPI_ADMIN_TOKEN \
-  -e WALIAPI_MCP_TOKEN \
-  ghcr.io/<owner>/<repository>:latest
-```
-
-直接运行二进制包时同样使用环境变量：
-
-```bash
-WALIAPI_ADMIN_TOKEN="$WALIAPI_ADMIN_TOKEN" \
-WALIAPI_MCP_TOKEN="$WALIAPI_MCP_TOKEN" \
-WALIAPI_WEB_DIR="$PWD/dist" \
-./waliapi-server
-```
-
-#### 不使用 Docker：systemd
-
-先执行 `pnpm build` 和 `cargo build --release --manifest-path src-tauri/Cargo.toml --bin waliapi-server`。将 release 二进制和前端 `dist/` 放到 `/opt/waliapi/`，创建 `waliapi` 系统用户。systemd 沙箱通过 `StateDirectory=waliapi` 创建并授权固定的数据目录 `/var/lib/waliapi`；若确需改到其他目录，必须同步修改 unit 的可写路径。
-
-用仅 root 可读的权限安装环境文件，再填写管理员 token：
-
-```bash
-sudo install -Dm600 deploy/systemd/waliapi.env.example /etc/waliapi/waliapi.env
-sudo chown root:root /etc/waliapi/waliapi.env
-sudoedit /etc/waliapi/waliapi.env
-```
-
-然后安装服务：
-
-```bash
-sudo install -Dm644 deploy/systemd/waliapi.service /etc/systemd/system/waliapi.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now waliapi
-sudo systemctl status waliapi
-```
-
-无论采用 Docker 还是 systemd，都应保持单实例运行（SQLite 不支持多个写入实例共享同一数据目录）。定期在停机窗口或使用 SQLite 一致性备份方式备份 `/data`（systemd 部署为 `/var/lib/waliapi`），并在升级前保留可回滚副本。管理员 token、渠道密钥和数据库备份都属于敏感数据，应限制文件权限并通过 HTTPS 传输。
 
 ---
 
@@ -593,6 +642,9 @@ WaLiAPI/
 - 121 个文件变更，+22,616 / -14,462 行代码
 - 版本号统一升级至 0.2.1（package.json / Cargo.toml / tauri.conf.json）
 
+<details>
+<summary>📜 查看历史版本</summary>
+
 ### v0.1.9 (2026-08-13)
 
 #### 渠道多 Key 负载均衡
@@ -739,11 +791,41 @@ WaLiAPI/
 - 设置中心（主题/托盘/自启/重试）
 - SSE 流式响应转发
 
+</details>
+
 ---
 
 ## 📄 License
 
 [MIT](./LICENSE)
+
+本项目基于 MIT 开源协议发布，具有以下权利和说明：
+
+### ✅ 你可以
+
+- **商业使用**：可将 WaLiAPI 用于商业项目、企业内部工具或 SaaS 服务，无需支付授权费用
+- **个人使用**：个人开发者可免费下载、安装和使用
+- **二次开发**：可基于本项目进行修改、扩展和定制，满足业务需求
+- **分发与部署**：可在组织内部或向客户分发部署
+- **私有化部署**：支持完全离线的私有化部署，数据不出本地
+
+### ⚠️ 需要注意
+
+- 保留原始版权声明和许可证声明
+- 二次开发后的衍生项目建议开源回馈社区
+- 本项目不提供任何形式的担保，使用风险自负
+- 如将 WaLiAPI 作为商业产品的一部分分发，建议在产品文档中注明基于 WaLiAPI 构建
+
+### 💡 常见场景
+
+| 场景 | 是否允许 |
+|:---|:---:|
+| 个人本地使用 | ✅ |
+| 公司内部部署 | ✅ |
+| 商业产品集成 | ✅ |
+| 二次开发后闭源使用 | ✅ |
+| 重新分发销售 | ✅（需保留版权声明） |
+| 移除版权声明后分发 | ❌ |
 
 ---
 
