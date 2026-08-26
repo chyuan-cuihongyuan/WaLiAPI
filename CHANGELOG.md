@@ -2,6 +2,7 @@
 
 ## v0.2.3 (2026-08-26)
 
+- 🐛 **`/v1/models` 补全 Auth 账号模型**：模型列表接口此前仅聚合启用渠道（Channel）的 `models` 与 `model_mapping`，未包含 `auth_accounts` 登录账号同步的模型，导致「能路由却列不出」。现合并 auth 账号模型快照中 `available` 且未 `unavailable` 的条目及其 `model_mapping` 源别名，与渠道模型统一去重（渠道优先，`owned_by` 归属渠道；账号模型 `owned_by` 为 provider），OpenAI / Anthropic 两种响应格式均生效
 - 📝 **README 文档完善**：更新代码贡献者信息表，补齐 v0.2.2 Docker / Web 管理面板贡献者 Fla1337，同步各贡献者最新提交量与代码变更统计
 - 🔧 **版本号统一升级至 0.2.3**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
