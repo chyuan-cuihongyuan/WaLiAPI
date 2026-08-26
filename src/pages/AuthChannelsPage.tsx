@@ -22,7 +22,7 @@ function exportFileName(account: AuthAccount) {
 function EmptyAccountSlot({ provider, onLogin, onImport, busy }: { provider: AuthProviderInfo; onLogin: () => void; onImport: () => void; busy: boolean }) {
   const isKimi = provider.loginMode === "device_code";
   const displayName = provider.displayName;
-  return <section className="flex min-h-80 flex-col items-center justify-center rounded-[24px] border border-dashed border-border bg-card/50 p-6 text-center"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/10 text-xl font-bold text-success">{isKimi ? "☾" : "⌘"}</div><h2 className="mt-4 font-semibold">＋ 登录 {displayName} 账号</h2><p className="mt-2 max-w-xs text-sm leading-6 text-muted-foreground">{isKimi ? "设备码授权：在浏览器确认后返回。" : "浏览器 OAuth 登录（PKCE）或从本机 ~/.codex/auth.json 导入"}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onLogin} disabled={busy} className="action-primary"><KeyRound size={16} />登录</button>{!isKimi && <button onClick={onImport} disabled={busy} className="action-secondary"><Upload size={16} />导入</button>}</div></section>;
+  return <section className="flex min-h-80 flex-col items-center justify-center rounded-[24px] border border-dashed border-border bg-card/50 p-6 text-center"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/10 text-xl font-bold text-success">{isKimi ? "☾" : "⌘"}</div><h2 className="mt-4 font-semibold">＋ 登录 {displayName} 账号</h2><p className="mt-2 max-w-xs text-sm leading-6 text-muted-foreground">{isKimi ? "设备码授权：在浏览器确认后返回。" : "浏览器 OAuth 登录（PKCE），或导入 Codex auth.json / Sub2API 导出文件"}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onLogin} disabled={busy} className="action-primary"><KeyRound size={16} />登录</button>{!isKimi && <button onClick={onImport} disabled={busy} className="action-secondary"><Upload size={16} />导入</button>}</div></section>;
 }
 
 function ConfirmationDialog({ confirmation, pending, onCancel, onConfirm }: { confirmation: Confirmation; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
@@ -94,13 +94,13 @@ export function AuthChannelsPage() {
     if (isWebRuntime()) {
       const content = await pickFileAsText(".json,application/json");
       if (content === null) return; // 用户取消 → 静默 no-op
-      setPendingId("import"); setNotice({ kind: "success", message: "正在导入 auth.json …" });
+      setPendingId("import"); setNotice({ kind: "success", message: "正在导入账号文件 …" });
       try {
         const result = await authApi.loginImportContent("codex", content);
-        setNotice(result.warning ? { kind: "warning", message: "账号已保存但暂不参与路由：模型同步失败。" } : { kind: "success", message: result.notice || "已导入账号。" });
+        setNotice(result.warning ? { kind: "warning", message: `${result.notice ? `${result.notice} ` : ""}账号已保存但暂不参与路由：模型同步失败。` } : { kind: "success", message: result.notice || "已导入账号。" });
         await load();
       } catch (_) {
-        setNotice({ kind: "error", message: "导入失败，请确认 auth.json 字段完整。" });
+        setNotice({ kind: "error", message: "导入失败，请确认 Codex auth.json 或 Sub2API 导出文件字段完整。" });
       } finally { setPendingId(null); }
       return;
     }
@@ -114,8 +114,8 @@ export function AuthChannelsPage() {
         // 默认路径解析失败(无 home)时回退为不带 defaultPath 弹框,仍可手动选文件
       }
       path = await open({
-        title: "选择 Codex auth.json 文件",
-        filters: [{ name: "Codex auth", extensions: ["json"] }],
+        title: "选择 Codex auth.json 或 Sub2API 导出文件",
+        filters: [{ name: "账号导出 JSON", extensions: ["json"] }],
         multiple: false,
         defaultPath,
       });
@@ -130,7 +130,7 @@ export function AuthChannelsPage() {
       setNotice(result.warning ? { kind: "warning", message: "账号已保存但暂不参与路由：模型同步失败。" } : { kind: "success", message: result.notice || `已从 ${label} 导入账号。` });
       await load();
     } catch (_) {
-      setNotice({ kind: "error", message: "导入失败，请确认 auth.json 可读且字段完整。" });
+      setNotice({ kind: "error", message: "导入失败，请确认 Codex auth.json 或 Sub2API 导出文件可读且字段完整。" });
     } finally { setPendingId(null); }
   };
   const confirmAction = async () => {
@@ -189,7 +189,7 @@ export function AuthChannelsPage() {
     }
   };
 
-  return <div className="page-shell space-y-3"><div className="page-header sticky top-0 z-30 -mx-7 -mt-7 mb-2 flex-col bg-card/90 px-7 pt-3 backdrop-blur-md"><div className="flex w-full items-start justify-between gap-4 pb-1.5"><div><h1 className="page-title">渠道管理</h1><p className="page-subtitle mt-0.5">登录各厂商订阅账号，作为上游路由候选</p></div><div className="flex items-center gap-2"><button onClick={() => { setReloginAccount(null); setShowLogin(true); }} disabled={pendingId === "import"} className="action-primary"><KeyRound size={16} />登录账号</button>{activeProvider.supportsImport && <button onClick={importAuth} disabled={pendingId === "import"} className="action-secondary">{pendingId === "import" ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}导入 Codex auth.json</button>}</div></div><ChannelTabs /></div>
+  return <div className="page-shell space-y-3"><div className="page-header sticky top-0 z-30 -mx-7 -mt-7 mb-2 flex-col bg-card/90 px-7 pt-3 backdrop-blur-md"><div className="flex w-full items-start justify-between gap-4 pb-1.5"><div><h1 className="page-title">渠道管理</h1><p className="page-subtitle mt-0.5">登录各厂商订阅账号，作为上游路由候选</p></div><div className="flex items-center gap-2"><button onClick={() => { setReloginAccount(null); setShowLogin(true); }} disabled={pendingId === "import"} className="action-primary"><KeyRound size={16} />登录账号</button>{activeProvider.supportsImport && <button onClick={importAuth} disabled={pendingId === "import"} className="action-secondary">{pendingId === "import" ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}导入账号文件</button>}</div></div><ChannelTabs /></div>
     {notice && <div role="status" className={`flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm ${notice.kind === "error" ? "border-destructive/25 bg-destructive/10 text-destructive" : notice.kind === "warning" ? "border-warning/25 bg-warning/10 text-warning" : "border-success/25 bg-success/10 text-success"}`}><span>{notice.message}</span><button onClick={() => setNotice(null)} aria-label="关闭提示"><X size={16} /></button></div>}
     <ProviderPills selected={selectedProvider} onSelect={setSelectedProvider} /><p className="text-sm text-muted-foreground">登录后作为路由候选并消耗订阅额度；开启 Auth 账号优先后，将优先使用。</p>
     <div className="flex gap-2 rounded-2xl border border-destructive/25 bg-destructive/10 px-4 py-3 text-xs leading-5 text-destructive"><CircleAlert className="mt-0.5 shrink-0" size={16} /><p>⚠️ 风险提示：此提供商使用的订阅 / OAuth 会话未获官方授权用于代理 / 路由器使用。账户可能被限制或封禁。使用风险自负。</p></div>
