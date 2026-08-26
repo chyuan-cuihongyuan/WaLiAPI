@@ -8,7 +8,7 @@ use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
@@ -788,17 +788,7 @@ pub async fn auth_login_import(
     let kind = provider_kind(provider)?;
     let path = import_path(path)?;
     let bytes = fs::read(path).map_err(|_| "Unable to read auth file".to_owned())?;
-    let summary = state
-        .auth_service
-        .import(kind, &bytes)
-        .await
-        .map_err(safe_error)?;
-    sync_after_login(
-        &state.auth_service,
-        summary,
-        Some(CODEX_IMPORT_NOTICE.to_owned()),
-    )
-    .await
+    import_auth_bytes(kind, &bytes, state.inner()).await
 }
 
 /// Web 管理面板：直接以文件内容导入（浏览器 `<input type=file>` 上传，无服务器路径）。
@@ -813,17 +803,90 @@ pub async fn auth_login_import_content(
     if bytes.is_empty() {
         return Err("Unable to read auth file".to_owned());
     }
-    let summary = state
-        .auth_service
-        .import(kind, &bytes)
-        .await
-        .map_err(safe_error)?;
-    sync_after_login(
-        &state.auth_service,
-        summary,
-        Some(CODEX_IMPORT_NOTICE.to_owned()),
-    )
-    .await
+    import_auth_bytes(kind, &bytes, state.inner()).await
+}
+
+/// Import raw auth bytes, transparently handling both the native WaLiAPI
+/// `auth.json` shape and sub2api multi-account exports. A sub2api document is
+/// split into one single-account import per entry so every account is stored.
+async fn import_auth_bytes(
+    kind: ProviderKind,
+    bytes: &[u8],
+    state: &Arc<AppState>,
+) -> Result<AuthMutationResult, String> {
+    let service = &state.auth_service;
+    let parsed: Option<Value> = serde_json::from_slice(bytes).ok();
+    // A sub2api export carries multiple accounts; split it into one
+    // single-account document per entry so each is imported independently.
+    let chunks: Vec<Vec<u8>> = match parsed.as_ref().filter(|value| {
+        value
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|ty| ty == "sub2api-data")
+    }) {
+        Some(doc) => {
+            let accounts = doc.get("accounts").and_then(Value::as_array);
+            match accounts {
+                Some(accounts) if !accounts.is_empty() => accounts
+                    .iter()
+                    .map(|account| {
+                        serde_json::to_vec(&json!({
+                            "type": "sub2api-data",
+                            "version": 1,
+                            "accounts": [account.clone()],
+                        }))
+                        .unwrap_or_default()
+                    })
+                    .collect(),
+                _ => vec![bytes.to_vec()],
+            }
+        }
+        None => vec![bytes.to_vec()],
+    };
+    let total = chunks.len();
+    let mut last_result = None;
+    let mut first_error = None;
+    let mut failures = 0usize;
+    for chunk in &chunks {
+        match service.import(kind.clone(), chunk).await {
+            Ok(summary) => match sync_after_login(
+                service,
+                summary,
+                Some(CODEX_IMPORT_NOTICE.to_owned()),
+            )
+            .await
+            {
+                Ok(result) => last_result = Some(result),
+                Err(error) => {
+                    failures += 1;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            },
+            Err(error) => {
+                failures += 1;
+                if first_error.is_none() {
+                    first_error = Some(safe_error(error));
+                }
+            }
+        }
+    }
+    match (last_result, first_error) {
+        (Some(mut result), _) => {
+            if total > 1 {
+                let note = if failures > 0 {
+                    format!("已从 sub2api 导出导入 {total} 个账号，其中 {failures} 个失败。")
+                } else {
+                    format!("已从 sub2api 导出导入 {total} 个账号。")
+                };
+                result.notice = Some(note);
+            }
+            Ok(result)
+        }
+        (None, Some(error)) => Err(error),
+        (None, None) => Err("Unable to read auth file".to_owned()),
+    }
 }
 
 #[tauri::command]

@@ -552,7 +552,67 @@ async fn oauth_callback(
     (StatusCode::OK, "Codex login complete; return to WaLiAPI.")
 }
 
+/// Detect a sub2api export document (`type: "sub2api-data"`).
+fn is_sub2api_doc(value: &Value) -> bool {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|ty| ty == "sub2api-data")
+}
+
+/// Parse a single sub2api account entry into a provider payload.
+///
+/// Field mapping: `account_id` is sourced from `credentials.chatgpt_account_id`
+/// (sub2api's name for the same field). `expires_at` prefers the explicit
+/// `credentials.expires_at` timestamp, falling back to the JWT `exp` claim.
+fn parse_sub2api_account(account: &Value) -> Result<ProviderPayload, ProviderError> {
+    let credentials = account
+        .get("credentials")
+        .ok_or(ProviderError::ImportFailed)?;
+    let id_token = required_string(credentials, "id_token", ProviderError::ImportFailed)?;
+    let access_token = required_string(credentials, "access_token", ProviderError::ImportFailed)?;
+    let refresh_token = required_string(credentials, "refresh_token", ProviderError::ImportFailed)?;
+    let account_id = required_string(
+        credentials,
+        "chatgpt_account_id",
+        ProviderError::ImportFailed,
+    )?;
+    let expires_at = credentials
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            expires_at_from_jwt(
+                credentials
+                    .get("access_token")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+        });
+    let mut payload = json!({
+        "version": 1,
+        "id_token": id_token,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "account_id": account_id,
+    });
+    if let Some(expires_at) = expires_at {
+        payload["expires_at"] = json!(expires_at);
+    }
+    Ok(ProviderPayload::new(payload))
+}
+
 fn parse_auth_json(value: &Value) -> Result<ProviderPayload, ProviderError> {
+    // sub2api exports carry multiple accounts; import the first one here. The
+    // command layer splits the full document so every account is imported.
+    if is_sub2api_doc(value) {
+        let accounts = value.get("accounts").and_then(Value::as_array);
+        let account = accounts
+            .and_then(|accounts| accounts.first())
+            .ok_or(ProviderError::ImportFailed)?;
+        return parse_sub2api_account(account);
+    }
     let auth_mode = required_string(value, "auth_mode", ProviderError::ImportFailed)?;
     if auth_mode != "chatgpt" || !value.get("OPENAI_API_KEY").is_some() {
         return Err(ProviderError::ImportFailed);
@@ -1153,6 +1213,88 @@ mod tests {
             ProviderError::ImportFailed
         );
         server.abort();
+    }
+
+    #[test]
+    fn sub2api_export_first_account_is_parsed_as_codex_payload() {
+        let fixture = json!({
+            "type": "sub2api-data",
+            "version": 1,
+            "accounts": [
+                {
+                    "platform": "openai",
+                    "type": "oauth",
+                    "credentials": {
+                        "id_token": "id-token",
+                        "access_token": "access-token",
+                        "refresh_token": "refresh-token",
+                        "chatgpt_account_id": "account-1"
+                    }
+                },
+                {
+                    "platform": "anthropic",
+                    "type": "oauth",
+                    "credentials": {}
+                }
+            ]
+        });
+        let payload = parse_auth_json(&fixture).unwrap();
+        let value = payload.as_value();
+        assert_eq!(value["account_id"], "account-1");
+        assert_eq!(value["refresh_token"], "refresh-token");
+        assert_eq!(value["access_token"], "access-token");
+        assert_eq!(value["id_token"], "id-token");
+    }
+
+    #[test]
+    fn sub2api_export_without_accounts_is_rejected() {
+        let fixture = json!({"type": "sub2api-data", "accounts": []});
+        assert_eq!(
+            parse_auth_json(&fixture).unwrap_err(),
+            ProviderError::ImportFailed
+        );
+    }
+
+    #[test]
+    fn sub2api_account_with_expires_at_is_preserved() {
+        let fixture = json!({
+            "type": "sub2api-data",
+            "accounts": [{
+                "platform": "openai",
+                "type": "oauth",
+                "credentials": {
+                    "id_token": "id-token",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "chatgpt_account_id": "account-1",
+                    "expires_at": "2099-01-01T00:00:00Z"
+                }
+            }]
+        });
+        let payload = parse_auth_json(&fixture).unwrap();
+        assert_eq!(payload.as_value()["expires_at"], "2099-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn sub2api_account_id_falls_back_to_account_id_field() {
+        let fixture = json!({
+            "type": "sub2api-data",
+            "accounts": [{
+                "platform": "openai",
+                "type": "oauth",
+                "credentials": {
+                    "id_token": "id-token",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "account_id": "fallback-acct"
+                }
+            }]
+        });
+        // chatgpt_account_id is missing → should fail (required field)
+        assert_eq!(
+            parse_auth_json(&fixture).unwrap_err(),
+            ProviderError::ImportFailed
+        );
     }
 
     #[test]
