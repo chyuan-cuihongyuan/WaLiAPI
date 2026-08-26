@@ -690,7 +690,16 @@ fn sub2api_codex_accounts(
             Some(credentials) => credentials,
             None => continue,
         };
-        let Ok(payload) = codex_payload_from_tokens(&Value::Object(credentials.clone())) else {
+        // sub2api stores the ChatGPT account id as `chatgpt_account_id`
+        // (openai_oauth_service.go); normalize it to the `account_id` key the
+        // shared token extractor expects.  An explicit `account_id` wins.
+        let mut normalized = credentials.clone();
+        if !normalized.contains_key("account_id") {
+            if let Some(id) = normalized.get("chatgpt_account_id") {
+                normalized.insert("account_id".to_owned(), id.clone());
+            }
+        }
+        let Ok(payload) = codex_payload_from_tokens(&Value::Object(normalized)) else {
             continue;
         };
         let label = entry
@@ -1361,6 +1370,9 @@ mod tests {
 
     #[test]
     fn sub2api_openai_accounts_are_extracted_and_others_skipped() {
+        // Synthetic normalization-variant fixture: real sub2api exports carry
+        // `chatgpt_account_id` + `type: "sub2api-data"` (see the regression
+        // test below); an explicit `account_id` must win over normalization.
         let fixture = json!({
             "type": "accounts", "version": 1,
             "accounts": [
@@ -1388,6 +1400,39 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].label.as_deref(), Some("codex-main"));
         assert_eq!(accounts[0].payload.as_value()["account_id"], "sub2api-a");
+    }
+
+    #[test]
+    fn sub2api_real_export_uses_chatgpt_account_id() {
+        // Real sub2api admin-data export shape (backend
+        // openai_oauth_service.go writes `chatgpt_account_id`, not
+        // `account_id`; extra bookkeeping keys like email/expires_at are
+        // ignored).  Regression: the sole account used to be silently
+        // skipped, surfacing as "导入失败" for a valid file.
+        let fixture = json!({
+            "type": "sub2api-data", "version": 1,
+            "exported_at": "2026-08-26T08:31:47+00:00",
+            "accounts": [
+                {
+                    "name": "jennifersimon497104t@outlook.com_40刀",
+                    "platform": "openai", "type": "oauth",
+                    "credentials": {
+                        "access_token": ACCESS, "refresh_token": REFRESH,
+                        "id_token": ID,
+                        "chatgpt_account_id": "real-export-id",
+                        "email": "jennifersimon497104t@outlook.com",
+                        "expires_at": "2026-08-26T09:31:47+00:00"
+                    }
+                }
+            ]
+        });
+        let accounts = sub2api_codex_accounts(&fixture).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].payload.as_value()["account_id"], "real-export-id");
+        assert_eq!(
+            accounts[0].label.as_deref(),
+            Some("jennifersimon497104t@outlook.com_40刀")
+        );
     }
 
     #[test]
