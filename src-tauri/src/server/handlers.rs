@@ -16,6 +16,14 @@ use axum::{
 use futures_util::StreamExt;
 use rand::SeedableRng;
 use sqlx::sqlite::SqlitePool;
+
+/// A key lookup failure means "invalid key" only when the row is genuinely
+/// absent (or disabled); any other database error is a storage failure and
+/// must surface as 5xx, not as an authentication error.
+fn is_key_lookup_storage_error(err: &sqlx::Error) -> bool {
+    !matches!(err, sqlx::Error::RowNotFound)
+}
+
 /// Run the unified security audit gate against the ORIGINAL downstream
 /// protocol JSON full tree (never a converted Chat JSON).  Returns
 /// `Ok(AuditedRequest)` for audit-allow / redact, or a ready HTTP response
@@ -243,6 +251,25 @@ fn has_request_scoped_auth_candidate(
 }
 
 #[cfg(test)]
+mod key_lookup_classification_tests {
+    use super::is_key_lookup_storage_error;
+
+    #[test]
+    fn row_not_found_is_authentication_failure_not_storage_error() {
+        let err = sqlx::Error::RowNotFound;
+        assert!(!is_key_lookup_storage_error(&err));
+    }
+
+    #[test]
+    fn database_errors_are_storage_failures() {
+        assert!(is_key_lookup_storage_error(&sqlx::Error::PoolTimedOut));
+        assert!(is_key_lookup_storage_error(&sqlx::Error::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, "disk")
+        )));
+    }
+}
+
+#[cfg(test)]
 mod auth_routeplan_rollout_tests {
     use super::{auth_routeplan_rollout_enabled, has_request_scoped_auth_candidate};
     use crate::core::feature_flags::FeatureFlags;
@@ -456,6 +483,9 @@ pub async fn handle_chat_completions(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key_record = match repo.get_api_key_by_key(api_key).await {
         Ok(k) => k,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Key lookup failed").into_response()
+        }
         Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
     };
 
@@ -1715,6 +1745,13 @@ pub async fn handle_messages(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key = match repo.get_api_key_by_key(&api_key).await {
         Ok(key) => key,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return anthropic_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Key lookup failed",
+            )
+        }
         Err(_) => {
             return anthropic_error(
                 StatusCode::UNAUTHORIZED,
@@ -2180,6 +2217,13 @@ pub async fn handle_messages_count_tokens(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key = match repo.get_api_key_by_key(&api_key).await {
         Ok(key) => key,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return anthropic_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Key lookup failed",
+            )
+        }
         Err(_) => {
             return anthropic_error(
                 StatusCode::UNAUTHORIZED,
@@ -2328,6 +2372,15 @@ pub async fn handle_responses(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key_record = match repo.get_api_key_by_key(&api_key).await {
         Ok(k) => k,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {"message": "Key lookup failed", "type": "server_error"}
+                })),
+            )
+                .into_response()
+        }
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -2975,6 +3028,15 @@ pub async fn handle_embeddings(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key_record = match repo.get_api_key_by_key(&api_key).await {
         Ok(k) => k,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {"message": "Key lookup failed", "type": "server_error"}
+                })),
+            )
+                .into_response()
+        }
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -3380,7 +3442,8 @@ fn collect_auth_account_models(
     for account in accounts {
         if let Ok(states) = account.model_states() {
             for state in &states.models {
-                if state.status == "available" && !state.unavailable
+                if state.status == "available"
+                    && !state.unavailable
                     && seen.insert(state.id.clone())
                 {
                     out.push(ConfigModel {
@@ -3484,6 +3547,14 @@ async fn list_models_impl(pool: SqlitePool, headers: &HeaderMap) -> Response {
     let repo = Repository::new(pool);
     let key = match repo.get_api_key_by_key(&api_key).await {
         Ok(key) => key,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return models_error(
+                anthropic,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Key lookup failed",
+            )
+        }
         Err(_) => {
             return models_error(
                 anthropic,
