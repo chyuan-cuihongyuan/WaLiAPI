@@ -1,5 +1,6 @@
 use super::router::SharedState;
 use crate::adaptor::{get_adaptor, ProxyRequest};
+use crate::core::attempt::{upstream_failover_decision, FailoverDecision};
 use crate::core::dispatcher::Dispatcher;
 use crate::core::feature_flags;
 use crate::core::proxy;
@@ -864,13 +865,19 @@ async fn handle_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    if retryable_upstream_status(status) {
-                        continue;
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => continue,
+                        FailoverDecision::Stop { downstream_status } => {
+                            // Nothing has been streamed yet — stop cycling
+                            // channels; the tail returns this status (an
+                            // upstream 401/403 is masked to 502; last_error
+                            // above keeps the real response text).
+                            last_error_status = Some(
+                                StatusCode::from_u16(downstream_status).unwrap_or(status),
+                            );
+                            break;
+                        }
                     }
-                    // Terminal upstream failure and nothing has been streamed
-                    // yet — stop cycling channels; the tail returns this status.
-                    last_error_status = Some(status);
-                    break;
                 }
 
                 let start = std::time::Instant::now();
@@ -1567,10 +1574,6 @@ fn stored_native_response(error: StoredNativeError) -> Response {
     })
 }
 
-fn retryable_upstream_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 409 | 429 | 529) || status.is_server_error()
-}
-
 fn openai_error_response(
     status: StatusCode,
     message: &str,
@@ -1923,25 +1926,39 @@ pub async fn handle_messages(
                 Ok((response, upstream_model)) => {
                     let status = StatusCode::from_u16(response.status().as_u16())
                         .unwrap_or(StatusCode::BAD_GATEWAY);
-                    if !retryable_upstream_status(status) {
-                        record_anthropic_outcome(
-                            repo.clone(),
-                            &key,
-                            Some(&channel),
-                            &model,
-                            upstream_model,
-                            &sanitized_log_json,
-                            &security_result,
-                            stream,
-                            status.as_u16() as i64,
-                            Some(format!("Native upstream returned HTTP {status}")),
-                            None,
-                        )
-                        .await;
-                        return native_response(response, None);
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => {
+                            last_error = format!("{}: HTTP {}", channel.name, status);
+                            last_native_error = Some(store_native_error(response).await);
+                        }
+                        FailoverDecision::Stop { downstream_status } => {
+                            record_anthropic_outcome(
+                                repo.clone(),
+                                &key,
+                                Some(&channel),
+                                &model,
+                                upstream_model,
+                                &sanitized_log_json,
+                                &security_result,
+                                stream,
+                                status.as_u16() as i64,
+                                Some(format!("Native upstream returned HTTP {status}")),
+                                None,
+                            )
+                            .await;
+                            // An upstream 401/403 is a channel-credential
+                            // failure — answer 502 instead of passing it
+                            // through (the outcome log keeps the real status).
+                            if downstream_status != status.as_u16() {
+                                return anthropic_error(
+                                    StatusCode::BAD_GATEWAY,
+                                    "api_error",
+                                    "Upstream channel authentication failed",
+                                );
+                            }
+                            return native_response(response, None);
+                        }
                     }
-                    last_error = format!("{}: HTTP {}", channel.name, status);
-                    last_native_error = Some(store_native_error(response).await);
                 }
                 Err(error) => {
                     last_error = format!("{}: {error}", channel.name);
@@ -2064,24 +2081,30 @@ pub async fn handle_messages(
                     .and_then(|value| value.as_str())
                     .unwrap_or("OpenAI Chat Completions upstream rejected the request");
                 last_error = format!("{}: {message}", channel.name);
-                if !retryable_upstream_status(status) {
-                    record_anthropic_outcome(
-                        repo.clone(),
-                        &key,
-                        Some(&channel),
-                        &model,
-                        upstream_model,
-                        &sanitized_log_json,
-                        &security_result,
-                        stream,
-                        status.as_u16() as i64,
-                        Some(last_error.clone()),
-                        None,
-                    )
-                    .await;
-                    return openai_error_response(status, message, &response_headers);
+                match upstream_failover_decision(status.as_u16()) {
+                    FailoverDecision::Failover => {
+                        last_openai_error = Some((status, message.to_string(), response_headers));
+                    }
+                    FailoverDecision::Stop { .. } => {
+                        record_anthropic_outcome(
+                            repo.clone(),
+                            &key,
+                            Some(&channel),
+                            &model,
+                            upstream_model,
+                            &sanitized_log_json,
+                            &security_result,
+                            stream,
+                            status.as_u16() as i64,
+                            Some(last_error.clone()),
+                            None,
+                        )
+                        .await;
+                        // openai_error_response already maps an upstream
+                        // 401/403 to 502 api_error (429 keeps Retry-After).
+                        return openai_error_response(status, message, &response_headers);
+                    }
                 }
-                last_openai_error = Some((status, message.to_string(), response_headers));
             }
             Err(error) => {
                 last_error = format!("{}: {error}", channel.name);
@@ -2333,10 +2356,23 @@ pub async fn handle_messages_count_tokens(
             Ok((response, _upstream_model)) => {
                 let status = StatusCode::from_u16(response.status().as_u16())
                     .unwrap_or(StatusCode::BAD_GATEWAY);
-                if !retryable_upstream_status(status) {
-                    return native_response(response, None);
+                match upstream_failover_decision(status.as_u16()) {
+                    FailoverDecision::Failover => {
+                        last_error = Some(store_native_error(response).await);
+                    }
+                    FailoverDecision::Stop { downstream_status } => {
+                        // Mask a channel-credential failure (401/403) to 502;
+                        // every other terminal status passes through verbatim.
+                        if downstream_status != status.as_u16() {
+                            return anthropic_error(
+                                StatusCode::BAD_GATEWAY,
+                                "api_error",
+                                "Upstream channel authentication failed",
+                            );
+                        }
+                        return native_response(response, None);
+                    }
                 }
-                last_error = Some(store_native_error(response).await);
             }
             Err(_) => continue,
         }
@@ -2737,13 +2773,19 @@ async fn handle_responses_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    if retryable_upstream_status(status) {
-                        continue;
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => continue,
+                        FailoverDecision::Stop { downstream_status } => {
+                            // Nothing has been streamed yet — stop cycling
+                            // channels; the tail returns this status (an
+                            // upstream 401/403 is masked to 502; last_error
+                            // above keeps the real response text).
+                            last_error_status = Some(
+                                StatusCode::from_u16(downstream_status).unwrap_or(status),
+                            );
+                            break;
+                        }
                     }
-                    // Terminal upstream failure and nothing has been streamed
-                    // yet — stop cycling channels; the tail returns this status.
-                    last_error_status = Some(status);
-                    break;
                 }
 
                 let start = std::time::Instant::now();
@@ -3272,16 +3314,21 @@ pub async fn handle_embeddings(
                         eprintln!("[WARN] create_security_findings failed: {}", e);
                     }
                     last_error = Some(error_message);
-                    if retryable_upstream_status(status) {
-                        continue;
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => continue,
+                        FailoverDecision::Stop { downstream_status } => {
+                            // Terminal status: the same request would fail
+                            // identically on every channel — surface this
+                            // response (an upstream 401/403 is masked to
+                            // 502; the log above keeps the real status).
+                            return (
+                                StatusCode::from_u16(downstream_status)
+                                    .unwrap_or(StatusCode::BAD_GATEWAY),
+                                Json(resp_body),
+                            )
+                                .into_response();
+                        }
                     }
-                    // Terminal upstream statuses (400/401/403/422...) would fail
-                    // identically on every channel — surface this response.
-                    return (
-                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                        Json(resp_body),
-                    )
-                        .into_response();
                 }
 
                 // Extract usage from response
