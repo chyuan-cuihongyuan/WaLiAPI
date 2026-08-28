@@ -1,4 +1,5 @@
 use crate::adaptor::{get_adaptor, ProxyRequest, TokenUsage};
+use crate::core::attempt::{classify_http_status, FailureClass};
 use crate::core::dispatcher::Dispatcher;
 use crate::db::models::{Channel, RequestLog};
 use crate::db::repository::Repository;
@@ -8,6 +9,14 @@ use crate::utils;
 use rand::Rng;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Failover only over statuses the new-track classifier marks retryable
+/// (408/409/429/529/5xx).  Caller-terminal and channel-auth-terminal statuses
+/// stop the loop and surface the upstream response verbatim; an ambiguous 404
+/// also stops, matching the handlers' legacy rule.
+fn upstream_status_is_retryable(status: u16) -> bool {
+    matches!(classify_http_status(status), Some(FailureClass::Retryable))
+}
 
 /// Multi-key load balancing for the legacy proxy path.  Selects a random
 /// enabled key from the channel's extra keys, weighted by `weight`.  The
@@ -262,7 +271,19 @@ pub async fn handle_request(
                         eprintln!("[WARN] create_security_findings failed: {}", e);
                     }
                     last_error = Some(error_message);
-                    continue;
+                    if upstream_status_is_retryable(status) {
+                        continue;
+                    }
+                    // Caller-terminal / channel-auth-terminal / ambiguous: the
+                    // same request will fail on every other channel too, so
+                    // surface this upstream response instead of failover.
+                    return Ok(ProxyResult {
+                        status,
+                        body: resp_body,
+                        usage: None,
+                        channel,
+                        duration_ms: duration_ms as u64,
+                    });
                 }
 
                 // Extract and log choices
