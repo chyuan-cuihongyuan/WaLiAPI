@@ -4,7 +4,7 @@
 
 ### 本地 LLM API 网关 · 多协议接入 · 知识库 RAG · MCP 工具服务
 
-[![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-使用方式)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -40,10 +40,10 @@
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 260 | `+91,762 / -16,344` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
-| ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 135 | `+96,558 / -24,357` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 |
-| 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 14 | `+4,997 / -1,124` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
-| 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 9 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 266 | `+92,066 / -16,370` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
+| ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
+| 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
+| 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 10 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
 | 🐛 | **lianggq** | [@GQingL](https://github.com/GQingL) | 1 | `+91 / -9` | 日志日期筛选修复 · macOS 渠道删除按钮修复 |
 
 </div>
@@ -607,6 +607,24 @@ WaLiAPI/
 ---
 
 ## 📌 版本历史
+
+### v0.2.4 (2026-08-28)
+
+#### Auth 账号导入增强
+
+- ✨ **多格式导入**：Auth 账号导入支持 Codex、sub2api、CPA 三种格式，用户可通过导入下拉共享组件选择对应格式批量导入账号
+- ✨ **sub2api 格式支持**：新增 sub2api 导入格式，兼容 `chatgpt_account_id` 键名映射
+- ✨ **Codex 导入兼容**：Codex 导入同步支持 sub2api 格式，导入下拉抽取为共享组件，空状态卡片复用
+
+#### 模型列表增强
+
+- ✨ **模型列表增加 Auth 类型**：`/v1/models` 接口返回结果新增 Auth 账号类型模型，下游应用可发现并使用 Auth 账号提供的模型
+
+#### Auth 账号卡片优化
+
+- ✨ **Codex 卡片信息增强**：卡片同时显示 5H 与周限额信息，操作按钮收为一行，提升信息密度与交互体验
+
+- 🔧 **版本号统一升级至 0.2.4**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
 ### v0.2.3 (2026-08-26)
 
