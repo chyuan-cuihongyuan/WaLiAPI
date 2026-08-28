@@ -556,7 +556,11 @@ pub async fn handle_chat_completions(
         )
         .await
         {
-            Ok(result) => (StatusCode::OK, Json(result.body)).into_response(),
+            Ok(result) => (
+                StatusCode::from_u16(result.status).unwrap_or(StatusCode::OK),
+                Json(result.body),
+            )
+                .into_response(),
             Err((code, msg)) => {
                 let err_body = serde_json::json!({
                     "error": { "message": msg, "type": "upstream_error", "code": code }
@@ -798,6 +802,10 @@ async fn handle_stream(
     };
 
     let mut last_error = None;
+    // Set when an upstream returned a terminal (non-retryable) status before
+    // any bytes were streamed, so the loop stops and the final response keeps
+    // that status instead of a generic 502.
+    let mut last_error_status: Option<StatusCode> = None;
 
     for (attempt, channel) in selected_channels.into_iter().take(max_attempts).enumerate() {
         let config = Dispatcher::channel_to_config(&channel);
@@ -826,7 +834,13 @@ async fn handle_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    continue;
+                    if retryable_upstream_status(status) {
+                        continue;
+                    }
+                    // Terminal upstream failure and nothing has been streamed
+                    // yet — stop cycling channels; the tail returns this status.
+                    last_error_status = Some(status);
+                    break;
                 }
 
                 let start = std::time::Instant::now();
@@ -1118,7 +1132,8 @@ async fn handle_stream(
             "type": "upstream_error"
         }
     });
-    (StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
+    let status = last_error_status.unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, Json(err_body)).into_response()
 }
 
 // ─── Anthropic Messages API: POST /v1/messages ─────────────────────────────
@@ -2463,9 +2478,15 @@ pub async fn handle_responses(
         .await
         {
             Ok(result) => {
-                // Convert OpenAI response to Responses API format
+                // Convert OpenAI response to Responses API format.  A
+                // caller-terminal upstream status keeps its status code; only
+                // the body is re-framed.
                 let responses_resp = protocol::openai_to_responses(&result.body, &model);
-                (StatusCode::OK, Json(responses_resp)).into_response()
+                (
+                    StatusCode::from_u16(result.status).unwrap_or(StatusCode::OK),
+                    Json(responses_resp),
+                )
+                    .into_response()
             }
             Err((code, msg)) => {
                 let err_body = serde_json::json!({
@@ -2632,6 +2653,10 @@ async fn handle_responses_stream(
     };
 
     let mut last_error = None;
+    // Set when an upstream returned a terminal (non-retryable) status before
+    // any bytes were streamed, so the loop stops and the final response keeps
+    // that status instead of a generic 502.
+    let mut last_error_status: Option<StatusCode> = None;
 
     for (attempt, channel) in selected_channels.into_iter().take(max_attempts).enumerate() {
         let config = Dispatcher::channel_to_config(&channel);
@@ -2659,7 +2684,13 @@ async fn handle_responses_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    continue;
+                    if retryable_upstream_status(status) {
+                        continue;
+                    }
+                    // Terminal upstream failure and nothing has been streamed
+                    // yet — stop cycling channels; the tail returns this status.
+                    last_error_status = Some(status);
+                    break;
                 }
 
                 let start = std::time::Instant::now();
@@ -2941,7 +2972,8 @@ async fn handle_responses_stream(
             "type": "upstream_error"
         }
     });
-    (StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
+    let status = last_error_status.unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, Json(err_body)).into_response()
 }
 
 pub async fn handle_completions(State(_shared): State<SharedState>) -> Response {
@@ -3178,7 +3210,16 @@ pub async fn handle_embeddings(
                         eprintln!("[WARN] create_security_findings failed: {}", e);
                     }
                     last_error = Some(error_message);
-                    continue;
+                    if retryable_upstream_status(status) {
+                        continue;
+                    }
+                    // Terminal upstream statuses (400/401/403/422...) would fail
+                    // identically on every channel — surface this response.
+                    return (
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                        Json(resp_body),
+                    )
+                        .into_response();
                 }
 
                 // Extract usage from response
