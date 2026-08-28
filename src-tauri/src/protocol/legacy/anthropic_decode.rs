@@ -70,7 +70,11 @@ pub fn anthropic_to_openai(body: &Value) -> Result<Value, String> {
     // Convert Anthropic tools to OpenAI tools format
     // Anthropic: {"name": "xxx", "description": "xxx", "input_schema": {...}}
     // OpenAI: {"type": "function", "function": {"name": "xxx", "description": "xxx", "parameters": {...}}}
-    // Also handles Anthropic built-in tools (web_search, computer_use, etc.) which are skipped.
+    // Anthropic server-side tools (web_search, computer_use, ...) have no Chat
+    // Completions equivalent and are skipped fail-open so a mixed custom +
+    // built-in request can still use a conversion channel; tool_choice that
+    // forces a skipped built-in still requires a native Anthropic channel.
+    let mut skipped_builtin_names: Vec<String> = Vec::new();
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
         let mut openai_tools = Vec::new();
         for tool in tools {
@@ -106,10 +110,14 @@ pub fn anthropic_to_openai(body: &Value) -> Result<Value, String> {
                     }));
                 }
                 _ => {
-                    return Err(
-                        "Anthropic built-in tools require a native Anthropic Messages channel"
-                            .to_string(),
-                    )
+                    if !is_anthropic_builtin_tool_type(tool_type) {
+                        return Err(format!(
+                            "unsupported Anthropic tool type '{tool_type}' requires a native Anthropic Messages channel"
+                        ));
+                    }
+                    if let Some(name) = tool.get("name").and_then(|n| n.as_str()) {
+                        skipped_builtin_names.push(name.to_string());
+                    }
                 }
             }
         }
@@ -117,18 +125,40 @@ pub fn anthropic_to_openai(body: &Value) -> Result<Value, String> {
             openai_body["tools"] = Value::Array(openai_tools);
         }
     }
+    // tool_choice is only dropped when it references a toolset that no longer
+    // exists because every tool was a skipped built-in; a request that never
+    // had tools keeps its tool_choice (existing fail-open behavior).
+    let dropped_all_tools = !skipped_builtin_names.is_empty() && openai_body.get("tools").is_none();
+    let keep_tool_choice = !dropped_all_tools;
 
     // Convert tool_choice
     // Anthropic: {"type": "auto"} or {"type": "any"} or {"type": "tool", "name": "xxx"}
     // OpenAI: "auto" or "required" or {"type": "function", "function": {"name": "xxx"}}
+    // OpenAI Chat Completions rejects `tool_choice` without `tools`, so it is
+    // dropped when every tool was a skipped built-in; forcing a skipped
+    // built-in still requires a native Anthropic channel.
     if let Some(tc) = body.get("tool_choice") {
         if let Some(tc_type) = tc.get("type").and_then(|t| t.as_str()) {
             let openai_tc = match tc_type {
                 "auto" => Value::String("auto".to_string()),
-                "any" => Value::String("required".to_string()),
+                "any" => {
+                    if dropped_all_tools {
+                        return Err(
+                            "Anthropic built-in tools require a native Anthropic Messages channel"
+                                .to_string(),
+                        );
+                    }
+                    Value::String("required".to_string())
+                }
                 "tool" => {
                     let name = tc.get("name").and_then(|n| n.as_str()).filter(|s| !s.is_empty())
                         .ok_or_else(|| "Anthropic tool_choice type 'tool' is missing a name".to_string())?;
+                    if skipped_builtin_names.iter().any(|n| n == name) {
+                        return Err(
+                            "Anthropic built-in tools require a native Anthropic Messages channel"
+                                .to_string(),
+                        );
+                    }
                     serde_json::json!({
                         "type": "function",
                         "function": {"name": name}
@@ -136,11 +166,21 @@ pub fn anthropic_to_openai(body: &Value) -> Result<Value, String> {
                 }
                 _ => return Err("unsupported Anthropic tool_choice requires a native Anthropic Messages channel".to_string()),
             };
-            openai_body["tool_choice"] = openai_tc;
+            if keep_tool_choice {
+                openai_body["tool_choice"] = openai_tc;
+            }
         } else if let Some(s) = tc.as_str() {
             let openai_tc = match s {
                 "auto" => Value::String("auto".to_string()),
-                "any" => Value::String("required".to_string()),
+                "any" => {
+                    if dropped_all_tools {
+                        return Err(
+                            "Anthropic built-in tools require a native Anthropic Messages channel"
+                                .to_string(),
+                        );
+                    }
+                    Value::String("required".to_string())
+                }
                 "tool" => return Err("Anthropic tool_choice 'tool' requires a name".to_string()),
                 _ => {
                     return Err(
@@ -149,7 +189,9 @@ pub fn anthropic_to_openai(body: &Value) -> Result<Value, String> {
                     )
                 }
             };
-            openai_body["tool_choice"] = openai_tc;
+            if keep_tool_choice {
+                openai_body["tool_choice"] = openai_tc;
+            }
         } else {
             return Err(
                 "unsupported Anthropic tool_choice requires a native Anthropic Messages channel"
@@ -183,6 +225,25 @@ pub fn anthropic_to_openai(body: &Value) -> Result<Value, String> {
 ///
 /// `None` when the downstream did not ask for thinking (or asked for an
 /// unrecognized type), in which case `reasoning_effort` is left unset.
+/// Anthropic server-side tool families. Versions are encoded as a suffix on
+/// the type (e.g. `web_search_20250305`), so prefix matching is required.
+const ANTHROPIC_BUILTIN_TOOL_TYPES: &[&str] = &[
+    "web_search",
+    "computer_use",
+    "computer",
+    "text_editor",
+    "code_execution",
+    "bash",
+    "code_analysis",
+    "mcp_connector",
+];
+
+fn is_anthropic_builtin_tool_type(tool_type: &str) -> bool {
+    ANTHROPIC_BUILTIN_TOOL_TYPES
+        .iter()
+        .any(|prefix| tool_type == *prefix || tool_type.starts_with(&format!("{prefix}_")))
+}
+
 fn anthropic_thinking_to_reasoning_effort(body: &Value) -> Option<String> {
     let thinking = body.get("thinking")?;
     if !thinking.is_object() {
