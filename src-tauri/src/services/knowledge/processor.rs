@@ -120,18 +120,19 @@ async fn process_document_inner(
         parser::ParsedContent::Structured(t) => (t.clone(), "structured".to_string()),
     };
 
-    // 2. OCR 总开关（全局设置，默认关）：关闭时完全走原逻辑——不做扫描判定、不调 LLM。
-    //    开启且为 PDF 时，先用 pdfium 取页数做扫描版判定，命中才进入 OCR 子流水线。
+    // 2. OCR 总开关（全局设置，默认关）：关闭时完全走原逻辑——不做判定、不调 LLM。
+    //    开启且为 PDF 时做页级判定：文字层充足的页直接用文字层（零成本、零幻觉），
+    //    仅文字不足的页进入 OCR 子流水线（图文混合文档只为缺字页付费）。
     let kb = repo.get_kb(kb_id).await.map_err(|e| e.to_string())?;
     let mut ocr_outcome: Option<ocr::OcrOutcome> = None;
     if settings.get_bool("ocr.enabled", false) && parser::get_file_type(filename) == "pdf" {
-        let page_count = {
+        let pages_text = {
             let renderer = ocr::render::lock_renderer(data_dir)
                 .await
                 .map_err(|e| e.to_string())?;
-            renderer.page_count(content).map_err(|e| e.to_string())?
+            renderer.extract_pages_text(content).map_err(|e| e.to_string())?
         };
-        if ocr::is_scanned_pdf(&text, page_count) {
+        if !ocr::pages_needing_ocr(&pages_text).is_empty() {
             // 两级 gate 的第二级：知识库未配 OCR 模型时报配置引导错误
             let model = kb
                 .ocr_model
@@ -152,6 +153,7 @@ async fn process_document_inner(
                 settings,
                 data_dir,
                 &content_hash,
+                &pages_text,
             )
             .await
             .map_err(|e| e.to_string())?;

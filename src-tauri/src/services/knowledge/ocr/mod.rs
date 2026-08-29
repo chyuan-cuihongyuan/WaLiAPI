@@ -1,7 +1,9 @@
-//! 知识库 VLM OCR（方案A）：扫描版 PDF 识别子流水线。
+//! 知识库 VLM OCR（方案A）：扫描版/图文混合 PDF 识别子流水线。
 //!
-//! 入口 `ocr_pdf()`：pdfium 逐页渲染 → 页级缓存 → 并发调 VLM（渠道 failover）
-//! → 拼接为带页码锚点的 Markdown。OCR 只产出"文本"，split 之后的流水线无感知。
+//! 页级混合识别：逐页提取文字层，文字充足的页直接复用（零成本、零幻觉），
+//! 仅文字不足的页渲染成图走 VLM。入口 `ocr_pdf()`：页级缓存 → 并发调 VLM
+//! （渠道 failover）→ 拼接为带页码锚点的 Markdown。OCR 只产出"文本"，
+//! split 之后的流水线无感知。
 //!
 //! 全局总开关 `ocr.enabled`（默认关）在 processor 中判定：关闭时完全不进入本模块，
 //! 不做扫描判定、不调 LLM，行为与历史版本一致。
@@ -20,15 +22,27 @@ use crate::db::repository::Repository;
 use crate::server::event_bridge::EventSink;
 use crate::settings_store::SettingsStore;
 
-/// 每页平均字符数低于该阈值即判定为扫描版（全局常量，后续可在设置中暴露）
+/// 单页文字层字符数低于该阈值即判定该页需要 OCR（全局常量，后续可在设置中暴露）
 const MIN_CHARS_PER_PAGE: usize = 50;
 
-/// 扫描版判定：无法获知页数（page_count=0）时不判定为扫描版。
+/// 整篇判定（主流程已改用页级判定 `pages_needing_ocr`，保留供对照与测试）。
+/// 无法获知页数（page_count=0）时不判定为扫描版。
 pub fn is_scanned_pdf(extracted_text: &str, page_count: usize) -> bool {
     if page_count == 0 {
         return false;
     }
     extracted_text.chars().count() / page_count < MIN_CHARS_PER_PAGE
+}
+
+/// 页级判定：返回文字层不足、需要 OCR 的页码（1 起）。
+/// 返回空 = 全文都有文字层（零 OCR 成本）；返回全部页 = 纯扫描件。
+pub fn pages_needing_ocr(pages_text: &[String]) -> Vec<usize> {
+    pages_text
+        .iter()
+        .enumerate()
+        .filter(|(_, text)| text.chars().count() < MIN_CHARS_PER_PAGE)
+        .map(|(i, _)| i + 1)
+        .collect()
 }
 
 /// OCR 错误码。Display 文本以 `OCR_*` 错误码开头，直接作为文档失败原因落库，
@@ -64,7 +78,8 @@ pub struct OcrOutcome {
     pub total_tokens: u64,
 }
 
-/// 识别整份 PDF。model 为知识库级 ocr_model（调用方已校验非空）。
+/// 页级混合识别整份 PDF：文字层充足的页直接复用文字层，仅文字不足的页渲染走 VLM。
+/// model 为知识库级 ocr_model（调用方已校验非空）；pages_text 为逐页文字层（调用方已用 pdfium 提取）。
 #[allow(clippy::too_many_arguments)]
 pub async fn ocr_pdf(
     pool: &SqlitePool,
@@ -77,16 +92,14 @@ pub async fn ocr_pdf(
     settings: &SettingsStore,
     data_dir: &Path,
     content_hash: &str,
+    pages_text: &[String],
 ) -> Result<OcrOutcome, OcrError> {
     let max_pages = settings.get_u64("ocr.max_pages", 200) as usize;
     let concurrency = (settings.get_u64("ocr.concurrency", 2) as usize).clamp(1, 4);
     let dpi = settings.get_u64("ocr.dpi", 200) as u32;
 
-    // 1. 打开文档拿页数（同时校验 pdfium 可用、PDF 未加密损坏）
-    let page_count = {
-        let renderer = render::lock_renderer(data_dir).await?;
-        renderer.page_count(pdf)?
-    };
+    // 页数来自文字层提取结果（调用方已用 pdfium 打开过文档，校验过加密/损坏）
+    let page_count = pages_text.len();
     if page_count > max_pages {
         return Err(OcrError::PageLimitExceeded {
             pages: page_count,
@@ -94,12 +107,22 @@ pub async fn ocr_pdf(
         });
     }
 
+    // 1. 页级分流：只有文字层不足的页才渲染并调 VLM
+    let ocr_pages = pages_needing_ocr(pages_text);
+    let ocr_total = ocr_pages.len();
+    tracing::info!(
+        "OCR 页级判定（doc={}）：共 {} 页，其中 {} 页文字层不足需识别",
+        doc_id,
+        page_count,
+        ocr_total
+    );
+
     let cache = cache::PageCache::open(data_dir, content_hash, model, dpi);
     let repo = Repository::new(pool.clone());
     let client = vlm::VlmOcrClient::new(&repo, model);
 
     // 2. 并发识别（buffer_unordered 即并发上限）；渲染经全局 Mutex 串行化
-    let mut page_stream = stream::iter(1..=page_count)
+    let mut page_stream = stream::iter(ocr_pages.iter().copied())
         .map(|page_no| {
             let cache = &cache;
             let client = &client;
@@ -137,7 +160,7 @@ pub async fn ocr_pdf(
         })
         .buffer_unordered(concurrency);
 
-    let mut page_texts: Vec<Option<String>> = vec![None; page_count];
+    let mut recognized: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut failed_pages: Vec<usize> = Vec::new();
     let mut total_tokens: u64 = 0;
     let mut done_count = 0usize;
@@ -146,7 +169,7 @@ pub async fn ocr_pdf(
         done_count += 1;
         match result {
             Ok((markdown, tokens)) => {
-                page_texts[page_no - 1] = Some(markdown);
+                recognized.insert(page_no, markdown);
                 total_tokens += tokens;
             }
             Err(e) => {
@@ -154,8 +177,8 @@ pub async fn ocr_pdf(
                 failed_pages.push(page_no);
             }
         }
-        // 3. 进度事件：stage="ocr"，映射到整体进度的 5%–15%（插在 parsing 与 splitting 之间）
-        let pct = 5 + ((done_count as f64 / page_count as f64) * 10.0) as u8;
+        // 3. 进度事件：stage="ocr"，映射到整体进度的 5%–15%（插在 parsing 和 splitting 之间）
+        let pct = 5 + ((done_count as f64 / ocr_total as f64) * 10.0) as u8;
         super::processor::emit_progress(
             events,
             doc_id,
@@ -163,11 +186,11 @@ pub async fn ocr_pdf(
             filename,
             "ocr",
             pct,
-            &format!("OCR 识别 第 {}/{} 页", done_count, page_count),
+            &format!("OCR 识别 第 {}/{} 页", page_no, page_count),
         );
     }
 
-    // 4. 失败率熔断：过半页面失败则整个文档置 failed
+    // 4. 失败率熔断：过半页面失败则整个文档置 failed（文字层为主时天然不会触发）
     if failed_pages.len() > page_count / 2 {
         return Err(OcrError::TooManyFailures {
             total: page_count,
@@ -180,12 +203,17 @@ pub async fn ocr_pdf(
         });
     }
 
-    // 5. 失败页写占位文本，拼接全文（每页前注入页码锚点）
-    let pages: Vec<String> = page_texts
-        .into_iter()
-        .enumerate()
-        .map(|(i, text)| {
-            text.unwrap_or_else(|| format!("[第 {} 页识别失败，请检查后重新索引]", i + 1))
+    // 5. 合成全文：文字层页用文字层文本；OCR 页用识别结果，失败页写占位文本
+    let ocr_page_set: std::collections::HashSet<usize> = ocr_pages.iter().copied().collect();
+    let pages: Vec<String> = (1..=page_count)
+        .map(|p| {
+            if ocr_page_set.contains(&p) {
+                recognized
+                    .remove(&p)
+                    .unwrap_or_else(|| format!("[第 {} 页识别失败，请检查后重新索引]", p))
+            } else {
+                pages_text[p - 1].clone()
+            }
         })
         .collect();
     let markdown = join_pages(&pages);
@@ -227,6 +255,20 @@ mod tests {
         // 文字版 PDF：大量文本 → 非扫描版
         let text = "字".repeat(10_000);
         assert!(!is_scanned_pdf(&text, 10));
+    }
+
+    #[test]
+    fn pages_needing_ocr_marks_only_text_thin_pages() {
+        let rich = "字".repeat(100);
+        // 混合文档：第 2、3 页文字层不足 → 仅这两页需要 OCR
+        let pages = vec![rich.clone(), "图".to_string(), String::new(), rich.clone()];
+        assert_eq!(pages_needing_ocr(&pages), vec![2, 3]);
+        // 全文字层 → 无需 OCR（零成本路径）
+        let pages = vec![rich.clone(), "字".repeat(60)];
+        assert!(pages_needing_ocr(&pages).is_empty());
+        // 纯扫描件 → 全部页
+        let pages = vec![String::new(), String::new()];
+        assert_eq!(pages_needing_ocr(&pages), vec![1, 2]);
     }
 
     #[test]

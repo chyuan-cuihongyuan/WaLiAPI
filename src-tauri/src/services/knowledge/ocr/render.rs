@@ -65,6 +65,26 @@ impl PdfRenderer {
         Ok(document.pages().len() as usize)
     }
 
+    /// 逐页提取文字层文本（页级扫描判定 + 混合模式下文字页的内容来源）。
+    /// 纯图片页得到近空字符串。
+    pub fn extract_pages_text(&self, pdf: &[u8]) -> Result<Vec<String>, OcrError> {
+        let document = self
+            .pdfium
+            .load_pdf_from_byte_slice(pdf, None)
+            .map_err(|e| {
+                OcrError::RenderFailed(format!("PDF 渲染失败：文件可能加密或损坏（{}）", e))
+            })?;
+        let mut out = Vec::with_capacity(document.pages().len() as usize);
+        for page in document.pages().iter() {
+            let text = page
+                .text()
+                .map_err(|e| OcrError::RenderFailed(format!("提取页面文字层失败: {}", e)))?
+                .all();
+            out.push(text);
+        }
+        Ok(out)
+    }
+
     /// 渲染单页（1 起）为 JPEG 字节流。200 DPI、quality=80，兼顾清晰度与 token 成本。
     pub fn render_page_jpeg(
         &self,

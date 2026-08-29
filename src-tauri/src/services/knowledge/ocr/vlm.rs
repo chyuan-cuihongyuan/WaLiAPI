@@ -1,5 +1,6 @@
-//! VLM 调用：复用网关渠道调度（与 embedder.rs 同一模式），
-//! 端点换成 /chat/completions 的 OpenAI 视觉格式（主流国产视觉模型均兼容）。
+//! VLM 调用：复用网关渠道调度（与 embedder.rs 同一模式）。
+//! 按渠道协议适配请求格式：claude 渠道走 Anthropic Messages 视觉格式（/messages），
+//! 其余渠道走 OpenAI Chat Completions 视觉格式（/chat/completions，主流国产视觉模型均兼容）。
 //!
 //! 与 embedding 的差异：无渠道命中时**不 fallback 全部渠道**——向不支持视觉的
 //! 文本模型发图片必失败且浪费 token，直接返回 OCR_NO_VISION_CHANNEL 引导配置。
@@ -94,35 +95,61 @@ async fn try_ocr_with_channel(
     timeout_secs: u64,
 ) -> Result<OcrPageResult, String> {
     let base_url = channel.base_url.trim_end_matches('/');
+    let image_data = base64::engine::general_purpose::STANDARD.encode(jpeg);
 
     // 应用模型映射（与 embedder.rs 同一语义）
     let actual_model = apply_model_mapping(model, &channel.model_mapping);
 
-    let image_data = format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(jpeg)
-    );
-    let url = format!("{}/chat/completions", base_url);
-    let body = serde_json::json!({
-        "model": actual_model,
-        "stream": false,
-        "max_tokens": 4096,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": OCR_PROMPT },
-                    { "type": "image_url", "image_url": { "url": image_data } }
+    // 按渠道协议构造请求：claude 渠道走 Anthropic Messages 视觉格式（/messages + x-api-key），
+    // 其余渠道走 OpenAI Chat Completions 视觉格式（/chat/completions + Bearer）
+    let is_claude = channel.channel_type == "claude";
+    let (url, body) = if is_claude {
+        (
+            format!("{}/messages", base_url),
+            serde_json::json!({
+                "model": actual_model,
+                "max_tokens": 4096,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": image_data } },
+                            { "type": "text", "text": OCR_PROMPT }
+                        ]
+                    }
                 ]
-            }
-        ]
-    });
+            }),
+        )
+    } else {
+        (
+            format!("{}/chat/completions", base_url),
+            serde_json::json!({
+                "model": actual_model,
+                "stream": false,
+                "max_tokens": 4096,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": OCR_PROMPT },
+                            { "type": "image_url", "image_url": { "url": format!("data:image/jpeg;base64,{}", image_data) } }
+                        ]
+                    }
+                ]
+            }),
+        )
+    };
 
     let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", channel.api_key))
-        .header("Content-Type", "application/json")
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+    if is_claude {
+        req = req
+            .header("x-api-key", &channel.api_key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.header("Authorization", format!("Bearer {}", channel.api_key));
+    }
+    let resp = req
         .json(&body)
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .send()
@@ -144,17 +171,32 @@ async fn try_ocr_with_channel(
         .await
         .map_err(|e| format!("Parse response failed: {}", e))?;
 
-    // choices[0].message.content：多数 VLM 返回字符串；兼容 OpenAI 多段数组格式
-    let content = match json.pointer("/choices/0/message/content") {
-        Some(serde_json::Value::String(s)) => s.trim().to_string(),
-        Some(serde_json::Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("")
+    // 响应解析：claude 为 content[] 文本块数组；OpenAI 为 choices[0].message.content（兼容多段数组）
+    let content = if is_claude {
+        json.get("content")
+            .and_then(|c| c.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default()
             .trim()
-            .to_string(),
-        _ => String::new(),
+            .to_string()
+    } else {
+        match json.pointer("/choices/0/message/content") {
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            Some(serde_json::Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+                .trim()
+                .to_string(),
+            _ => String::new(),
+        }
     };
 
     // 空内容或过短视为识别失败（触发重试/failover）
@@ -165,10 +207,22 @@ async fn try_ocr_with_channel(
         ));
     }
 
-    let total_tokens = json
-        .pointer("/usage/total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    // token 用量：claude 为 usage.input_tokens + output_tokens；OpenAI 为 usage.total_tokens
+    let total_tokens = if is_claude {
+        let input = json
+            .pointer("/usage/input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = json
+            .pointer("/usage/output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        input + output
+    } else {
+        json.pointer("/usage/total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    };
 
     Ok(OcrPageResult {
         markdown: content,

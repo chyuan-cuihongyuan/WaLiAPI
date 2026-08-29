@@ -35,6 +35,30 @@ async fn insert_channel(pool: &SqlitePool, id: &str, base_url: &str, models: &st
     insert_channel_full(pool, id, base_url, models, "{}", priority).await;
 }
 
+/// 指定渠道类型（type 列）的插入：claude 渠道走 Anthropic 协议，用于验证 vlm.rs 的协议适配
+async fn insert_channel_with_type(
+    pool: &SqlitePool,
+    id: &str,
+    base_url: &str,
+    models: &str,
+    channel_type: &str,
+    priority: i64,
+) {
+    sqlx::query(
+        "INSERT INTO channels (id, name, type, base_url, api_key, models, status, priority, weight, config, model_mapping, timeout_secs, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'sk-test', ?, 1, ?, 1, '{}', '{}', 60, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+    )
+    .bind(id)
+    .bind(format!("chan-{id}"))
+    .bind(channel_type)
+    .bind(base_url)
+    .bind(models)
+    .bind(priority)
+    .execute(pool)
+    .await
+    .expect("insert channel with type");
+}
+
 async fn insert_channel_full(
     pool: &SqlitePool,
     id: &str,
@@ -186,6 +210,77 @@ async fn ocr_page_without_matching_channel_returns_no_vision_channel() {
         err.to_string().contains("OCR_NO_VISION_CHANNEL"),
         "unexpected error: {err}"
     );
+}
+
+// ── Mock Claude (Anthropic Messages) server ─────────────────────────────
+
+#[derive(Clone)]
+struct MockClaude {
+    text: String,
+    /// 捕获 (x-api-key, anthropic-version, 请求体)
+    requests: Arc<Mutex<Vec<(String, String, serde_json::Value)>>>,
+}
+
+async fn mock_claude_messages(
+    State(mock): State<MockClaude>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let ver = headers
+        .get("anthropic-version")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    mock.requests.lock().unwrap().push((key, ver, body));
+    Json(serde_json::json!({
+        "content": [{"type": "text", "text": mock.text}],
+        "usage": {"input_tokens": 1000, "output_tokens": 50}
+    }))
+}
+
+#[tokio::test]
+async fn ocr_page_uses_anthropic_format_for_claude_channels() {
+    let pool = fresh_db().await;
+    let mock = MockClaude {
+        text: "这是 claude 渠道识别出的页面内容。".to_string(),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let requests = mock.requests.clone();
+    let app = Router::new()
+        .route("/messages", post(mock_claude_messages))
+        .with_state(mock);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{}", addr);
+
+    insert_channel_with_type(&pool, "claude1", &base_url, r#"["test-vl"]"#, "claude", 10).await;
+
+    let repo = Repository::new(pool.clone());
+    let client = VlmOcrClient::new(&repo, "test-vl");
+    let result = client.ocr_page(b"fake-jpeg", 1).await.expect("ocr_page via claude");
+
+    assert_eq!(result.markdown, "这是 claude 渠道识别出的页面内容。");
+    assert_eq!(result.total_tokens, 1050);
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    let (key, ver, body) = &reqs[0];
+    // Anthropic 鉴权头
+    assert_eq!(key, "sk-test");
+    assert_eq!(ver, "2023-06-01");
+    // Anthropic 视觉消息格式：image(base64) + text
+    let content = &body["messages"][0]["content"];
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[0]["source"]["type"], "base64");
+    assert_eq!(content[0]["source"]["media_type"], "image/jpeg");
+    assert_eq!(content[1]["type"], "text");
+    assert!(content[1]["text"].as_str().unwrap().contains("Markdown"));
 }
 
 #[tokio::test]
