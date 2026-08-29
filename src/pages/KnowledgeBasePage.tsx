@@ -2451,12 +2451,20 @@ function aggregateChannelModels(chs: Channel[]): string[] {
   return Array.from(new Set(chs.filter(c => c.status === 1).flatMap(c => c.models))).sort();
 }
 
+/** 名字上疑似向量（Embedding）模型的匹配规则：embed / bge / gte / m3e 等常见命名 */
+const EMBEDDING_MODEL_PATTERN = /embed|bge|gte|m3e/i;
+
+/** OCR（视觉）下拉选项：排除疑似 embedding 模型——识图请求发给向量模型必然失败。 */
+function filterVisionModels(models: string[]): string[] {
+  return models.filter((m) => !EMBEDDING_MODEL_PATTERN.test(m));
+}
+
 /** 默认可选的 Embedding 模型（OpenAI 系），与历史默认保持一致 */
 const DEFAULT_EMBEDDING_MODELS = ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"];
 
-/** Embedding 下拉选项：默认模型 + 已配置渠道声明的模型；当前值不在列表时保留，避免误清空。 */
+/** Embedding 下拉选项：默认模型 + 渠道声明中疑似 embedding 的模型；当前值不在列表时保留，避免误清空。 */
 function mergeEmbeddingOptions(channelModels: string[], current: string): string[] {
-  const all = [...DEFAULT_EMBEDDING_MODELS, ...channelModels];
+  const all = [...DEFAULT_EMBEDDING_MODELS, ...channelModels.filter((m) => EMBEDDING_MODEL_PATTERN.test(m))];
   if (current && !all.includes(current)) all.push(current);
   return Array.from(new Set(all));
 }
@@ -2482,10 +2490,12 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
   const [showChannelPicker, setShowChannelPicker] = useState(false);
   const [ocrModel, setOcrModel] = useState(kb.ocr_model || "");
   const { ocrEnabled, options: ocrModelOptionsRaw } = useOcrModelOptions();
-  // 当前已配置的模型可能已不在任何渠道声明中（渠道被删/改名），保留为可选值避免误清空
-  const ocrModelOptions = ocrModel && !ocrModelOptionsRaw.includes(ocrModel)
-    ? [...ocrModelOptionsRaw, ocrModel]
-    : ocrModelOptionsRaw;
+  // OCR 只应选视觉模型：过滤掉疑似 embedding 的模型；
+  // 当前已配置的模型即使被过滤也保留为可选值，避免误清空（可在下拉里改选正确的视觉模型）
+  const visionOptions = filterVisionModels(ocrModelOptionsRaw);
+  const ocrModelOptions = ocrModel && !visionOptions.includes(ocrModel)
+    ? [...visionOptions, ocrModel]
+    : visionOptions;
 
   useEffect(() => {
     channelApi.getAll().then(setChannels).catch(console.error);
@@ -2994,6 +3004,8 @@ function CreateKbModal({
   // channelModels = 所有启用渠道声明的模型聚合，OCR 与 Embedding 两个下拉共用
   const { ocrEnabled, options: channelModels } = useOcrModelOptions();
   const embeddingOptions = mergeEmbeddingOptions(channelModels, embeddingModel);
+  // OCR 下拉排除疑似 embedding 模型（识图请求发给向量模型必然失败）
+  const visionModelOptions = filterVisionModels(channelModels);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -3075,7 +3087,7 @@ function CreateKbModal({
               className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
             >
               <option value="">不启用（默认）</option>
-              {channelModels.map((m) => (
+              {visionModelOptions.map((m) => (
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
