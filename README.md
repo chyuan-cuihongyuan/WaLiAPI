@@ -104,13 +104,20 @@ docker pull fuzhengwei/waliapi:latest
 export WALIAPI_ADMIN_TOKEN="$(openssl rand -hex 32)"
 export WALIAPI_MCP_TOKEN="$(openssl rand -hex 32)"
 
-# 启动容器
+# 启动容器 
 docker run -d --name waliapi \
   -p 127.0.0.1:8777:8777 \
   -v waliapi-data:/data \
   -e WALIAPI_ADMIN_TOKEN \
   -e WALIAPI_MCP_TOKEN \
   fuzhengwei/waliapi:latest
+
+docker run -d --name waliapi \
+  -p 127.0.0.1:8777:8777 \
+  -v waliapi-data:/data \
+  -e WALIAPI_ADMIN_TOKEN \
+  -e WALIAPI_MCP_TOKEN \
+  registry.cn-hangzhou.aliyuncs.com/xfg-studio/waliapi:0.2.5-amd64
 
 # 验证服务
  curl http://127.0.0.1:8777/health
