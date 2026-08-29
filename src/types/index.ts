@@ -388,6 +388,11 @@ export interface Settings {
   security_block_on_critical: boolean;
   routing_prefer_auth_accounts: boolean;
   routing_prefer_same_protocol: boolean;
+  // LLM OCR（扫描版 PDF 识别）全局配置
+  ocr_enabled: boolean;
+  ocr_max_pages: number;
+  ocr_concurrency: number;
+  ocr_dpi: number;
 }
 
 // Security rule types

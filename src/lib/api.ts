@@ -160,6 +160,17 @@ export const settingsApi = {
   getFeatureFlags: () => invoke<FeatureFlagsDto>("get_feature_flags"),
 };
 
+// OCR 缓存管理（LLM OCR 页级结果缓存）
+export interface OcrCacheInfo {
+  total_bytes: number;
+  doc_count: number;
+}
+
+export const ocrApi = {
+  getCacheInfo: () => invoke<OcrCacheInfo>("get_ocr_cache_info"),
+  clearCache: () => invoke<void>("clear_ocr_cache"),
+};
+
 // Server commands
 export const serverApi = {
   getStatus: () => invoke<ServerStatus>("get_server_status"),
@@ -220,6 +231,7 @@ export interface KnowledgeBase {
     total_tokens: number;
     embedding_model: string | null;
     embedding_channel_id: string | null;
+    ocr_model: string | null;
     mcp_enabled: number;
     chunk_size: number;
     chunk_overlap: number;
@@ -249,6 +261,10 @@ export interface KbDocument {
   source_url: string | null;
   source_path: string | null;
   doc_meta: string;
+  ocr_engine: string | null;
+  page_count: number;
+  /** JSON 数组字符串，如 "[3,7]"，前端自行 JSON.parse */
+  ocr_failed_pages: string;
   created_at: string;
   updated_at: string;
 }
@@ -332,9 +348,9 @@ export interface KbTag {
 // Knowledge Base commands
 export const kbApi = {
   getAll: () => invoke<KnowledgeBase[]>("get_knowledge_bases"),
-  create: (input: { name: string; description?: string; embedding_model?: string }) =>
+  create: (input: { name: string; description?: string; embedding_model?: string; ocr_model?: string | null }) =>
     invoke<KnowledgeBase>("create_knowledge_base", { input }),
-  update: (id: string, input: Partial<{ name: string; description: string; embedding_model: string; embedding_channel_id: string; status: number; mcp_enabled: number; chunk_size: number; chunk_overlap: number; excluded_dirs: string; excluded_files: string; included_files: string; embedding_batch_size: number }>) =>
+  update: (id: string, input: Partial<{ name: string; description: string; embedding_model: string; embedding_channel_id: string; ocr_model: string | null; status: number; mcp_enabled: number; chunk_size: number; chunk_overlap: number; excluded_dirs: string; excluded_files: string; included_files: string; embedding_batch_size: number }>) =>
         invoke<KnowledgeBase>("update_knowledge_base", { id, input }),
   delete: (id: string) => invoke<void>("delete_knowledge_base", { id }),
   getDocuments: (kbId: string) => invoke<KbDocument[]>("get_kb_documents", { kbId }),

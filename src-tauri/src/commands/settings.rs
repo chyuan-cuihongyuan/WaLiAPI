@@ -46,6 +46,15 @@ pub struct Settings {
     pub routing_prefer_auth_accounts: bool,
     #[serde(default = "default_true")]
     pub routing_prefer_same_protocol: bool,
+    /// LLM OCR 总开关（默认关）。关闭时所有 PDF 走原有解析逻辑，不做扫描判定、无 LLM 调用。
+    #[serde(default = "default_false")]
+    pub ocr_enabled: bool,
+    #[serde(default = "default_ocr_max_pages")]
+    pub ocr_max_pages: i32,
+    #[serde(default = "default_ocr_concurrency")]
+    pub ocr_concurrency: i32,
+    #[serde(default = "default_ocr_dpi")]
+    pub ocr_dpi: i32,
 }
 
 fn default_port() -> u16 {
@@ -78,6 +87,15 @@ fn default_security_enabled() -> bool {
 fn default_security_mode() -> String {
     "audit".to_string()
 }
+fn default_ocr_max_pages() -> i32 {
+    200
+}
+fn default_ocr_concurrency() -> i32 {
+    2
+}
+fn default_ocr_dpi() -> i32 {
+    200
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -101,6 +119,10 @@ impl Default for Settings {
             security_block_on_critical: default_false(),
             routing_prefer_auth_accounts: default_true(),
             routing_prefer_same_protocol: default_true(),
+            ocr_enabled: default_false(),
+            ocr_max_pages: default_ocr_max_pages(),
+            ocr_concurrency: default_ocr_concurrency(),
+            ocr_dpi: default_ocr_dpi(),
         }
     }
 }
@@ -168,6 +190,10 @@ pub async fn get_settings(state: tauri::State<'_, Arc<AppState>>) -> Result<Sett
         security_block_on_critical: get_bool(store, "security.block_on_critical", false),
         routing_prefer_auth_accounts: get_bool(store, "routing.prefer_auth_accounts", true),
         routing_prefer_same_protocol: get_bool(store, "routing.prefer_same_protocol", true),
+        ocr_enabled: get_bool(store, "ocr.enabled", false),
+        ocr_max_pages: get_u64(store, "ocr.max_pages", 200) as i32,
+        ocr_concurrency: get_u64(store, "ocr.concurrency", 2) as i32,
+        ocr_dpi: get_u64(store, "ocr.dpi", 200) as i32,
     };
     Ok(settings)
 }
@@ -197,6 +223,10 @@ pub async fn save_settings(
         ("security.block_on_critical".to_string(), serde_json::json!(settings.security_block_on_critical)),
         ("routing.prefer_auth_accounts".to_string(), serde_json::json!(settings.routing_prefer_auth_accounts)),
         ("routing.prefer_same_protocol".to_string(), serde_json::json!(settings.routing_prefer_same_protocol)),
+        ("ocr.enabled".to_string(), serde_json::json!(settings.ocr_enabled)),
+        ("ocr.max_pages".to_string(), serde_json::json!(settings.ocr_max_pages)),
+        ("ocr.concurrency".to_string(), serde_json::json!(settings.ocr_concurrency)),
+        ("ocr.dpi".to_string(), serde_json::json!(settings.ocr_dpi)),
     ])?;
     Ok(())
 }

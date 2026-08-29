@@ -325,6 +325,8 @@ pub fn run() {
             commands::knowledge_base::build_kb_index,
             commands::knowledge_base::drop_kb_index,
             commands::knowledge_base::get_kb_tags,
+            commands::knowledge_base::get_ocr_cache_info,
+            commands::knowledge_base::clear_ocr_cache,
             commands::services::get_service_statuses,
             // Wiki
             commands::wiki::get_wiki_projects,

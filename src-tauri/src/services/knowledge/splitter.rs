@@ -35,6 +35,9 @@ pub struct ChunkMetadata {
     pub symbol_name: Option<String>,
     pub symbol_kind: Option<String>,
     pub signature: Option<String>,
+    /// 页码，仅 OCR 文档（按页分块）填充；旧数据反序列化时默认为 None
+    #[serde(default)]
+    pub page_no: Option<u32>,
 }
 
 /// Split text into chunks by approximate token count.
@@ -229,6 +232,7 @@ pub fn split_code_by_symbols(
                 symbol_name: Some(sym.name.clone()),
                 symbol_kind: Some(sym.kind.as_str().to_string()),
                 signature: sym.signature.clone(),
+                page_no: None,
             };
             let sub_chunks = split_text(&chunk_content, config, &sub_meta);
             chunks.extend(sub_chunks);
@@ -245,6 +249,7 @@ pub fn split_code_by_symbols(
                     symbol_name: Some(sym.name.clone()),
                     symbol_kind: Some(sym.kind.as_str().to_string()),
                     signature: sym.signature.clone(),
+                    page_no: None,
                 },
             });
         }
@@ -320,5 +325,40 @@ pub fn split(
     match file_type {
         "markdown" => split_markdown(content, config, metadata),
         _ => split_text(content, config, metadata),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_metadata_page_no_defaults_to_none() {
+        // 旧数据（无 page_no 字段）反序列化兼容
+        let meta: ChunkMetadata = serde_json::from_str(r#"{"line_start":0,"line_end":5}"#)
+            .expect("deserialize legacy metadata");
+        assert_eq!(meta.page_no, None);
+
+        // OCR 文档的 page_no 正常往返
+        let meta = ChunkMetadata {
+            page_no: Some(3),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: ChunkMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.page_no, Some(3));
+    }
+
+    #[test]
+    fn split_text_propagates_page_no() {
+        // OCR 路径按页调用 split，页码需透传到每个 chunk 的 metadata
+        let config = SplitConfig::default();
+        let metadata = ChunkMetadata {
+            page_no: Some(7),
+            ..Default::default()
+        };
+        let chunks = split_text("第一行\n第二行\n第三行", &config, &metadata);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| c.metadata.page_no == Some(7)));
     }
 }

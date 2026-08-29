@@ -2,10 +2,11 @@ use super::models::ImportSourceInput;
 use super::parser;
 use super::processor;
 use super::repository::KbRepository;
+use crate::server::event_bridge::EventSink;
+use crate::settings_store::SettingsStore;
 use sha2::Digest;
 use sqlx::SqlitePool;
-use std::path::PathBuf;
-use crate::server::event_bridge::EventSink;
+use std::path::{Path, PathBuf};
 
 /// Import a Git repository: clone → filter → process files
 pub async fn import_git_repo(
@@ -14,6 +15,8 @@ pub async fn import_git_repo(
     kb_id: &str,
     source_id: &str,
     input: &ImportSourceInput,
+    settings: &SettingsStore,
+    data_dir: &Path,
 ) -> Result<usize, String> {
     let repo_url = input
         .repo_url
@@ -81,6 +84,8 @@ pub async fn import_git_repo(
         "git",
         Some(repo_url),
         None,
+        settings,
+        data_dir,
     )
     .await;
 
@@ -97,6 +102,8 @@ pub async fn import_url(
     kb_id: &str,
     source_id: &str,
     input: &ImportSourceInput,
+    settings: &SettingsStore,
+    data_dir: &Path,
 ) -> Result<usize, String> {
     let url = input.url.as_ref().ok_or("url is required for url import")?;
 
@@ -180,6 +187,8 @@ pub async fn import_url(
         &filename,
         &content,
         emb_model.as_deref(),
+        settings,
+        data_dir,
     )
     .await?;
 
@@ -194,6 +203,8 @@ pub async fn import_local_dir(
     kb_id: &str,
     source_id: &str,
     input: &ImportSourceInput,
+    settings: &SettingsStore,
+    data_dir: &Path,
 ) -> Result<usize, String> {
     let dir_path = input
         .dir_path
@@ -221,11 +232,14 @@ pub async fn import_local_dir(
         "local_dir",
         None,
         Some(dir_path),
+        settings,
+        data_dir,
     )
     .await
 }
 
 /// Common: process all files in a directory with filtering
+#[allow(clippy::too_many_arguments)]
 async fn process_directory_files(
     pool: &SqlitePool,
     events: &EventSink,
@@ -238,6 +252,8 @@ async fn process_directory_files(
     source_type: &str,
     source_url: Option<&str>,
     _source_path: Option<&str>,
+    settings: &SettingsStore,
+    data_dir: &Path,
 ) -> Result<usize, String> {
     emit_import_progress(events, kb_id, source_id, 5, "Scanning directory...");
 
@@ -338,6 +354,8 @@ async fn process_directory_files(
             &filename,
             &content,
             emb_model.as_deref(),
+            settings,
+            data_dir,
         )
         .await
         {

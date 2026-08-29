@@ -52,6 +52,8 @@ COPY web/package.json web/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY . .
+# pdfium 动态库（知识库 OCR 渲染依赖）：下载到 resources/pdfium/，随后拷入运行时镜像
+RUN bash scripts/fetch-pdfium.sh --platform linux-x64
 # Web 管理面板（产出 web/dist，供 rust-embed 内嵌）→ 编译 headless 服务端
 # --no-default-features 关闭 desktop-ui（文件对话框/自启/OAuth 打开浏览器），
 # 避免二进制 NEEDED 引入 GTK/WebKit/DBus 动态库
@@ -68,6 +70,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     WALIAPI_SERVER_HOST=0.0.0.0 \
     WALIAPI_SERVER_PORT=8777 \
     XDG_DATA_HOME=/data \
+    WALIAPI_PDFIUM_PATH=/usr/local/lib/waliapi/pdfium \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
@@ -89,6 +92,8 @@ RUN sed -i "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g;
     && chown -R waliapi:waliapi /data
 
 COPY --from=builder /app/src-tauri/target/release/waliapi-web /usr/local/bin/waliapi-web
+# pdfium 动态库（OCR 依赖），经 WALIAPI_PDFIUM_PATH 告知加载器
+COPY --from=builder /app/src-tauri/resources/pdfium/libpdfium.so /usr/local/lib/waliapi/pdfium/libpdfium.so
 
 USER waliapi
 WORKDIR /home/waliapi

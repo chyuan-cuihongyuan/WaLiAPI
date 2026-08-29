@@ -20,6 +20,9 @@ pub struct KbKnowledgeBase {
     pub embedding_dim: i64,
     pub index_status: String,
     pub embedding_batch_size: i64,
+    /// 知识库级 OCR 视觉模型（如 qwen-vl-max）；None/空 = 不启用。
+    /// 仅在全局设置 ocr.enabled 开启后对扫描版 PDF 生效。
+    pub ocr_model: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -30,6 +33,7 @@ pub struct CreateKbInput {
     pub description: Option<String>,
     pub embedding_model: Option<String>,
     pub embedding_channel_id: Option<String>,
+    pub ocr_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +50,7 @@ pub struct UpdateKbInput {
     pub excluded_files: Option<String>,
     pub included_files: Option<String>,
     pub embedding_batch_size: Option<i64>,
+    pub ocr_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -65,6 +70,12 @@ pub struct KbDocument {
     pub source_url: Option<String>,
     pub source_path: Option<String>,
     pub doc_meta: String,
+    /// OCR 识别引擎（'vlm' / NULL = 未经过 OCR）
+    pub ocr_engine: Option<String>,
+    /// PDF 页数（仅 OCR 文档回填）
+    pub page_count: i64,
+    /// OCR 失败页码的 JSON 数组（如 "[3,7]"）
+    pub ocr_failed_pages: String,
     pub created_at: String,
     pub updated_at: String,
 }
