@@ -4,7 +4,7 @@
 
 ### 本地 LLM API 网关 · 多协议接入 · 知识库 RAG · MCP 工具服务
 
-[![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.2.5-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-使用方式)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -40,10 +40,14 @@
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 266 | `+92,066 / -16,370` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
-| ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
-| 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
-| 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 10 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 225 | `+76,849 / -15,861` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
+| ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,194 / -24,475` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
+| 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,997 / -1,124` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
+| 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 3 | `+3,008 / -112` | 知识库扫描版 PDF VLM OCR（方案A）· OCR 页级混合识别 · 修复 Claude 渠道协议适配 · OCR/Embedding 模型下拉按用途过滤 |
+| 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 5 | `+524 / -103` | 统一上游重试判定决策函数与真值表测试 · 401/403 下游脱敏 · 上游终态错误短路 · 数据库故障误报修复 · Anthropic 内置工具 400 修复 |
+| 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 7 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
+| 🐛 | **cyd** | [@cydmacro](https://github.com/cydmacro) | 1 | `+71 / -8` | Codex 工具调用参数一次性下发，修复部分客户端截断 |
+| 🐛 | **breezewonders** | [@breezewonders-dev](https://github.com/breezewonders-dev) | 1 | `+14 / -0` | Chat-to-Responses 转换 store 字段归一化修复 |
 | 🐛 | **lianggq** | [@GQingL](https://github.com/GQingL) | 1 | `+91 / -9` | 日志日期筛选修复 · macOS 渠道删除按钮修复 |
 
 </div>
@@ -615,6 +619,41 @@ WaLiAPI/
 
 ## 📌 版本历史
 
+### v0.2.5 (2026-09-01)
+
+#### Docker Web 部署
+
+- ✨ **Docker Web 部署完善**：Docker 镜像部署流程优化，README 新增 Web 部署教程章节，涵盖 Docker run / Docker Compose / systemd 三种部署方式
+
+#### 核心重试与错误处理统一
+
+- 🔧 **统一上游重试判定决策函数**：抽取各路径分散的重试逻辑为统一决策函数，覆盖全部适配器与 handler 路径，配套真值表测试确保判定准确性
+- 🐛 **上游终态错误立即短路**：401/403 等终态错误不再轮询渠道，直接返回客户端，避免无效重试消耗时间
+- 🐛 **401/403 下游脱敏**：上游返回 401/403 时，下游响应中脱敏处理错误信息，不泄露上游凭证状态
+- 🐛 **数据库故障不再误报 401**：数据库连接异常时不再误返 `401 Invalid API key`，返回正确的 503 服务不可用
+- 🐛 **Anthropic 内置工具 400 修复**：Anthropic 内置工具（如 web_search）经 OpenAI Chat 渠道转发时不再整体返回 400
+
+#### 知识库 VLM OCR
+
+- ✨ **扫描版 PDF VLM OCR**：知识库支持扫描版 PDF 文档的 VLM（视觉语言模型）OCR 识别，自动检测扫描页面并调用 VLM 进行文字提取
+- ✨ **OCR 页级混合识别**：逐页检测是否为扫描页，扫描页走 VLM OCR、文本页走常规提取，混合模式兼顾精度与速度
+- ✨ **OCR/Embedding 模型下拉按用途过滤**：知识库配置中 OCR 和 Embedding 模型下拉框按模型用途分类过滤，避免选错模型类型
+- 🐛 **Claude 渠道协议适配修复**：修复 Claude 渠道在 OCR 场景下的协议适配问题
+
+#### 协议 Codec 加固
+
+- 🐛 **Codex 工具调用参数一次性下发**：修复部分客户端在 Codex 工具调用流式传输中截断参数的问题，改为一次性下发完整参数
+- 🐛 **Chat-to-Responses store 字段归一化**：Chat 请求转 Responses 格式时归一化 `store` 字段，避免字段缺失或不一致导致的兼容性问题
+
+#### UI 优化
+
+- 🔧 **边框样式优化**：优化界面边框视觉样式
+
+- 🔧 **版本号统一升级至 0.2.5**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
+<details>
+<summary>📜 查看历史版本</summary>
+
 ### v0.2.4 (2026-08-28)
 
 #### Auth 账号导入增强
@@ -633,7 +672,7 @@ WaLiAPI/
 
 - 🔧 **版本号统一升级至 0.2.4**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
-### v0.2.3 (2026-08-26)
+
 
 - 📝 **README 文档完善**：更新代码贡献者信息表（补齐 v0.2.2 Docker / Web 管理面板贡献者 Fla1337，同步各贡献者最新提交量与代码变更统计）
 - 🔧 **版本号统一升级至 0.2.3**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
@@ -716,8 +755,12 @@ WaLiAPI/
 - 121 个文件变更，+22,616 / -14,462 行代码
 - 版本号统一升级至 0.2.1（package.json / Cargo.toml / tauri.conf.json）
 
-<details>
-<summary>📜 查看历史版本</summary>
+### v0.2.0 (2026-08-14)
+
+#### 端点验证与稳定性
+
+- 🐛 **端点验证 bug 修复**：修复渠道端点校验逻辑缺陷
+- 🔧 **版本号统一升级至 0.2.0**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
 ### v0.1.9 (2026-08-13)
 
@@ -848,6 +891,31 @@ WaLiAPI/
 - ✨ 应用配置：一键写入 8 款 AI 编程工具配置（Claude Code / Codex / Gemini CLI / WaLiCode 等）
 - ✨ 导入导出：渠道配置 JSON 备份 + WaLiCode 备份文件导入
 - ✨ 内置应用更新检查（Tauri Updater）
+
+### v0.1.3 (2026-07-26)
+
+#### 知识库 RAG 增强
+
+- ✨ **符号感知分块（P0）**：代码文件不再按固定 token 数盲切，而是按 AST 符号边界（函数/类/方法）切分，每个 chunk 是完整符号，检索时能精确定位到 `UserController.getUsers` 这种级别
+- ✨ **FTS5 混合检索（P1）**：向量检索（语义相似 0.7 权重）+ FTS5 关键词检索（精确匹配 0.3 权重）合并，比纯向量召回率更高
+- ✨ **MCP server instructions（P2）**：agent 连接时自动注入工具使用指南，避免反模式（先 search 再自己总结等）
+- ✨ **知识库标签**：知识库支持标签管理与筛选
+- ✨ **RAG MCP 动态维护**：RAG MCP 工具支持动态维护
+
+#### 自动更新
+
+- 🔧 **自动更新处理优化**：完善自动更新流程的异常处理
+
+### v0.1.2 (2026-07-22)
+
+#### 自动更新
+
+- ✨ **检查更新**：内置应用更新检查功能
+- ✨ **静默更新**：支持静默更新模式
+- ✨ **多镜像更新源**：GitHub + GitCode 多镜像更新源，UI 展示源探测
+- ✨ **更新提示红点**：新版本可用时侧边栏展示红点提示
+- 🔧 **release-mirror 改用 `workflow_run` 触发**，GitCode 镜像同步优化
+- 🐛 **Updater 配置修复**：添加 `createUpdaterArtifacts: true`
 
 ### v0.1.1 (2026-07-21)
 

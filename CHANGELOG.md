@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.2.5 (2026-09-01)
+
+### Docker Web 部署
+
+- ✨ **Docker Web 部署完善**：Docker 镜像部署流程优化，README 新增 Web 部署教程章节，涵盖 Docker run / Docker Compose / systemd 三种部署方式
+
+### 核心重试与错误处理统一
+
+- 🔧 **统一上游重试判定决策函数**：抽取各路径分散的重试逻辑为统一决策函数，覆盖全部适配器与 handler 路径，配套真值表测试确保判定准确性
+- 🐛 **上游终态错误立即短路**：401/403 等终态错误不再轮询渠道，直接返回客户端，避免无效重试消耗时间
+- 🐛 **401/403 下游脱敏**：上游返回 401/403 时，下游响应中脱敏处理错误信息，不泄露上游凭证状态
+- 🐛 **数据库故障不再误报 401**：数据库连接异常时不再误返 `401 Invalid API key`，返回正确的 503 服务不可用
+- 🐛 **Anthropic 内置工具 400 修复**：Anthropic 内置工具（如 web_search）经 OpenAI Chat 渠道转发时不再整体返回 400
+
+### 知识库 VLM OCR
+
+- ✨ **扫描版 PDF VLM OCR**：知识库支持扫描版 PDF 文档的 VLM（视觉语言模型）OCR 识别，自动检测扫描页面并调用 VLM 进行文字提取
+- ✨ **OCR 页级混合识别**：逐页检测是否为扫描页，扫描页走 VLM OCR、文本页走常规提取，混合模式兼顾精度与速度
+- ✨ **OCR/Embedding 模型下拉按用途过滤**：知识库配置中 OCR 和 Embedding 模型下拉框按模型用途分类过滤，避免选错模型类型
+- 🐛 **Claude 渠道协议适配修复**：修复 Claude 渠道在 OCR 场景下的协议适配问题
+
+### 协议 Codec 加固
+
+- 🐛 **Codex 工具调用参数一次性下发**：修复部分客户端在 Codex 工具调用流式传输中截断参数的问题，改为一次性下发完整参数
+- 🐛 **Chat-to-Responses store 字段归一化**：Chat 请求转 Responses 格式时归一化 `store` 字段，避免字段缺失或不一致导致的兼容性问题
+
+### UI 优化
+
+- 🔧 **边框样式优化**：优化界面边框视觉样式
+
+- 🔧 **版本号统一升级至 0.2.5**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
+## v0.2.4 (2026-08-28)
+
+- ✨ **Auth 账号多格式导入**：支持 Codex、sub2api、CPA 三种格式批量导入，导入下拉抽取为共享组件，空状态卡片复用
+- ✨ **sub2api 格式兼容**：兼容 `chatgpt_account_id` 键名映射
+- ✨ **模型列表增加 Auth 类型**：`/v1/models` 接口返回结果新增 Auth 账号类型模型
+- ✨ **Codex 卡片信息增强**：卡片同时显示 5H 与周限额信息，操作按钮收为一行
+- 🔧 **版本号统一升级至 0.2.4**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ## v0.2.3 (2026-08-26)
 
 - 🐛 **`/v1/models` 补全 Auth 账号模型**：模型列表接口此前仅聚合启用渠道（Channel）的 `models` 与 `model_mapping`，未包含 `auth_accounts` 登录账号同步的模型，导致「能路由却列不出」。现合并 auth 账号模型快照中 `available` 且未 `unavailable` 的条目及其 `model_mapping` 源别名，与渠道模型统一去重（渠道优先，`owned_by` 归属渠道；账号模型 `owned_by` 为 provider），OpenAI / Anthropic 两种响应格式均生效
