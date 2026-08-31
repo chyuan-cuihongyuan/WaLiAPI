@@ -230,6 +230,64 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output
 }
 
 #[test]
+fn stream_tool_call_arguments_delivered_whole_not_piecemeal() {
+    // WaLiCode 实测：16 次工具调用全部只收到参数末尾的 "]}"。
+    //
+    // 起初怀疑是「每条 delta 都重复 id/name，客户端把带 id 当新调用而重置」，
+    // 改成仅首个 delta 带身份字段后复测——问题变成只剩*第一个*分片，说明
+    // WaLiCode 根本不做分片累积，而是每次直接用最新收到的 delta.arguments
+    // 覆盖，不管有没有 id。对分片型客户端，唯一安全的做法是不分片：
+    // arguments.delta 只更新 call_id/name 等元数据、不下发内容，完整参数
+    // 在 arguments.done 时一次性发出。
+    //
+    // 这同样符合 OpenAI 协议（协议未要求必须分片），按 index 正确累积的
+    // 客户端收到一整块参数也能正常工作。
+    let context = ConversionContext::new("chatcmpl_1", "m", true);
+    let mut decoder = ResponsesStreamDecoder {
+        state: ResponsesChatState::new(&context),
+    };
+    let output = decoder
+        .feed(
+            br#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"weather"}}
+
+data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\"city\":"}
+
+data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"\"Shanghai\""}
+
+data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"}"}
+
+data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","arguments":"{\"city\":\"Shanghai\"}"}
+
+"#,
+        )
+        .unwrap()
+        .concat();
+
+    // delta 事件本身不应该出现在下游输出里——不下发任何参数内容
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("data: ") else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) else { continue };
+        if let Some(tcs) = v.pointer("/choices/0/delta/tool_calls").and_then(|t| t.as_array()) {
+            for tc in tcs {
+                if let Some(a) = tc.pointer("/function/arguments").and_then(|a| a.as_str()) {
+                    assert_eq!(
+                        a, r#"{"city":"Shanghai"}"#,
+                        "工具调用只应收到一次、且是完整参数，实际输出:\n{output}"
+                    );
+                }
+            }
+        }
+    }
+    // 完整参数、身份字段各恰好出现一次（唯一一条 tool_calls chunk）
+    assert_eq!(
+        output.matches(r#""id":"call_1""#).count(),
+        1,
+        "id 应恰好出现一次"
+    );
+    assert_eq!(output.matches("Shanghai").count(), 1, "完整参数应恰好发送一次");
+}
+
+#[test]
 fn stream_rejects_invalid_done_function_call_arguments() {
     let context = ConversionContext::new("chatcmpl_1", "m", true);
     let mut decoder = ResponsesStreamDecoder {
