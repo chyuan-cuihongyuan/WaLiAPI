@@ -108,6 +108,48 @@ pub fn terminal_status(class: FailureClass) -> u16 {
     }
 }
 
+/// What a legacy flat retry loop (proxy path / server handlers) should do
+/// after an upstream answered with a non-2xx status: cycle to the next
+/// channel, or stop and answer downstream with `downstream_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailoverDecision {
+    /// The same request may still succeed on another channel — keep cycling.
+    Failover,
+    /// The same request would fail on every other channel too — stop and
+    /// surface this status downstream.  Never the raw upstream credential
+    /// failure: 401/403 are masked to 502 (see `terminal_status`); the
+    /// request log keeps the real upstream status.
+    Stop { downstream_status: u16 },
+}
+
+/// Single source of truth for retry-vs-stop semantics in the legacy flat
+/// loops, built on `classify_http_status` (T00 decision 5) so the legacy path
+/// and the new track can never drift apart.
+///
+/// Callers must gate on a non-2xx status before consulting this — success
+/// responses never reach a retry decision.  Exhausting every channel yields
+/// 502 at the call site, not here.
+pub fn upstream_failover_decision(status: u16) -> FailoverDecision {
+    debug_assert!(
+        !(200..300).contains(&status),
+        "callers must gate on non-2xx before consulting the decision"
+    );
+    match classify_http_status(status) {
+        Some(FailureClass::Retryable) => FailoverDecision::Failover,
+        Some(FailureClass::ChannelAuthTerminal) => FailoverDecision::Stop {
+            downstream_status: terminal_status(FailureClass::ChannelAuthTerminal),
+        },
+        // CallerTerminal / EndpointUnsupported stop with the status verbatim;
+        // the ambiguous 404 (`None`) also stops because the legacy loops can
+        // never prove path-not-found.  The remaining classes are never
+        // produced by `classify_http_status`; stopping verbatim is the safe
+        // default if that ever changes.
+        Some(_) | None => FailoverDecision::Stop {
+            downstream_status: status,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Attempt + outcome
 // ---------------------------------------------------------------------------
@@ -1349,5 +1391,41 @@ mod tests {
         assert_eq!(terminal_status(FailureClass::Retryable), 502);
         assert_eq!(terminal_status(FailureClass::UpstreamProtocolError), 502);
         assert_eq!(terminal_status(FailureClass::CommittedStreamError), 502);
+    }
+
+    #[test]
+    fn upstream_failover_decision_matrix() {
+        let stop = |downstream_status: u16| FailoverDecision::Stop { downstream_status };
+        // Caller-terminal: the request itself is invalid — surface verbatim.
+        assert_eq!(upstream_failover_decision(400), stop(400));
+        assert_eq!(upstream_failover_decision(422), stop(422));
+        // Channel credentials failed: masked to 502 so the caller never
+        // mistakes an upstream auth failure for their own key (the request
+        // log keeps the real upstream status).
+        assert_eq!(upstream_failover_decision(401), stop(502));
+        assert_eq!(upstream_failover_decision(403), stop(502));
+        // Ambiguous 404: path-missing is never proven in the legacy loops.
+        assert_eq!(upstream_failover_decision(404), stop(404));
+        // Endpoint unsupported: verbatim, never retried as a generic 5xx.
+        assert_eq!(upstream_failover_decision(405), stop(405));
+        assert_eq!(upstream_failover_decision(501), stop(501));
+        // Transient statuses and the conservative default for everything
+        // unlisted (3xx / 402 / 418 / 425 / 451 …) keep cycling channels.
+        for status in [
+            408, 409, 429, 529, 500, 502, 503, 504, 301, 307, 402, 418, 425, 451,
+        ] {
+            assert_eq!(
+                upstream_failover_decision(status),
+                FailoverDecision::Failover,
+                "status {status} should fail over"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "callers must gate on non-2xx")]
+    fn upstream_failover_decision_rejects_2xx() {
+        let _ = upstream_failover_decision(200);
     }
 }

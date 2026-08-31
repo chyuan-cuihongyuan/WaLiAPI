@@ -220,3 +220,109 @@ fn openai_to_anthropic_maps_reasoning_fail_open() {
     assert_eq!(converted["content"][1]["type"], "text");
     assert_eq!(converted["content"][1]["text"], "answer");
 }
+
+// ---------------------------------------------------------------------------
+// Upstream issue #21: Claude Code sends Anthropic built-in tools (web_search
+// etc.) alongside custom function tools. Built-ins are skipped fail-open so a
+// mixed request can still use an OpenAI Chat conversion channel; forcing a
+// skipped built-in via tool_choice still requires a native channel.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn legacy_builtin_tool_alongside_custom_tool_is_skipped() {
+    let request = serde_json::json!({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1024,
+        "messages": [{"role":"user", "content":"search the web for rust axum"}],
+        "tools": [
+            {"name": "read_file", "description": "read a file", "input_schema": {"type":"object","properties":{"path":{"type":"string"}}}},
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+        ],
+        "tool_choice": {"type": "auto"}
+    });
+    let converted = anthropic_to_openai(&request).unwrap();
+    let tools = converted["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "custom tool kept, built-in skipped");
+    assert_eq!(tools[0]["function"]["name"], "read_file");
+    assert_eq!(converted["tool_choice"], "auto");
+}
+
+#[test]
+fn legacy_builtin_tool_only_drops_tools_and_tool_choice() {
+    let request = serde_json::json!({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1024,
+        "messages": [{"role":"user", "content":"hi"}],
+        "tools": [
+            {"type": "web_search_20250305", "name": "web_search"}
+        ],
+        "tool_choice": {"type": "auto"}
+    });
+    let converted = anthropic_to_openai(&request).unwrap();
+    assert!(converted.get("tools").is_none(), "no tools survive");
+    // OpenAI rejects tool_choice without tools, so it must be dropped too.
+    assert!(converted.get("tool_choice").is_none());
+}
+
+#[test]
+fn legacy_tool_choice_forcing_builtin_tool_still_rejected() {
+    let request = serde_json::json!({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1024,
+        "messages": [{"role":"user", "content":"hi"}],
+        "tools": [
+            {"name": "read_file", "description": "read a file", "input_schema": {"type":"object","properties":{}}},
+            {"type": "web_search_20250305", "name": "web_search"}
+        ],
+        "tool_choice": {"type": "tool", "name": "web_search"}
+    });
+    assert!(anthropic_to_openai(&request).is_err());
+}
+
+#[test]
+fn legacy_tool_choice_any_with_only_builtin_tools_rejected() {
+    let request = serde_json::json!({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1024,
+        "messages": [{"role":"user", "content":"hi"}],
+        "tools": [
+            {"type": "web_search_20250305", "name": "web_search"}
+        ],
+        "tool_choice": {"type": "any"}
+    });
+    assert!(anthropic_to_openai(&request).is_err());
+}
+
+#[test]
+fn legacy_unknown_tool_type_still_rejected() {
+    let request = serde_json::json!({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1024,
+        "messages": [{"role":"user", "content":"hi"}],
+        "tools": [
+            {"type": "mystery_tool_20990101", "name": "mystery"}
+        ]
+    });
+    assert!(anthropic_to_openai(&request).is_err());
+}
+
+#[test]
+fn legacy_builtin_tool_families_recognized() {
+    for tool_type in [
+        "web_search_20250305",
+        "computer_20250124",
+        "text_editor_20250429",
+        "code_execution_20250522",
+        "bash_20250124",
+    ] {
+        let request = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role":"user", "content":"hi"}],
+            "tools": [{"type": tool_type, "name": "t"}]
+        });
+        let converted = anthropic_to_openai(&request)
+            .unwrap_or_else(|e| panic!("{tool_type} should be skipped, got: {e}"));
+        assert!(converted.get("tools").is_none(), "{tool_type}");
+    }
+}

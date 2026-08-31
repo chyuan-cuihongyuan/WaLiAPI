@@ -1,5 +1,6 @@
 use super::router::SharedState;
 use crate::adaptor::{get_adaptor, ProxyRequest};
+use crate::core::attempt::{upstream_failover_decision, FailoverDecision};
 use crate::core::dispatcher::Dispatcher;
 use crate::core::feature_flags;
 use crate::core::proxy;
@@ -16,6 +17,14 @@ use axum::{
 use futures_util::StreamExt;
 use rand::SeedableRng;
 use sqlx::sqlite::SqlitePool;
+
+/// A key lookup failure means "invalid key" only when the row is genuinely
+/// absent (or disabled); any other database error is a storage failure and
+/// must surface as 5xx, not as an authentication error.
+fn is_key_lookup_storage_error(err: &sqlx::Error) -> bool {
+    !matches!(err, sqlx::Error::RowNotFound)
+}
+
 /// Run the unified security audit gate against the ORIGINAL downstream
 /// protocol JSON full tree (never a converted Chat JSON).  Returns
 /// `Ok(AuditedRequest)` for audit-allow / redact, or a ready HTTP response
@@ -243,6 +252,25 @@ fn has_request_scoped_auth_candidate(
 }
 
 #[cfg(test)]
+mod key_lookup_classification_tests {
+    use super::is_key_lookup_storage_error;
+
+    #[test]
+    fn row_not_found_is_authentication_failure_not_storage_error() {
+        let err = sqlx::Error::RowNotFound;
+        assert!(!is_key_lookup_storage_error(&err));
+    }
+
+    #[test]
+    fn database_errors_are_storage_failures() {
+        assert!(is_key_lookup_storage_error(&sqlx::Error::PoolTimedOut));
+        assert!(is_key_lookup_storage_error(&sqlx::Error::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, "disk")
+        )));
+    }
+}
+
+#[cfg(test)]
 mod auth_routeplan_rollout_tests {
     use super::{auth_routeplan_rollout_enabled, has_request_scoped_auth_candidate};
     use crate::core::feature_flags::FeatureFlags;
@@ -456,6 +484,9 @@ pub async fn handle_chat_completions(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key_record = match repo.get_api_key_by_key(api_key).await {
         Ok(k) => k,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Key lookup failed").into_response()
+        }
         Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
     };
 
@@ -556,7 +587,11 @@ pub async fn handle_chat_completions(
         )
         .await
         {
-            Ok(result) => (StatusCode::OK, Json(result.body)).into_response(),
+            Ok(result) => (
+                StatusCode::from_u16(result.status).unwrap_or(StatusCode::OK),
+                Json(result.body),
+            )
+                .into_response(),
             Err((code, msg)) => {
                 let err_body = serde_json::json!({
                     "error": { "message": msg, "type": "upstream_error", "code": code }
@@ -798,6 +833,10 @@ async fn handle_stream(
     };
 
     let mut last_error = None;
+    // Set when an upstream returned a terminal (non-retryable) status before
+    // any bytes were streamed, so the loop stops and the final response keeps
+    // that status instead of a generic 502.
+    let mut last_error_status: Option<StatusCode> = None;
 
     for (attempt, channel) in selected_channels.into_iter().take(max_attempts).enumerate() {
         let config = Dispatcher::channel_to_config(&channel);
@@ -826,7 +865,19 @@ async fn handle_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    continue;
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => continue,
+                        FailoverDecision::Stop { downstream_status } => {
+                            // Nothing has been streamed yet — stop cycling
+                            // channels; the tail returns this status (an
+                            // upstream 401/403 is masked to 502; last_error
+                            // above keeps the real response text).
+                            last_error_status = Some(
+                                StatusCode::from_u16(downstream_status).unwrap_or(status),
+                            );
+                            break;
+                        }
+                    }
                 }
 
                 let start = std::time::Instant::now();
@@ -1118,7 +1169,8 @@ async fn handle_stream(
             "type": "upstream_error"
         }
     });
-    (StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
+    let status = last_error_status.unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, Json(err_body)).into_response()
 }
 
 // ─── Anthropic Messages API: POST /v1/messages ─────────────────────────────
@@ -1522,10 +1574,6 @@ fn stored_native_response(error: StoredNativeError) -> Response {
     })
 }
 
-fn retryable_upstream_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 409 | 429 | 529) || status.is_server_error()
-}
-
 fn openai_error_response(
     status: StatusCode,
     message: &str,
@@ -1715,6 +1763,13 @@ pub async fn handle_messages(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key = match repo.get_api_key_by_key(&api_key).await {
         Ok(key) => key,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return anthropic_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Key lookup failed",
+            )
+        }
         Err(_) => {
             return anthropic_error(
                 StatusCode::UNAUTHORIZED,
@@ -1871,25 +1926,39 @@ pub async fn handle_messages(
                 Ok((response, upstream_model)) => {
                     let status = StatusCode::from_u16(response.status().as_u16())
                         .unwrap_or(StatusCode::BAD_GATEWAY);
-                    if !retryable_upstream_status(status) {
-                        record_anthropic_outcome(
-                            repo.clone(),
-                            &key,
-                            Some(&channel),
-                            &model,
-                            upstream_model,
-                            &sanitized_log_json,
-                            &security_result,
-                            stream,
-                            status.as_u16() as i64,
-                            Some(format!("Native upstream returned HTTP {status}")),
-                            None,
-                        )
-                        .await;
-                        return native_response(response, None);
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => {
+                            last_error = format!("{}: HTTP {}", channel.name, status);
+                            last_native_error = Some(store_native_error(response).await);
+                        }
+                        FailoverDecision::Stop { downstream_status } => {
+                            record_anthropic_outcome(
+                                repo.clone(),
+                                &key,
+                                Some(&channel),
+                                &model,
+                                upstream_model,
+                                &sanitized_log_json,
+                                &security_result,
+                                stream,
+                                status.as_u16() as i64,
+                                Some(format!("Native upstream returned HTTP {status}")),
+                                None,
+                            )
+                            .await;
+                            // An upstream 401/403 is a channel-credential
+                            // failure — answer 502 instead of passing it
+                            // through (the outcome log keeps the real status).
+                            if downstream_status != status.as_u16() {
+                                return anthropic_error(
+                                    StatusCode::BAD_GATEWAY,
+                                    "api_error",
+                                    "Upstream channel authentication failed",
+                                );
+                            }
+                            return native_response(response, None);
+                        }
                     }
-                    last_error = format!("{}: HTTP {}", channel.name, status);
-                    last_native_error = Some(store_native_error(response).await);
                 }
                 Err(error) => {
                     last_error = format!("{}: {error}", channel.name);
@@ -2012,24 +2081,30 @@ pub async fn handle_messages(
                     .and_then(|value| value.as_str())
                     .unwrap_or("OpenAI Chat Completions upstream rejected the request");
                 last_error = format!("{}: {message}", channel.name);
-                if !retryable_upstream_status(status) {
-                    record_anthropic_outcome(
-                        repo.clone(),
-                        &key,
-                        Some(&channel),
-                        &model,
-                        upstream_model,
-                        &sanitized_log_json,
-                        &security_result,
-                        stream,
-                        status.as_u16() as i64,
-                        Some(last_error.clone()),
-                        None,
-                    )
-                    .await;
-                    return openai_error_response(status, message, &response_headers);
+                match upstream_failover_decision(status.as_u16()) {
+                    FailoverDecision::Failover => {
+                        last_openai_error = Some((status, message.to_string(), response_headers));
+                    }
+                    FailoverDecision::Stop { .. } => {
+                        record_anthropic_outcome(
+                            repo.clone(),
+                            &key,
+                            Some(&channel),
+                            &model,
+                            upstream_model,
+                            &sanitized_log_json,
+                            &security_result,
+                            stream,
+                            status.as_u16() as i64,
+                            Some(last_error.clone()),
+                            None,
+                        )
+                        .await;
+                        // openai_error_response already maps an upstream
+                        // 401/403 to 502 api_error (429 keeps Retry-After).
+                        return openai_error_response(status, message, &response_headers);
+                    }
                 }
-                last_openai_error = Some((status, message.to_string(), response_headers));
             }
             Err(error) => {
                 last_error = format!("{}: {error}", channel.name);
@@ -2180,6 +2255,13 @@ pub async fn handle_messages_count_tokens(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key = match repo.get_api_key_by_key(&api_key).await {
         Ok(key) => key,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return anthropic_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Key lookup failed",
+            )
+        }
         Err(_) => {
             return anthropic_error(
                 StatusCode::UNAUTHORIZED,
@@ -2274,10 +2356,23 @@ pub async fn handle_messages_count_tokens(
             Ok((response, _upstream_model)) => {
                 let status = StatusCode::from_u16(response.status().as_u16())
                     .unwrap_or(StatusCode::BAD_GATEWAY);
-                if !retryable_upstream_status(status) {
-                    return native_response(response, None);
+                match upstream_failover_decision(status.as_u16()) {
+                    FailoverDecision::Failover => {
+                        last_error = Some(store_native_error(response).await);
+                    }
+                    FailoverDecision::Stop { downstream_status } => {
+                        // Mask a channel-credential failure (401/403) to 502;
+                        // every other terminal status passes through verbatim.
+                        if downstream_status != status.as_u16() {
+                            return anthropic_error(
+                                StatusCode::BAD_GATEWAY,
+                                "api_error",
+                                "Upstream channel authentication failed",
+                            );
+                        }
+                        return native_response(response, None);
+                    }
                 }
-                last_error = Some(store_native_error(response).await);
             }
             Err(_) => continue,
         }
@@ -2328,6 +2423,15 @@ pub async fn handle_responses(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key_record = match repo.get_api_key_by_key(&api_key).await {
         Ok(k) => k,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {"message": "Key lookup failed", "type": "server_error"}
+                })),
+            )
+                .into_response()
+        }
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -2463,9 +2567,15 @@ pub async fn handle_responses(
         .await
         {
             Ok(result) => {
-                // Convert OpenAI response to Responses API format
+                // Convert OpenAI response to Responses API format.  A
+                // caller-terminal upstream status keeps its status code; only
+                // the body is re-framed.
                 let responses_resp = protocol::openai_to_responses(&result.body, &model);
-                (StatusCode::OK, Json(responses_resp)).into_response()
+                (
+                    StatusCode::from_u16(result.status).unwrap_or(StatusCode::OK),
+                    Json(responses_resp),
+                )
+                    .into_response()
             }
             Err((code, msg)) => {
                 let err_body = serde_json::json!({
@@ -2632,6 +2742,10 @@ async fn handle_responses_stream(
     };
 
     let mut last_error = None;
+    // Set when an upstream returned a terminal (non-retryable) status before
+    // any bytes were streamed, so the loop stops and the final response keeps
+    // that status instead of a generic 502.
+    let mut last_error_status: Option<StatusCode> = None;
 
     for (attempt, channel) in selected_channels.into_iter().take(max_attempts).enumerate() {
         let config = Dispatcher::channel_to_config(&channel);
@@ -2659,7 +2773,19 @@ async fn handle_responses_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    continue;
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => continue,
+                        FailoverDecision::Stop { downstream_status } => {
+                            // Nothing has been streamed yet — stop cycling
+                            // channels; the tail returns this status (an
+                            // upstream 401/403 is masked to 502; last_error
+                            // above keeps the real response text).
+                            last_error_status = Some(
+                                StatusCode::from_u16(downstream_status).unwrap_or(status),
+                            );
+                            break;
+                        }
+                    }
                 }
 
                 let start = std::time::Instant::now();
@@ -2941,7 +3067,8 @@ async fn handle_responses_stream(
             "type": "upstream_error"
         }
     });
-    (StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
+    let status = last_error_status.unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, Json(err_body)).into_response()
 }
 
 pub async fn handle_completions(State(_shared): State<SharedState>) -> Response {
@@ -2975,6 +3102,15 @@ pub async fn handle_embeddings(
     let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
     let key_record = match repo.get_api_key_by_key(&api_key).await {
         Ok(k) => k,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {"message": "Key lookup failed", "type": "server_error"}
+                })),
+            )
+                .into_response()
+        }
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -3178,7 +3314,21 @@ pub async fn handle_embeddings(
                         eprintln!("[WARN] create_security_findings failed: {}", e);
                     }
                     last_error = Some(error_message);
-                    continue;
+                    match upstream_failover_decision(status.as_u16()) {
+                        FailoverDecision::Failover => continue,
+                        FailoverDecision::Stop { downstream_status } => {
+                            // Terminal status: the same request would fail
+                            // identically on every channel — surface this
+                            // response (an upstream 401/403 is masked to
+                            // 502; the log above keeps the real status).
+                            return (
+                                StatusCode::from_u16(downstream_status)
+                                    .unwrap_or(StatusCode::BAD_GATEWAY),
+                                Json(resp_body),
+                            )
+                                .into_response();
+                        }
+                    }
                 }
 
                 // Extract usage from response
@@ -3380,7 +3530,8 @@ fn collect_auth_account_models(
     for account in accounts {
         if let Ok(states) = account.model_states() {
             for state in &states.models {
-                if state.status == "available" && !state.unavailable
+                if state.status == "available"
+                    && !state.unavailable
                     && seen.insert(state.id.clone())
                 {
                     out.push(ConfigModel {
@@ -3484,6 +3635,14 @@ async fn list_models_impl(pool: SqlitePool, headers: &HeaderMap) -> Response {
     let repo = Repository::new(pool);
     let key = match repo.get_api_key_by_key(&api_key).await {
         Ok(key) => key,
+        Err(e) if is_key_lookup_storage_error(&e) => {
+            return models_error(
+                anthropic,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Key lookup failed",
+            )
+        }
         Err(_) => {
             return models_error(
                 anthropic,

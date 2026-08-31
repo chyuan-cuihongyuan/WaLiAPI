@@ -1,4 +1,5 @@
 use crate::adaptor::{get_adaptor, ProxyRequest, TokenUsage};
+use crate::core::attempt::{upstream_failover_decision, FailoverDecision};
 use crate::core::dispatcher::Dispatcher;
 use crate::db::models::{Channel, RequestLog};
 use crate::db::repository::Repository;
@@ -262,7 +263,23 @@ pub async fn handle_request(
                         eprintln!("[WARN] create_security_findings failed: {}", e);
                     }
                     last_error = Some(error_message);
-                    continue;
+                    // Terminal upstream status: the same request would fail
+                    // on every other channel too, so stop cycling and answer
+                    // with the decision's downstream status (an upstream
+                    // 401/403 is masked to 502 — the log above keeps the
+                    // real status).
+                    match upstream_failover_decision(status) {
+                        FailoverDecision::Failover => continue,
+                        FailoverDecision::Stop { downstream_status } => {
+                            return Ok(ProxyResult {
+                                status: downstream_status,
+                                body: resp_body,
+                                usage: None,
+                                channel,
+                                duration_ms: duration_ms as u64,
+                            });
+                        }
+                    }
                 }
 
                 // Extract and log choices
