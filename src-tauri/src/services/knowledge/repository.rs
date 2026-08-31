@@ -32,14 +32,15 @@ impl KbRepository {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_iso();
         sqlx::query(
-            "INSERT INTO kb_knowledge_bases (id, name, description, status, doc_count, chunk_count, total_tokens, embedding_model, embedding_channel_id, mcp_enabled, chunk_size, chunk_overlap, excluded_dirs, excluded_files, included_files, embedding_dim, index_status, embedding_batch_size, created_at, updated_at)
-             VALUES (?, ?, ?, 1, 0, 0, 0, ?, ?, 1, 512, 64, '', '', '', 0, 'none', 32, ?, ?)"
+            "INSERT INTO kb_knowledge_bases (id, name, description, status, doc_count, chunk_count, total_tokens, embedding_model, embedding_channel_id, mcp_enabled, chunk_size, chunk_overlap, excluded_dirs, excluded_files, included_files, embedding_dim, index_status, embedding_batch_size, ocr_model, created_at, updated_at)
+             VALUES (?, ?, ?, 1, 0, 0, 0, ?, ?, 1, 512, 64, '', '', '', 0, 'none', 32, ?, ?, ?)"
         )
         .bind(&id)
         .bind(&input.name)
         .bind(&input.description)
         .bind(&input.embedding_model)
         .bind(&input.embedding_channel_id)
+        .bind(&input.ocr_model)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -93,6 +94,9 @@ impl KbRepository {
         if let Some(embedding_batch_size) = input.embedding_batch_size {
             q.push(", embedding_batch_size = ")
                 .push_bind(embedding_batch_size);
+        }
+        if let Some(ocr_model) = &input.ocr_model {
+            q.push(", ocr_model = ").push_bind(ocr_model);
         }
 
         q.push(" WHERE id = ").push_bind(id);
@@ -311,6 +315,28 @@ impl KbRepository {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// OCR 完成后回填文档的识别信息（引擎、页数、失败页码 JSON）。
+    pub async fn update_document_ocr_info(
+        &self,
+        id: &str,
+        ocr_engine: &str,
+        page_count: i64,
+        failed_pages_json: &str,
+    ) -> Result<(), sqlx::Error> {
+        let now = now_iso();
+        sqlx::query(
+            "UPDATE kb_documents SET ocr_engine = ?, page_count = ?, ocr_failed_pages = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(ocr_engine)
+        .bind(page_count)
+        .bind(failed_pages_json)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

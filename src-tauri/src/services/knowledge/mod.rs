@@ -4,6 +4,7 @@ pub mod handlers;
 pub mod importer;
 pub mod index;
 pub mod models;
+pub mod ocr;
 pub mod parser;
 pub mod processor;
 pub mod rag;

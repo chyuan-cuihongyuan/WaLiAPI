@@ -755,6 +755,8 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "drop_kb_index" => {
             to_json(commands::knowledge_base::drop_kb_index(state, arg(&args, "kbId")?).await)
         }
+        "get_ocr_cache_info" => to_json(commands::knowledge_base::get_ocr_cache_info(state).await),
+        "clear_ocr_cache" => to_json(commands::knowledge_base::clear_ocr_cache(state).await),
 
         // ── Wiki ──
         "get_wiki_projects" => to_json(commands::wiki::get_wiki_projects(state).await),

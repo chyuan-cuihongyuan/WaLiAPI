@@ -78,6 +78,11 @@ jobs:
       - name: install dependencies
         run: pnpm install
 
+      # pdfium 动态库（OCR 依赖）随安装包分发：打包前下载到 src-tauri/resources/pdfium/
+      - name: fetch pdfium
+        shell: bash
+        run: bash scripts/fetch-pdfium.sh
+
       - name: build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:

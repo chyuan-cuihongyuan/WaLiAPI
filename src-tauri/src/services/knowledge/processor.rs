@@ -1,19 +1,23 @@
 use super::code_parser;
 use super::embedder;
+use super::ocr;
 use super::parser;
 use super::repository::{ChunkInsert, KbRepository};
 use super::retriever;
 use super::splitter;
 use crate::db::models::now_iso;
 use crate::db::repository::Repository;
-use sqlx::SqlitePool;
 use crate::server::event_bridge::EventSink;
+use crate::settings_store::SettingsStore;
+use sha2::Digest;
+use sqlx::SqlitePool;
+use std::path::Path;
 
 /// Default embedding model
 const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 
 /// Emit progress event to frontend
-fn emit_progress(
+pub(crate) fn emit_progress(
     events: &EventSink,
     doc_id: &str,
     kb_id: &str,
@@ -36,6 +40,7 @@ fn emit_progress(
 }
 
 /// Process an uploaded document: parse → split → embed → store
+#[allow(clippy::too_many_arguments)]
 pub async fn process_document(
     pool: &SqlitePool,
     events: &EventSink,
@@ -44,6 +49,8 @@ pub async fn process_document(
     filename: &str,
     content: &[u8],
     embedding_model: Option<&str>,
+    settings: &SettingsStore,
+    data_dir: &Path,
 ) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
 
@@ -54,8 +61,18 @@ pub async fn process_document(
 
     emit_progress(events, doc_id, kb_id, filename, "processing", 0, "开始处理");
 
-    let result =
-        process_document_inner(pool, events, kb_id, doc_id, filename, content, embedding_model).await;
+    let result = process_document_inner(
+        pool,
+        events,
+        kb_id,
+        doc_id,
+        filename,
+        content,
+        embedding_model,
+        settings,
+        data_dir,
+    )
+    .await;
 
     if let Err(ref e) = result {
         let err_msg = format!("文档「{}」处理失败: {}", filename, e);
@@ -78,6 +95,7 @@ pub async fn process_document(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_document_inner(
     pool: &SqlitePool,
     events: &EventSink,
@@ -86,6 +104,8 @@ async fn process_document_inner(
     filename: &str,
     content: &[u8],
     embedding_model: Option<&str>,
+    settings: &SettingsStore,
+    data_dir: &Path,
 ) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
 
@@ -100,9 +120,49 @@ async fn process_document_inner(
         parser::ParsedContent::Structured(t) => (t.clone(), "structured".to_string()),
     };
 
-    // 2. Split into chunks — use KB-level config if available
-    emit_progress(events, doc_id, kb_id, filename, "splitting", 15, "文本分块");
+    // 2. OCR 总开关（全局设置，默认关）：关闭时完全走原逻辑——不做判定、不调 LLM。
+    //    开启且为 PDF 时做页级判定：文字层充足的页直接用文字层（零成本、零幻觉），
+    //    仅文字不足的页进入 OCR 子流水线（图文混合文档只为缺字页付费）。
     let kb = repo.get_kb(kb_id).await.map_err(|e| e.to_string())?;
+    let mut ocr_outcome: Option<ocr::OcrOutcome> = None;
+    if settings.get_bool("ocr.enabled", false) && parser::get_file_type(filename) == "pdf" {
+        let pages_text = {
+            let renderer = ocr::render::lock_renderer(data_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            renderer.extract_pages_text(content).map_err(|e| e.to_string())?
+        };
+        if !ocr::pages_needing_ocr(&pages_text).is_empty() {
+            // 两级 gate 的第二级：知识库未配 OCR 模型时报配置引导错误
+            let model = kb
+                .ocr_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .ok_or_else(|| ocr::OcrError::ModelNotConfigured.to_string())?;
+            // 页级缓存以文档内容哈希为键（与 KbDocument.content_hash 一致）
+            let content_hash = hex::encode(sha2::Sha256::digest(content));
+            let outcome = ocr::ocr_pdf(
+                pool,
+                events,
+                doc_id,
+                kb_id,
+                filename,
+                content,
+                model,
+                settings,
+                data_dir,
+                &content_hash,
+                &pages_text,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            ocr_outcome = Some(outcome);
+        }
+    }
+
+    // 3. Split into chunks — use KB-level config if available
+    emit_progress(events, doc_id, kb_id, filename, "splitting", 15, "文本分块");
     let config = splitter::SplitConfig {
         chunk_size: if kb.chunk_size > 0 {
             kb.chunk_size as usize
@@ -120,9 +180,27 @@ async fn process_document_inner(
         ..Default::default()
     };
 
+    // OCR 文档按页分块：每页 Markdown 单独切分，metadata 精确携带页码，chunk_index 跨页连续
+    let chunks = if let Some(outcome) = &ocr_outcome {
+        let mut all: Vec<splitter::Chunk> = Vec::new();
+        for (idx, page_md) in outcome.pages.iter().enumerate() {
+            let page_meta = splitter::ChunkMetadata {
+                file_path: Some(filename.to_string()),
+                page_no: Some((idx + 1) as u32),
+                ..Default::default()
+            };
+            let page_md = page_md.clone();
+            let config = config.clone();
+            let mut page_chunks = std::panic::catch_unwind(move || {
+                splitter::split(&page_md, "markdown", &config, &page_meta)
+            })
+            .map_err(|_| "文本分块过程发生严重错误".to_string())?;
+            all.append(&mut page_chunks);
+        }
+        all
     // 符号感知分块：代码文件且语言受支持时，按 AST 符号边界切分
     // 提前处理代码符号和进度更新（在 catch_unwind 外部，避免传递 EventSink）
-    let chunks = if let parser::ParsedContent::Code { text, language } = &parsed {
+    } else if let parser::ParsedContent::Code { text, language } = &parsed {
         if code_parser::is_supported_language(language) {
             let symbols = code_parser::extract_symbols(filename, text);
             emit_progress(
@@ -289,6 +367,14 @@ async fn process_document_inner(
     repo.update_document_counts(doc_id, total_chunks, total_tokens)
         .await
         .map_err(|e| e.to_string())?;
+    // OCR 文档回填识别信息（引擎/页数/失败页码）
+    if let Some(outcome) = &ocr_outcome {
+        let failed_json =
+            serde_json::to_string(&outcome.failed_pages).unwrap_or_else(|_| "[]".to_string());
+        repo.update_document_ocr_info(doc_id, "vlm", outcome.page_count as i64, &failed_json)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     repo.update_document_status(doc_id, "ready", None)
         .await
         .map_err(|e| e.to_string())?;
@@ -339,6 +425,8 @@ pub async fn reindex_document(
     pool: &SqlitePool,
     events: &EventSink,
     doc_id: &str,
+    settings: &SettingsStore,
+    data_dir: &Path,
 ) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
     let doc = repo.get_document(doc_id).await.map_err(|e| e.to_string())?;
@@ -366,6 +454,8 @@ pub async fn reindex_document(
         &doc.filename,
         &content,
         kb.embedding_model.as_deref(),
+        settings,
+        data_dir,
     )
     .await
 }

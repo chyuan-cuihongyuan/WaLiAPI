@@ -184,6 +184,8 @@ pub async fn upload_document(
     let doc_id_clone = doc.id.clone();
     let filename_clone = input.filename.clone();
     let emb_model = kb.embedding_model.clone();
+    let settings = shared.state.settings.clone();
+    let data_dir = shared.state.data_dir.clone();
 
     tokio::spawn(async move {
         if let Err(e) = processor::process_document(
@@ -194,6 +196,8 @@ pub async fn upload_document(
             &filename_clone,
             &content,
             emb_model.as_deref(),
+            &settings,
+            &data_dir,
         )
         .await
         {
@@ -225,6 +229,8 @@ pub async fn delete_document(
         if let Some(path) = &doc.file_path {
             std::fs::remove_file(path).ok();
         }
+        // 级联删除 OCR 页级缓存（以内容哈希为键）
+        super::ocr::cache::remove_cache(&shared.state.data_dir, &doc.content_hash);
     }
 
     match repo.delete_document(&doc_id).await {
@@ -246,9 +252,13 @@ pub async fn reindex_document(
 ) -> Response {
     let pool = shared.state.db.pool.clone();
     let events = shared.state.events.clone();
+    let settings = shared.state.settings.clone();
+    let data_dir = shared.state.data_dir.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = processor::reindex_document(&pool, &events, &doc_id).await {
+        if let Err(e) =
+            processor::reindex_document(&pool, &events, &doc_id, &settings, &data_dir).await
+        {
             tracing::error!("Reindex failed: {}", e);
         }
     });
@@ -528,14 +538,25 @@ pub async fn import_source(
 
     let source_id = source.id.clone();
     let source_type = input.source_type.clone();
+    let settings = shared.state.settings.clone();
+    let data_dir = shared.state.data_dir.clone();
 
     tokio::spawn(async move {
         let result = if source_type == "git" {
-            super::importer::import_git_repo(&pool, &events, &kb_id, &source_id, &input).await
+            super::importer::import_git_repo(
+                &pool, &events, &kb_id, &source_id, &input, &settings, &data_dir,
+            )
+            .await
         } else if source_type == "url" {
-            super::importer::import_url(&pool, &events, &kb_id, &source_id, &input).await
+            super::importer::import_url(
+                &pool, &events, &kb_id, &source_id, &input, &settings, &data_dir,
+            )
+            .await
         } else if source_type == "local_dir" {
-            super::importer::import_local_dir(&pool, &events, &kb_id, &source_id, &input).await
+            super::importer::import_local_dir(
+                &pool, &events, &kb_id, &source_id, &input, &settings, &data_dir,
+            )
+            .await
         } else {
             Err(format!("Unknown source type: {}", source_type))
         };

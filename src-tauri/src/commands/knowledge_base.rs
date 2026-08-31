@@ -61,6 +61,8 @@ pub async fn delete_kb_document(
         if let Some(path) = &doc.file_path {
             std::fs::remove_file(path).ok();
         }
+        // 级联删除 OCR 页级缓存（以内容哈希为键）
+        crate::services::knowledge::ocr::cache::remove_cache(&state.data_dir, &doc.content_hash);
     }
     repo.delete_document(&doc_id)
         .await
@@ -77,9 +79,15 @@ pub async fn reindex_kb_document(
     doc_id: String,
 ) -> Result<(), String> {
     let pool = state.db.pool.clone();
-    crate::services::knowledge::processor::reindex_document(&pool, &state.events, &doc_id)
-        .await
-        .map_err(|e| e)
+    crate::services::knowledge::processor::reindex_document(
+        &pool,
+        &state.events,
+        &doc_id,
+        &state.settings,
+        &state.data_dir,
+    )
+    .await
+    .map_err(|e| e)
 }
 
 #[tauri::command]
@@ -425,6 +433,8 @@ pub async fn upload_kb_document(
     let events_clone = state.events.clone();
     let doc_id_clone = doc.id.clone();
     let filename_clone = input.filename.clone();
+    let settings_clone = state.settings.clone();
+    let data_dir_clone = state.data_dir.clone();
 
     tokio::spawn(async move {
         if let Err(e) = crate::services::knowledge::processor::process_document(
@@ -435,6 +445,8 @@ pub async fn upload_kb_document(
             &filename_clone,
             &content,
             emb_model.as_deref(),
+            &settings_clone,
+            &data_dir_clone,
         )
         .await
         {
@@ -519,21 +531,23 @@ pub async fn import_kb_source(
 
     let source_id = source.id.clone();
     let source_type = input.source_type.clone();
+    let settings = state.settings.clone();
+    let data_dir = state.data_dir.clone();
 
     tokio::spawn(async move {
         let result = if source_type == "git" {
             crate::services::knowledge::importer::import_git_repo(
-                &pool, &events, &kb_id, &source_id, &input,
+                &pool, &events, &kb_id, &source_id, &input, &settings, &data_dir,
             )
             .await
         } else if source_type == "url" {
             crate::services::knowledge::importer::import_url(
-                &pool, &events, &kb_id, &source_id, &input,
+                &pool, &events, &kb_id, &source_id, &input, &settings, &data_dir,
             )
             .await
         } else if source_type == "local_dir" {
             crate::services::knowledge::importer::import_local_dir(
-                &pool, &events, &kb_id, &source_id, &input,
+                &pool, &events, &kb_id, &source_id, &input, &settings, &data_dir,
             )
             .await
         } else {
@@ -640,5 +654,60 @@ pub async fn drop_kb_index(state: State<'_, Arc<AppState>>, kb_id: String) -> Re
     repo.update_kb_index_status(&kb_id, "none")
         .await
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════
+// OCR 页级缓存管理（设置页「OCR」分组使用）
+// ════════════════════════════════════════════════════════
+
+/// OCR 缓存占用信息（{data_dir}/ocr_cache/ 下每个子目录对应一篇文档）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OcrCacheInfo {
+    pub total_bytes: u64,
+    pub doc_count: u64,
+}
+
+#[tauri::command]
+pub async fn get_ocr_cache_info(state: State<'_, Arc<AppState>>) -> Result<OcrCacheInfo, String> {
+    let dir = state.data_dir.join("ocr_cache");
+    let mut info = OcrCacheInfo {
+        total_bytes: 0,
+        doc_count: 0,
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(info);
+    };
+    for entry in entries.flatten() {
+        let doc_dir = entry.path();
+        if !doc_dir.is_dir() {
+            continue;
+        }
+        info.doc_count += 1;
+        // 递归累加单文档缓存目录大小
+        let mut stack = vec![doc_dir];
+        while let Some(dir) = stack.pop() {
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if let Ok(m) = e.metadata() {
+                        info.total_bytes += m.len();
+                    }
+                }
+            }
+        }
+    }
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn clear_ocr_cache(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let dir = state.data_dir.join("ocr_cache");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(())
 }

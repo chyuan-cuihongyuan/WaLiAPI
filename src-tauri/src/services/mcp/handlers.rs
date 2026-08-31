@@ -1040,6 +1040,8 @@ async fn handle_tool_call(
                 description: description.map(|s| s.to_string()),
                 embedding_model: embedding_model.map(|s| s.to_string()),
                 embedding_channel_id: embedding_channel_id.map(|s| s.to_string()),
+                // MCP 工具不暴露 OCR 模型配置（在知识库设置表单中配置）
+                ocr_model: None,
             };
 
             let kb_repo = KbRepository::new(pool.clone());
@@ -1100,6 +1102,8 @@ async fn handle_tool_call(
                     .and_then(|i| i.as_str())
                     .map(|s| s.to_string()),
                 embedding_batch_size: args.get("embedding_batch_size").and_then(|b| b.as_i64()),
+                // MCP 工具不暴露 OCR 模型配置（在知识库设置表单中配置）
+                ocr_model: None,
             };
 
             let kb_repo = KbRepository::new(pool.clone());
@@ -1255,6 +1259,8 @@ async fn handle_tool_call(
             let doc_id_clone = doc.id.clone();
             let filename_clone = filename.clone();
             let kb_id_clone = kb_id.clone();
+            let settings_clone = shared.state.settings.clone();
+            let data_dir_clone = shared.state.data_dir.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = crate::services::knowledge::processor::process_document(
@@ -1265,6 +1271,8 @@ async fn handle_tool_call(
                     &filename_clone,
                     &content,
                     emb_model.as_deref(),
+                    &settings_clone,
+                    &data_dir_clone,
                 )
                 .await
                 {
@@ -1304,6 +1312,11 @@ async fn handle_tool_call(
             if let Some(path) = &doc.file_path {
                 std::fs::remove_file(path).ok();
             }
+            // 级联删除 OCR 页级缓存（以内容哈希为键）
+            crate::services::knowledge::ocr::cache::remove_cache(
+                &shared.state.data_dir,
+                &doc.content_hash,
+            );
 
             // Delete chunks and document record
             kb_repo.delete_chunks_by_doc(doc_id).await.ok();
@@ -1510,6 +1523,8 @@ async fn handle_tool_call(
             let pool_clone = pool.clone();
             let events_clone = shared.state.events.clone();
             let kb_id_clone = kb_id.clone();
+            let settings_clone = shared.state.settings.clone();
+            let data_dir_clone = shared.state.data_dir.clone();
 
             tokio::spawn(async move {
                 let result = if source_type_clone == "git" {
@@ -1519,6 +1534,8 @@ async fn handle_tool_call(
                         &kb_id_clone,
                         &source_id,
                         &input,
+                        &settings_clone,
+                        &data_dir_clone,
                     )
                     .await
                 } else if source_type_clone == "url" {
@@ -1528,6 +1545,8 @@ async fn handle_tool_call(
                         &kb_id_clone,
                         &source_id,
                         &input,
+                        &settings_clone,
+                        &data_dir_clone,
                     )
                     .await
                 } else if source_type_clone == "local_dir" {
@@ -1537,6 +1556,8 @@ async fn handle_tool_call(
                         &kb_id_clone,
                         &source_id,
                         &input,
+                        &settings_clone,
+                        &data_dir_clone,
                     )
                     .await
                 } else {

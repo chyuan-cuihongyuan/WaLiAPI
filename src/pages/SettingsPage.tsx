@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { settingsApi, serverApi, securityApi } from "../lib/api";
+import { settingsApi, serverApi, securityApi, ocrApi, type OcrCacheInfo } from "../lib/api";
 import { isWebRuntime } from "../lib/web";
 import { PanelSettingsSection } from "../components/PanelSettingsSection";
 import type { Settings, BuiltinRule, CustomRule } from "../types";
-import { Save, RotateCcw, Check, Server, SlidersHorizontal, Palette, RefreshCw, ShieldAlert, Plus, Trash2, ListChecks, Pencil, X, AlertCircle, HelpCircle, UserRound, type LucideIcon } from "lucide-react";
+import { Save, RotateCcw, Check, Server, SlidersHorizontal, Palette, RefreshCw, ShieldAlert, Plus, Trash2, ListChecks, Pencil, X, AlertCircle, HelpCircle, UserRound, ScanText, type LucideIcon } from "lucide-react";
 
 const SEVERITY_BADGE: Record<string, string> = {
   critical: "bg-red-50 text-red-700 border-red-200",
@@ -24,6 +24,7 @@ export function SettingsPage() {
   const [newRule, setNewRule] = useState({ rule_type: "blacklist", category: "domain", pattern: "", severity: "medium", action: "warn", description: "" });
   const [editingBuiltin, setEditingBuiltin] = useState<string | null>(null);
   const [editBuiltinData, setEditBuiltinData] = useState({ severity: "", title: "", description: "" });
+  const [ocrCacheInfo, setOcrCacheInfo] = useState<OcrCacheInfo | null>(null);
   const [activeTab, setActiveTab] = useState<string>(() => {
     const hash = window.location.hash.replace("#", "");
     return hash || "security";
@@ -37,6 +38,25 @@ export function SettingsPage() {
       .then(() => setLoadError(false))
       .catch(() => setLoadError(true));
   }, []);
+
+  // 切到 OCR 分组时加载缓存占用信息
+  useEffect(() => {
+    if (activeTab !== "ocr") return;
+    ocrApi.getCacheInfo().then(setOcrCacheInfo).catch(() => setOcrCacheInfo(null));
+  }, [activeTab]);
+
+  const handleClearOcrCache = async () => {
+    try {
+      await ocrApi.clearCache();
+      const info = await ocrApi.getCacheInfo().catch(() => null);
+      setOcrCacheInfo(info);
+      setMessage("OCR 缓存已清空。");
+      setTimeout(() => setMessage(null), 2000);
+    } catch (e) {
+      setMessage(`清空 OCR 缓存失败: ${e}`);
+      setTimeout(() => setMessage(null), 3000);
+    }
+  };
 
   const handleAddRule = async () => {
     if (!newRule.pattern.trim()) return;
@@ -180,8 +200,14 @@ export function SettingsPage() {
     { id: "general", label: "通用设置", icon: SlidersHorizontal },
     { id: "appearance", label: "界面设置", icon: Palette },
     { id: "retry", label: "重试策略", icon: RefreshCw },
+    { id: "ocr", label: "OCR", icon: ScanText },
     ...(isWebRuntime() ? [{ id: "panel", label: "面板设置", icon: UserRound }] : []),
   ];
+
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  };
 
   return (
     <div className="page-shell space-y-5">
@@ -652,6 +678,99 @@ export function SettingsPage() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {activeTab === "ocr" && (
+        <div className="surface rounded-[24px] p-6 space-y-5">
+          <div className="flex items-center gap-3">
+            <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><ScanText size={18} className="text-primary" /></div>
+            <div>
+              <h2 className="text-lg font-semibold">LLM OCR</h2>
+              <p className="text-sm text-muted-foreground">识别知识库中的扫描版 PDF（无文字层），逐页渲染后调用视觉模型转录为文本</p>
+            </div>
+          </div>
+
+          <label className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">
+            <span className="text-sm">
+              启用 LLM OCR
+              <span className="mt-0.5 block text-xs text-muted-foreground">识别扫描版 PDF 会调用配置的视觉模型，产生 API 费用</span>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.ocr_enabled}
+              onChange={e => setSettings({ ...settings, ocr_enabled: e.target.checked })}
+              className="h-5 w-5 shrink-0"
+            />
+          </label>
+
+          {/* 关闭总开关时，以下配置项整体置灰 */}
+          <div className={settings.ocr_enabled ? "space-y-5" : "space-y-5 opacity-50 pointer-events-none"}>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div>
+                <label className="mb-2 block text-sm font-medium">页数上限</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={settings.ocr_max_pages}
+                  disabled={!settings.ocr_enabled}
+                  onChange={e => setSettings({ ...settings, ocr_max_pages: parseInt(e.target.value) || 200 })}
+                  className={inputCls}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">单文档超过该页数将跳过 OCR，默认 200</p>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">并发数</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={4}
+                  value={settings.ocr_concurrency}
+                  disabled={!settings.ocr_enabled}
+                  onChange={e => setSettings({ ...settings, ocr_concurrency: parseInt(e.target.value) || 2 })}
+                  className={inputCls}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">同时识别的页数，范围 1–4，默认 2</p>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">渲染 DPI</label>
+                <input
+                  type="number"
+                  min={150}
+                  max={300}
+                  step={10}
+                  value={settings.ocr_dpi}
+                  disabled={!settings.ocr_enabled}
+                  onChange={e => setSettings({ ...settings, ocr_dpi: parseInt(e.target.value) || 200 })}
+                  className={inputCls}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">页面渲染精度，范围 150–300，默认 200</p>
+              </div>
+            </div>
+
+            <div className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">
+              <span className="text-sm">
+                OCR 缓存
+                <span className="ml-2 text-xs text-muted-foreground">
+                  {ocrCacheInfo
+                    ? `占用 ${formatBytes(ocrCacheInfo.total_bytes)} · ${ocrCacheInfo.doc_count} 个文档`
+                    : "占用信息加载中..."}
+                </span>
+              </span>
+              <button
+                onClick={handleClearOcrCache}
+                disabled={!settings.ocr_enabled}
+                className="action-secondary"
+                style={{ padding: "6px 14px", fontSize: "12px" }}
+              >
+                <Trash2 size={13} /> 清空缓存
+              </button>
+            </div>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            关闭总开关后，所有 PDF（含扫描件）按原有逻辑解析入库，不做扫描判定、不产生 LLM 调用；已生成的 OCR 缓存保留，重新开启后仍可命中。OCR 视觉模型在各知识库的设置中单独配置。
+          </p>
         </div>
       )}
 

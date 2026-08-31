@@ -12,6 +12,7 @@ import {
   ConversationMessage,
   kbApi,
   channelApi,
+  settingsApi,
   serviceApi,
   serverApi,
   wikiApi,
@@ -1754,6 +1755,7 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
         <div className="space-y-2">
           {docs.map((doc) => {
             const prog = progressMap[doc.id];
+            const ocrFailedPages = formatOcrFailedPages(doc.ocr_failed_pages);
             return (
             <div
               key={doc.id}
@@ -1769,6 +1771,14 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
                   <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
                     {doc.file_type}
                   </span>
+                  {doc.ocr_engine === "vlm" && (
+                    <span
+                      className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-600"
+                      title={doc.page_count > 0 ? `经 LLM OCR 识别，共 ${doc.page_count} 页` : "经 LLM OCR 识别"}
+                    >
+                      OCR
+                    </span>
+                  )}
                 </div>
                 {prog ? (
                   <div className="mt-1.5">
@@ -1790,8 +1800,12 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
                     {doc.chunk_count > 0 && <span>{doc.chunk_count} 切片</span>}
                     {doc.token_count > 0 && <span>{doc.token_count} tokens</span>}
                     {doc.error_message && (
-                      <span className="text-red-500" title={doc.error_message}>
+                      <span
+                        className="text-red-500"
+                        title={ocrFailedPages ? `${doc.error_message}；${ocrFailedPages}` : doc.error_message}
+                      >
                         {doc.error_message.slice(0, 50)}
+                        {ocrFailedPages && `（${ocrFailedPages}）`}
                       </span>
                     )}
                   </div>
@@ -2417,6 +2431,44 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
   );
 }
 
+// ─── OCR 模型选项 Hook ──────────────────────────────────────────────────
+
+/** 读取全局 LLM OCR 总开关与可选视觉模型列表（聚合各自启用渠道声明的模型）。 */
+function useOcrModelOptions() {
+  const [ocrEnabled, setOcrEnabled] = useState(false);
+  const [options, setOptions] = useState<string[]>([]);
+  useEffect(() => {
+    settingsApi.get().then(s => setOcrEnabled(Boolean(s.ocr_enabled))).catch(() => {});
+    channelApi.getAll()
+      .then(chs => setOptions(Array.from(new Set(chs.filter(c => c.status === 1).flatMap(c => c.models))).sort()))
+      .catch(() => {});
+  }, []);
+  return { ocrEnabled, options };
+}
+
+/** 聚合所有启用渠道声明的模型（去重排序）。 */
+function aggregateChannelModels(chs: Channel[]): string[] {
+  return Array.from(new Set(chs.filter(c => c.status === 1).flatMap(c => c.models))).sort();
+}
+
+/** 名字上疑似向量（Embedding）模型的匹配规则：embed / bge / gte / m3e 等常见命名 */
+const EMBEDDING_MODEL_PATTERN = /embed|bge|gte|m3e/i;
+
+/** OCR（视觉）下拉选项：排除疑似 embedding 模型——识图请求发给向量模型必然失败。 */
+function filterVisionModels(models: string[]): string[] {
+  return models.filter((m) => !EMBEDDING_MODEL_PATTERN.test(m));
+}
+
+/** 默认可选的 Embedding 模型（OpenAI 系），与历史默认保持一致 */
+const DEFAULT_EMBEDDING_MODELS = ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"];
+
+/** Embedding 下拉选项：默认模型 + 渠道声明中疑似 embedding 的模型；当前值不在列表时保留，避免误清空。 */
+function mergeEmbeddingOptions(channelModels: string[], current: string): string[] {
+  const all = [...DEFAULT_EMBEDDING_MODELS, ...channelModels.filter((m) => EMBEDDING_MODEL_PATTERN.test(m))];
+  if (current && !all.includes(current)) all.push(current);
+  return Array.from(new Set(all));
+}
+
 // ─── Settings Tab ───────────────────────────────────────────────────────
 
 function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => void }) {
@@ -2436,6 +2488,14 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showChannelPicker, setShowChannelPicker] = useState(false);
+  const [ocrModel, setOcrModel] = useState(kb.ocr_model || "");
+  const { ocrEnabled, options: ocrModelOptionsRaw } = useOcrModelOptions();
+  // OCR 只应选视觉模型：过滤掉疑似 embedding 的模型；
+  // 当前已配置的模型即使被过滤也保留为可选值，避免误清空（可在下拉里改选正确的视觉模型）
+  const visionOptions = filterVisionModels(ocrModelOptionsRaw);
+  const ocrModelOptions = ocrModel && !visionOptions.includes(ocrModel)
+    ? [...visionOptions, ocrModel]
+    : visionOptions;
 
   useEffect(() => {
     channelApi.getAll().then(setChannels).catch(console.error);
@@ -2443,6 +2503,8 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
 
   const activeChannels = channels.filter(c => c.status === 1);
   const selectedEmbeddingChannel = activeChannels.find(c => c.id === embeddingChannelId);
+  // Embedding 下拉选项：默认模型 + 已配置渠道声明的模型（复用本页已有的 channels，不额外请求）
+  const embeddingOptions = mergeEmbeddingOptions(aggregateChannelModels(channels), embeddingModel);
 
   const handleSave = async () => {
     setSaving(true);
@@ -2453,6 +2515,8 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
         description: description.trim() || undefined,
         embedding_model: embeddingModel.trim() || undefined,
         embedding_channel_id: embeddingChannelId || undefined,
+        // ocr_model 总是提交：空字符串表示「不启用」（后端 null/缺省视为不修改，无法清空）
+        ocr_model: ocrModel.trim(),
         status,
         mcp_enabled: mcpEnabled,
         chunk_size: chunkSize,
@@ -2528,15 +2592,17 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
         <div className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">Embedding 模型</label>
-            <input
-              type="text"
+            <select
               value={embeddingModel}
               onChange={(e) => setEmbeddingModel(e.target.value)}
-              placeholder="text-embedding-3-small"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-            />
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            >
+              {embeddingOptions.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
             <p className="mt-1 text-xs text-slate-400">
-              支持的模型取决于渠道，常见：text-embedding-3-small / text-embedding-3-large / text-embedding-ada-002
+              默认提供 OpenAI 系模型，已配置渠道声明的模型也会出现在列表中；请确保所选渠道支持 /embeddings 接口（DeepSeek 不提供 Embedding）
             </p>
           </div>
 
@@ -2604,6 +2670,32 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
             </div>
             <p className="mt-1 text-xs text-slate-400">
               指定后，embedding 请求会优先使用该渠道。不指定则自动调度。
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* OCR config */}
+      <div className="surface data-card rounded-2xl">
+        <h3 className="mb-4 text-sm font-semibold text-slate-900">OCR 配置</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">OCR 视觉模型</label>
+            <select
+              value={ocrModel}
+              disabled={!ocrEnabled}
+              onChange={(e) => setOcrModel(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+            >
+              <option value="">不启用（默认）</option>
+              {ocrModelOptions.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-slate-400">
+              {ocrEnabled
+                ? "用于识别扫描版 PDF，需有渠道声明支持该视觉模型（如 qwen-vl-max / glm-4v-flash）；留空则不启用"
+                : "请先在设置中心开启 LLM OCR"}
             </p>
           </div>
         </div>
@@ -2908,6 +3000,12 @@ function CreateKbModal({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [embeddingModel, setEmbeddingModel] = useState("text-embedding-3-small");
+  const [ocrModel, setOcrModel] = useState("");
+  // channelModels = 所有启用渠道声明的模型聚合，OCR 与 Embedding 两个下拉共用
+  const { ocrEnabled, options: channelModels } = useOcrModelOptions();
+  const embeddingOptions = mergeEmbeddingOptions(channelModels, embeddingModel);
+  // OCR 下拉排除疑似 embedding 模型（识图请求发给向量模型必然失败）
+  const visionModelOptions = filterVisionModels(channelModels);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -2923,6 +3021,7 @@ function CreateKbModal({
         name: name.trim(),
         description: description.trim() || undefined,
         embedding_model: embeddingModel || undefined,
+        ocr_model: ocrModel || undefined,
       });
       onCreated();
     } catch (e) {
@@ -2965,15 +3064,37 @@ function CreateKbModal({
 
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">Embedding 模型</label>
-            <input
-              type="text"
+            <select
               value={embeddingModel}
               onChange={(e) => setEmbeddingModel(e.target.value)}
-              placeholder="text-embedding-3-small"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-            />
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            >
+              {embeddingOptions.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
             <p className="mt-1 text-xs text-slate-400">
-              复用已有渠道的 Embedding 模型，确保渠道支持该模型
+              默认提供 OpenAI 系模型，已配置渠道声明的模型也会出现在列表中；请确保所选渠道支持 /embeddings 接口（DeepSeek 不提供 Embedding）
+            </p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">OCR 视觉模型（可选）</label>
+            <select
+              value={ocrModel}
+              disabled={!ocrEnabled}
+              onChange={(e) => setOcrModel(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+            >
+              <option value="">不启用（默认）</option>
+              {visionModelOptions.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-slate-400">
+              {ocrEnabled
+                ? "用于识别扫描版 PDF，需有渠道声明支持该视觉模型；留空则不启用"
+                : "请先在设置中心开启 LLM OCR"}
             </p>
           </div>
 
@@ -3023,6 +3144,20 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 解析 KbDocument.ocr_failed_pages（JSON 数组字符串，如 "[3,7]"），返回「第 3、7 页识别失败」文案。 */
+function formatOcrFailedPages(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const pages: unknown = JSON.parse(raw);
+    if (Array.isArray(pages) && pages.length > 0) {
+      return `第 ${pages.join("、")} 页识别失败`;
+    }
+  } catch {
+    // 忽略无法解析的历史数据
+  }
+  return null;
 }
 
 function fileToBase64(file: File): Promise<string> {
