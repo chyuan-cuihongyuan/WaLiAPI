@@ -207,17 +207,22 @@ impl ResponsesChatState {
                 }
             }
             Some("response.function_call_arguments.delta") => {
+                // 有意不下发工具参数的逐片增量，只更新 call_id/name 等元数据
+                // （merge_tool_event_fields）。完整参数改为在
+                // response.function_call_arguments.done 时一次性发出：
+                // 届时 call.arguments 仍为空，complete_tool_call 计算出的
+                // remaining 就是完整参数字符串。
+                //
+                // 为什么不逐片下发：部分客户端（实测 WaLiCode）不按 index 累积
+                // tool_call 分片，而是以 id 定位后整体覆盖 arguments，导致
+                // 只保留某一个分片而非拼接结果——分片越多坏得越彻底。
+                // 单个 delta 携带完整 arguments 同样符合 OpenAI 协议
+                // （协议未要求必须分片），按 index 正确累积的客户端收到一整块
+                // 也能正常工作，因此这是对两类客户端都安全的做法。
+                // 代价：工具参数失去逐字显示效果，正文（output_text）不受影响。
                 self.role(&mut output);
                 let index = self.tool_index(&event).unwrap_or(0);
                 self.merge_tool_event_fields(index, &event);
-                if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                    let (call_id, name) = {
-                        let entry = self.tool_calls.entry(index).or_default();
-                        entry.arguments.push_str(delta);
-                        (entry.call_id.clone(), entry.name.clone())
-                    };
-                    output.push(self.chunk(serde_json::json!({"tool_calls":[{"index":index,"id":call_id,"type":"function","function":{"name":name,"arguments":delta}}]}), None));
-                }
             }
             Some("response.function_call_arguments.done") => {
                 self.role(&mut output);
