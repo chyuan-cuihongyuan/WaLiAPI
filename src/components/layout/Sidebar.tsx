@@ -115,13 +115,18 @@ export function Sidebar({
             <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white group-hover:bg-slate-50">
               <Icon size={17} />
             </span>
-            <span className="font-medium">{label}</span>
-            {subLabel && (
-              <span className="ml-1 whitespace-nowrap text-[10px] font-normal text-slate-400" style={{ textShadow: "0 1px 1px rgba(0,0,0,0.06), inset 0 0.5px 0 rgba(255,255,255,0.8)" }}>
-                ({subLabel})
-              </span>
-            )}
-            <ChevronRight size={15} className="ml-auto opacity-0 transition-opacity group-hover:opacity-40" />
+            <span className="min-w-0 flex flex-1 items-center gap-1.5">
+              <span className="shrink-0 whitespace-nowrap font-medium">{label}</span>
+              {subLabel && (
+                <span
+                  className="min-w-0 truncate text-[10px] font-normal text-slate-400"
+                  style={{ textShadow: "0 1px 1px rgba(0,0,0,0.06), inset 0 0.5px 0 rgba(255,255,255,0.8)" }}
+                >
+                  ({subLabel})
+                </span>
+              )}
+            </span>
+            <ChevronRight size={15} className="ml-auto shrink-0 opacity-0 transition-opacity group-hover:opacity-40" />
           </NavLink>
         ))}
       </nav>
