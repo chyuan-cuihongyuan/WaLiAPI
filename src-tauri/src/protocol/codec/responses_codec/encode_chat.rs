@@ -15,6 +15,7 @@ const CHAT_TOP_LEVEL: &[&str] = &[
     "reasoning_effort",
     "verbosity",
     "metadata",
+    "store",
 ];
 
 /// Encode a Chat Completions request as a Responses request.  This deliberately
@@ -58,6 +59,13 @@ pub fn encode_chat_to_responses(
                 FeatureKind::UnsupportedField,
                 "/verbosity",
                 "Chat verbosity must be a string",
+            );
+        } else if key == "store" && value.as_bool() != Some(false) {
+            request::reject(
+                &mut rejected,
+                FeatureKind::UnsupportedField,
+                "/store",
+                "store must be false when converting Chat to Responses",
             );
         }
     }
@@ -138,6 +146,12 @@ pub fn encode_chat_to_responses(
         // Same story for the public Responses `text.verbosity` control: the
         // Codex backend allow-list is narrower than the public API.
         normalized.push("/verbosity".to_owned());
+    }
+    if object.get("store").is_some() {
+        // store:false is the OpenAI default and has no remote side effect.
+        // Responses API handles storage through its own mechanism, so the
+        // Chat store field is safely normalized away.
+        normalized.push("/store".to_owned());
     }
     if object.get("metadata").is_some() {
         // Client metadata is an annotation only.  The Codex account backend
