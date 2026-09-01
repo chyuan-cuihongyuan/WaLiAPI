@@ -31,12 +31,14 @@ bash scripts/fetch-pdfium.sh --dev      # 额外复制到 target/debug/pdfium/�
 2. 可执行文件同目录 `pdfium/` 子目录
 3. macOS `.app` 包的 `Contents/Resources/pdfium/`，以及 glob `resources/pdfium/*` 保留前缀后的 `Contents/Resources/resources/pdfium/`（0.2.5 安装包实测落点）
 4. Linux 安装包的 `<prefix>/lib/<binary>/pdfium/`
-5. 数据目录 `pdfium/` 子目录
+
+数据目录**不在**解析列表内：它是文档上传的落盘根（用户可写），从那里加载动态库会把
+上传写穿串联成进程内代码执行（安全审计 FIX-02）。
 
 ## Headless / Docker 部署
 
 官方 Docker 镜像已内置 `libpdfium.so`（`/usr/local/lib/waliapi/pdfium/`，由 `WALIAPI_PDFIUM_PATH` 指向）。
-手工部署 headless 二进制时，把库放到数据目录的 `pdfium/` 子目录（如 `/data/pdfium/libpdfium.so`），
+手工部署 headless 二进制时，把库放到二进制同目录的 `pdfium/` 子目录（如 `/opt/waliapi/pdfium/libpdfium.so`），
 或设置环境变量 `WALIAPI_PDFIUM_PATH=/path/to/libpdfium.so`。
 
 ## 注意

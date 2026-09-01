@@ -133,7 +133,7 @@ pub async fn ocr_pdf(
                 }
 
                 let jpeg_result: Result<Vec<u8>, OcrError> = async {
-                    let renderer = render::lock_renderer(data_dir).await?;
+                    let renderer = render::lock_renderer().await?;
                     renderer.render_page_jpeg(pdf, page_no, dpi)
                 }
                 .await;

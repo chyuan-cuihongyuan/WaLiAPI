@@ -23,8 +23,11 @@ unsafe impl Send for PdfRenderer {}
 
 impl PdfRenderer {
     /// 按候选路径加载 pdfium 动态库，全部失败时返回 OCR_RENDER_FAILED 并提示配置方式。
-    pub fn new(data_dir: &Path) -> Result<Self, OcrError> {
-        Self::bind_first(&library_candidates(data_dir))
+    ///
+    /// 注意：数据目录不在候选列表内——它是文档上传的落盘根（用户可写），
+    /// 从那里加载动态库会把「任意文件写」串联成进程内代码执行（FIX-02）。
+    pub fn new() -> Result<Self, OcrError> {
+        Self::bind_first(&library_candidates())
     }
 
     /// 依次尝试候选路径；全部不存在时报「未找到库」并列出已搜索路径与配置方式。
@@ -37,7 +40,8 @@ impl PdfRenderer {
                 .join(", ");
             OcrError::RenderFailed(format!(
                 "未找到 pdfium 动态库。已搜索: {}。\
-                 请将 {} 放入数据目录的 pdfium/ 子目录，或设置环境变量 WALIAPI_PDFIUM_PATH 指向库文件（或其所在目录）",
+                 请将 {} 放到可执行文件同目录的 pdfium/ 子目录，\
+                 或设置环境变量 WALIAPI_PDFIUM_PATH 指向库文件（或其所在目录）",
                 searched,
                 platform_library_name()
             ))
@@ -143,18 +147,17 @@ fn platform_library_name() -> &'static str {
 /// 4. macOS .app：Contents/Resources/pdfium/ 以及 glob 保留前缀后的
 ///    Contents/Resources/resources/pdfium/（0.2.5/0.2.6 安装包实测落点）
 /// 5. Linux deb/rpm/AppImage 的 <prefix>/lib/<binary>/pdfium/（tauri-bundler resources 落点）
-/// 6. 数据目录 pdfium/ 子目录（Docker/手动部署）
-fn library_candidates(data_dir: &Path) -> Vec<PathBuf> {
+///
+/// 数据目录（Docker/手动部署曾用 pdfium/ 子目录）已从候选中移除：它是文档上传的
+/// 落盘根（用户可写），从那里加载动态库会把上传写穿串联成进程内代码执行（FIX-02）。
+/// 手动部署请用 WALIAPI_PDFIUM_PATH 或把库放到二进制同目录。
+fn library_candidates() -> Vec<PathBuf> {
     let env_path = std::env::var_os("WALIAPI_PDFIUM_PATH").map(PathBuf::from);
     let exe = std::env::current_exe().ok();
-    library_candidates_from(env_path.as_deref(), exe.as_deref(), data_dir)
+    library_candidates_from(env_path.as_deref(), exe.as_deref())
 }
 
-fn library_candidates_from(
-    env_path: Option<&Path>,
-    exe: Option<&Path>,
-    data_dir: &Path,
-) -> Vec<PathBuf> {
+fn library_candidates_from(env_path: Option<&Path>, exe: Option<&Path>) -> Vec<PathBuf> {
     let lib_name = platform_library_name();
     let mut candidates = Vec::new();
 
@@ -202,7 +205,6 @@ fn library_candidates_from(
         }
     }
 
-    candidates.push(data_dir.join("pdfium").join(lib_name));
     candidates
 }
 
@@ -226,11 +228,11 @@ impl std::ops::Deref for RendererGuard {
 }
 
 /// 获取全局渲染器（首次调用时按候选路径加载动态库；加载失败不缓存，下次重试）。
-pub async fn lock_renderer(data_dir: &Path) -> Result<RendererGuard, OcrError> {
+pub async fn lock_renderer() -> Result<RendererGuard, OcrError> {
     let mutex = RENDERER.get_or_init(|| tokio::sync::Mutex::new(None));
     let mut guard = mutex.lock().await;
     if guard.is_none() {
-        *guard = Some(PdfRenderer::new(data_dir)?);
+        *guard = Some(PdfRenderer::new()?);
     }
     Ok(RendererGuard { guard })
 }
@@ -240,28 +242,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn library_candidates_cover_env_dir_and_data_dir() {
-        let dir = PathBuf::from("/tmp/waliapi_test_data");
-        let candidates = library_candidates(&dir);
-        // 数据目录候选必定存在
-        assert!(candidates
-            .iter()
-            .any(|p| p.ends_with(Path::new("pdfium").join(platform_library_name()))));
+    fn library_candidates_derive_only_from_env_and_exe() {
+        // FIX-02：数据目录是上传落盘根（用户可写），pdfium 候选不得包含数据目录，
+        // 防止「上传写穿 + 动态库加载」串联成进程内代码执行。候选只来自 env 与 exe 位置
+        // （exe 同目录，以及 .app 包布局下 exe 目录的上一级 Resources/）。
+        let exe = Path::new("/opt/waliapi/bin/waliapi-web");
+        let exe_dir = exe.parent().unwrap();
+        let bundle_root = exe_dir.parent().unwrap();
+        let candidates = library_candidates_from(None, Some(exe));
+        assert!(!candidates.is_empty());
+        for path in &candidates {
+            assert!(
+                path.starts_with(exe_dir) || path.starts_with(bundle_root),
+                "候选 {path:?} 应锚定在 exe 目录或安装包根下，不得指向其它位置"
+            );
+        }
+
+        // 环境变量覆盖优先；指向目录时拼平台库名，指向文件时原样保留
+        let dir =
+            std::env::temp_dir().join(format!("waliapi-pdfium-candidates-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let from_env_dir = library_candidates_from(Some(&dir), Some(exe));
+        assert_eq!(
+            from_env_dir.first().unwrap(),
+            &dir.join(platform_library_name())
+        );
+        let from_env_file =
+            library_candidates_from(Some(Path::new("/custom/location/pdfium.dll")), Some(exe));
+        assert_eq!(
+            from_env_file.first().unwrap(),
+            &PathBuf::from("/custom/location/pdfium.dll")
+        );
     }
 
     #[test]
     fn macos_app_bundle_searches_glob_prefixed_and_legacy_paths() {
         // 与 0.2.5/0.2.6 安装包、OCR_RENDER_FAILED 弹窗中的搜索列表对齐
         let exe = Path::new("/Applications/WaLiAPI.app/Contents/MacOS/waliapi");
-        let data_dir = Path::new("/Users/nelson/Library/Application Support/waliapi.xiaofuge.cn");
-        let candidates = library_candidates_from(None, Some(exe), data_dir);
+        let candidates = library_candidates_from(None, Some(exe));
         let lib = platform_library_name();
         let required = [
             Path::new("/Applications/WaLiAPI.app/Contents/MacOS/pdfium").join(lib),
             Path::new("/Applications/WaLiAPI.app/Contents/MacOS/Resources/pdfium").join(lib),
             Path::new("/Applications/WaLiAPI.app/Contents/Resources/pdfium").join(lib),
             Path::new("/Applications/WaLiAPI.app/Contents/Resources/resources/pdfium").join(lib),
-            data_dir.join("pdfium").join(lib),
         ];
         for path in &required {
             assert!(
@@ -274,8 +298,7 @@ mod tests {
     #[test]
     fn installed_app_pdfium_is_first_existing_candidate_when_present() {
         let exe = Path::new("/Applications/WaLiAPI.app/Contents/MacOS/waliapi");
-        let data_dir = Path::new("/tmp/waliapi_test_data");
-        let candidates = library_candidates_from(None, Some(exe), data_dir);
+        let candidates = library_candidates_from(None, Some(exe));
         let actual = PathBuf::from("/Applications/WaLiAPI.app/Contents/Resources/resources/pdfium")
             .join(platform_library_name());
         if !actual.is_file() {

@@ -140,11 +140,31 @@ pub async fn upload_document(
     let file_type = super::parser::get_file_type(&input.filename);
     let file_size = content.len() as i64;
 
-    let kb_dir = shared.state.data_dir.join("kb_files").join(&kb_id);
-    std::fs::create_dir_all(&kb_dir).ok();
+    // 落盘路径完全由服务端生成（uuid + 白名单扩展名），原始文件名仅入库展示；
+    // kb_id 先过白名单，杜绝路径穿越（FIX-02，见 upload 模块）
     let doc_id = uuid::Uuid::new_v4().to_string();
-    let file_path = kb_dir.join(format!("{}_{}", &doc_id, &input.filename));
-    std::fs::write(&file_path, &content).ok();
+    let file_path =
+        match super::upload::storage_path(&shared.state.data_dir, &kb_id, &doc_id, &input.filename)
+        {
+            Ok(path) => path,
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+    if let Some(parent) = file_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("创建库目录失败: {e}"),
+            )
+                .into_response();
+        }
+    }
+    if let Err(e) = std::fs::write(&file_path, &content) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写入文件失败: {e}"),
+        )
+            .into_response();
+    }
     let file_path_str = file_path.to_string_lossy().to_string();
 
     let doc = match repo

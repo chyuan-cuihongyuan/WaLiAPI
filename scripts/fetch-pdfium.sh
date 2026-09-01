@@ -9,7 +9,8 @@
 #   scripts/fetch-pdfium.sh [--platform win-x64|mac-arm64|mac-x64|linux-x64] [--dev]
 #     --platform  缺省探测当前宿主平台
 #     --dev       额外复制到 src-tauri/target/debug/pdfium/（tauri dev 的 exe 同目录，
-#                 使本地开发无需手工放置；数据目录 pdfium/ 亦可）
+#                 使本地开发无需手工放置。注意：数据目录 pdfium/ 不再是加载候选，
+#                 见 ocr/render.rs 的候选列表说明）
 #
 # 幂等：目标文件已存在时跳过下载。升级 pdfium 时修改 PDFIUM_RELEASE 并删除旧文件重跑。
 set -euo pipefail

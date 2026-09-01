@@ -127,10 +127,12 @@ async fn process_document_inner(
     let mut ocr_outcome: Option<ocr::OcrOutcome> = None;
     if settings.get_bool("ocr.enabled", false) && parser::get_file_type(filename) == "pdf" {
         let pages_text = {
-            let renderer = ocr::render::lock_renderer(data_dir)
+            let renderer = ocr::render::lock_renderer()
                 .await
                 .map_err(|e| e.to_string())?;
-            renderer.extract_pages_text(content).map_err(|e| e.to_string())?
+            renderer
+                .extract_pages_text(content)
+                .map_err(|e| e.to_string())?
         };
         if !ocr::pages_needing_ocr(&pages_text).is_empty() {
             // 两级 gate 的第二级：知识库未配 OCR 模型时报配置引导错误
@@ -363,7 +365,15 @@ async fn process_document_inner(
     }
 
     // 5. Update document and KB counts
-    emit_progress(events, doc_id, kb_id, filename, "finalizing", 98, "更新统计");
+    emit_progress(
+        events,
+        doc_id,
+        kb_id,
+        filename,
+        "finalizing",
+        98,
+        "更新统计",
+    );
     repo.update_document_counts(doc_id, total_chunks, total_tokens)
         .await
         .map_err(|e| e.to_string())?;
@@ -383,7 +393,15 @@ async fn process_document_inner(
         .map_err(|e| e.to_string())?;
 
     // 6. Rebuild HNSW index (best-effort, non-blocking on failure)
-    emit_progress(events, doc_id, kb_id, filename, "indexing", 99, "更新向量索引");
+    emit_progress(
+        events,
+        doc_id,
+        kb_id,
+        filename,
+        "indexing",
+        99,
+        "更新向量索引",
+    );
     let pool_clone = pool.clone();
     let kb_id_clone = kb_id.to_string();
     let events_clone = events.clone();

@@ -407,11 +407,19 @@ pub async fn upload_kb_document(
     let file_type = crate::services::knowledge::parser::get_file_type(&input.filename);
     let file_size = content.len() as i64;
 
-    let kb_dir = state.data_dir.join("kb_files").join(&input.kb_id);
-    std::fs::create_dir_all(&kb_dir).ok();
+    // 落盘路径完全由服务端生成（uuid + 白名单扩展名），原始文件名仅入库展示；
+    // kb_id 先过白名单，杜绝路径穿越（FIX-02，见 services::knowledge::upload）
     let doc_id = uuid::Uuid::new_v4().to_string();
-    let file_path = kb_dir.join(format!("{}_{}", &doc_id, &input.filename));
-    std::fs::write(&file_path, &content).ok();
+    let file_path = crate::services::knowledge::upload::storage_path(
+        &state.data_dir,
+        &input.kb_id,
+        &doc_id,
+        &input.filename,
+    )?;
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建库目录失败: {e}"))?;
+    }
+    std::fs::write(&file_path, &content).map_err(|e| format!("写入文件失败: {e}"))?;
     let file_path_str = file_path.to_string_lossy().to_string();
 
     let doc = repo
@@ -583,10 +591,7 @@ pub async fn get_kb_index_status(
 }
 
 #[tauri::command]
-pub async fn build_kb_index(
-    state: State<'_, Arc<AppState>>,
-    kb_id: String,
-) -> Result<(), String> {
+pub async fn build_kb_index(state: State<'_, Arc<AppState>>, kb_id: String) -> Result<(), String> {
     let pool = state.db.pool.clone();
     let events = state.events.clone();
 
@@ -611,7 +616,8 @@ pub async fn build_kb_index(
             }),
         );
 
-        match crate::services::knowledge::retriever::build_index(&pool, &kb_id_clone, &events).await {
+        match crate::services::knowledge::retriever::build_index(&pool, &kb_id_clone, &events).await
+        {
             Ok(()) => {
                 tracing::info!("HNSW index built successfully for KB {}", kb_id_clone);
                 events.emit(
