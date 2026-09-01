@@ -31,6 +31,7 @@ pub struct LogDto {
     pub sanitized: bool,
     pub blocked_reason: Option<String>,
     pub trace_id: Option<String>,
+    pub reasoning_effort: Option<String>,
     // --- T09 observability fields (nullable; legacy rows are NULL) ---
     pub downstream_protocol: Option<String>,
     pub downstream_endpoint: Option<String>,
@@ -75,6 +76,7 @@ impl From<RequestLog> for LogDto {
             sanitized: l.sanitized == 1,
             blocked_reason: l.blocked_reason,
             trace_id: l.trace_id,
+            reasoning_effort: l.reasoning_effort,
             downstream_protocol: l.downstream_protocol,
             downstream_endpoint: l.downstream_endpoint,
             route_group: l.route_group,

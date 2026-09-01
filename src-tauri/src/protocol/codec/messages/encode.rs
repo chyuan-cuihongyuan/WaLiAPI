@@ -231,7 +231,7 @@ pub fn encode_messages_to_chat(
 /// following CLIProxyAPI's `ConvertClaudeRequestToOpenAI`.  Returns `None`
 /// when the downstream did not ask for thinking (or asked for an unrecognized
 /// type), in which case `reasoning_effort` is left unset.
-fn anthropic_thinking_to_reasoning_effort(body: &Value) -> Option<String> {
+pub(crate) fn anthropic_thinking_to_reasoning_effort(body: &Value) -> Option<String> {
     let thinking = body.get("thinking")?;
     if !thinking.is_object() {
         return None;

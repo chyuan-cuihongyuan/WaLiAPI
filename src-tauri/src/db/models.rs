@@ -371,6 +371,7 @@ pub struct RequestLog {
     pub sanitized: i64,
     pub blocked_reason: Option<String>,
     pub trace_id: Option<String>,
+    pub reasoning_effort: Option<String>,
     // --- T09 observability (migration 016; all nullable) ---
     pub downstream_protocol: Option<String>,
     pub downstream_endpoint: Option<String>,
@@ -420,6 +421,7 @@ impl Default for RequestLog {
             sanitized: 0,
             blocked_reason: None,
             trace_id: None,
+            reasoning_effort: None,
             downstream_protocol: None,
             downstream_endpoint: None,
             route_group: None,

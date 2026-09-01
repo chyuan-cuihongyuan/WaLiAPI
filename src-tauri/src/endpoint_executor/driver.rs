@@ -40,6 +40,39 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Extract the client-requested reasoning effort from the ORIGINAL downstream
+/// request body, per downstream protocol:
+/// - Chat Completions: top-level `reasoning_effort` string.
+/// - Responses: `reasoning.effort` (fallback: top-level `reasoning_effort`).
+/// - Anthropic Messages: `thinking` config mapped to an effort level.
+/// Returns `None` when the client did not specify any reasoning preference.
+fn extract_reasoning_effort(audited: &AuditedRequest) -> Option<String> {
+    use crate::security::gate::DownstreamProtocol;
+    let body = &audited.envelope.original_json;
+    match audited.envelope.downstream_protocol {
+        DownstreamProtocol::ChatCompletions | DownstreamProtocol::Completions => body
+            .get("reasoning_effort")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        DownstreamProtocol::Responses => body
+            .get("reasoning")
+            .and_then(|r| r.get("effort"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                body.get("reasoning_effort")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            }),
+        DownstreamProtocol::Messages => {
+            crate::protocol::codec::messages::anthropic_thinking_to_reasoning_effort(body)
+        }
+        _ => None,
+    }
+}
+
+
+
 /// Multi-key load balancing: if the channel has extra API keys in
 /// `channel_api_keys`, randomly select one weighted by `weight`. The
 /// primary `api_key` on the channel row always participates with its
@@ -463,6 +496,7 @@ async fn write_non_stream_log(
         sanitized: i64::from(audited.audit_result.sanitized),
         blocked_reason: audited.audit_result.blocked_reason.clone(),
         trace_id: trace_id.clone(),
+        reasoning_effort: extract_reasoning_effort(&audited),
         // T09 observability fields we have on the facade path.  provider /
         // identity_revision / codec_version come from `PlanExecution`, which
         // the executor captures from the SAME PreparedAttempt + ChannelIdentity
@@ -578,6 +612,7 @@ async fn write_stream_precommit_failure_log_with_meta(
         sanitized: i64::from(audited.audit_result.sanitized),
         blocked_reason: audited.audit_result.blocked_reason.clone(),
         trace_id: trace_id.map(|s| s.to_string()),
+        reasoning_effort: extract_reasoning_effort(&audited),
         // A planning rejection has no candidate context. Once a candidate was
         // selected, retain it so exhausted Auth Accounts are not logged as
         // legacy channels.
@@ -1123,6 +1158,7 @@ impl StreamLogFinalizer {
             sanitized: i64::from(self.audited.audit_result.sanitized),
             blocked_reason: self.audited.audit_result.blocked_reason.clone(),
             trace_id: self.trace_id.clone(),
+            reasoning_effort: extract_reasoning_effort(&self.audited),
             // T09 observability fields (single source: PreparedAttempt + identity).
             downstream_protocol: Some(
                 self.audited

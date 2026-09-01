@@ -179,6 +179,7 @@ export interface RequestLog {
   sanitized: boolean;
   blocked_reason: string | null;
   trace_id: string | null;
+  reasoning_effort: string | null;
   // --- T09 observability fields (nullable; legacy rows are null) ---
   downstream_protocol: string | null;
   downstream_endpoint: string | null;

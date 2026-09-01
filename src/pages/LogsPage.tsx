@@ -738,9 +738,9 @@ function LogDetail({ log }: { log: RequestLog }) {
   return (
     <div className="space-y-4">
       {/* ── Gateway Metadata Cards ── */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
         {/* Token detail */}
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><Coins size={13} /> Token 消耗</div>
           <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900 tabular-nums leading-none">{formatNumber(log.total_tokens)}</div>
           <div className="mt-2 text-[11px] text-slate-500">
@@ -760,7 +760,7 @@ function LogDetail({ log }: { log: RequestLog }) {
         </div>
 
         {/* Duration */}
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><Timer size={13} /> 响应耗时</div>
           <div className="mt-1.5 text-sm font-semibold text-slate-900">{formatDuration(log.duration_ms)}</div>
           <div className="mt-0.5 text-[11px] text-slate-400">
@@ -769,14 +769,14 @@ function LogDetail({ log }: { log: RequestLog }) {
         </div>
 
         {/* Cost estimate */}
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><Coins size={13} /> 成本估算</div>
           <div className="mt-1.5 text-sm font-semibold text-slate-900">{costEstimate}</div>
           <div className="mt-0.5 text-[11px] text-slate-400">参考 GPT-4o 定价</div>
         </div>
 
         {/* Request size */}
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><FileCode2 size={13} /> 请求大小</div>
           <div className="mt-1.5 text-sm font-semibold text-slate-900">{sizeLabel}</div>
           <div className="mt-0.5 text-[11px] text-slate-400">
@@ -784,17 +784,42 @@ function LogDetail({ log }: { log: RequestLog }) {
           </div>
         </div>
 
-        {/* Channel routing */}
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
-          <div className="flex items-center gap-1.5 text-xs text-slate-500"><Shield size={13} /> 上游路由</div>
-          <div className="mt-1.5 flex items-center gap-2 text-sm font-semibold text-slate-900"><span>{log.channel_name || "-"}</span><UpstreamTypeBadge upstreamType={log.upstream_type} /></div>
-          <div className="mt-0.5 text-[11px] text-slate-400">
-            {log.is_retry ? "⚠ 重试转发" : "✓ 首选渠道"}
+        {/* Route / Reasoning — unified card, same width as other dashboard cards */}
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs text-slate-500"><Shield size={13} /> 请求路由</div>
+            <UpstreamTypeBadge upstreamType={log.upstream_type} />
           </div>
+          <div className="mt-2 flex-1 divide-y divide-slate-100">
+            <div className="flex items-center justify-between gap-2 py-1.5">
+              <span className="shrink-0 text-[11px] text-slate-400">端点</span>
+              <span className="truncate text-right text-[13px] font-semibold font-mono text-slate-900" title={log.downstream_endpoint || "-"}>
+                {log.downstream_endpoint || "-"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 py-1.5">
+              <span className="shrink-0 text-[11px] text-slate-400">推理协议</span>
+              <span className="truncate text-right text-[13px] font-semibold text-slate-900" title={log.upstream_protocol || log.downstream_protocol || "-"}>
+                {log.upstream_protocol || log.downstream_protocol || "-"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 py-1.5">
+              <span className="shrink-0 text-[11px] text-slate-400">推理档位</span>
+              <span className="truncate text-right text-[13px] font-semibold text-slate-900" title={log.reasoning_effort || "-"}>
+                {log.reasoning_effort || "-"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 py-1.5">
+              <span className="shrink-0 text-[11px] text-slate-400">路由</span>
+              <span className="truncate text-right text-[13px] font-semibold text-slate-900" title={log.channel_name || "-"}>
+                {log.channel_name || "-"}
+              </span>
+            </div>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-400">{log.is_retry ? "重试转发" : "首选渠道"}</div>
         </div>
-
         {/* Model mapping */}
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><ArrowRightLeft size={13} /> 模型映射</div>
           <div className="mt-1.5 text-sm font-semibold text-slate-900">
             {modelMappingDisplay || modelRequested}
@@ -816,7 +841,7 @@ function LogDetail({ log }: { log: RequestLog }) {
 
       {/* ── Security Summary ── */}
       {(log.risk_score > 0 || log.risk_summary) && (
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <ShieldAlert size={15} className="text-amber-500" />
