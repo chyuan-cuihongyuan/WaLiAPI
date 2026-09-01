@@ -325,10 +325,15 @@ fn accumulate_from_sse_event(
             continue;
         }
 
-        // ── Anthropic Messages streaming ──
-        // event: content_block_delta / message_delta / content_block_start
+        // ── Anthropic Messages / OpenAI Responses streaming ──
+        // Both protocols stamp a `type` field on each event, so they must share
+        // a single match.  (The Responses arms used to live in a second `if`
+        // below this block, but the unconditional `continue` here made that
+        // code unreachable — every Responses event fell into `_ => {}` and
+        // nothing was ever accumulated for streaming Responses requests.)
         if let Some(et) = v.get("type").and_then(|t| t.as_str()) {
             match et {
+                // ── Anthropic Messages ──
                 "content_block_start" => {
                     if let Some(block) = v.get("content_block") {
                         if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
@@ -381,28 +386,83 @@ fn accumulate_from_sse_event(
                         *finish_reason = Some(fr.to_string());
                     }
                 }
-                _ => {}
-            }
-            continue;
-        }
-
-        // ── OpenAI Responses API streaming ──
-        // Events like response.output_item.done / response.completed
-        if let Some(et) = v.get("type").and_then(|t| t.as_str()) {
-            if et == "response.output_text.delta" || et == "response.text.delta" {
-                if let Some(t) = v.get("delta").and_then(|d| d.as_str()) {
-                    content.push_str(t);
+                // ── OpenAI Responses API ──
+                // Events like response.output_text.delta / response.completed
+                "response.output_text.delta" | "response.text.delta" => {
+                    if let Some(t) = v.get("delta").and_then(|d| d.as_str()) {
+                        content.push_str(t);
+                    }
                 }
-            } else if et == "response.completed" || et == "response.done" {
-                // Try to extract from the final response object
-                if let Some(resp) = v.get("response") {
-                    if let Some(output) = resp.get("output").and_then(|o| o.as_array()) {
-                        for item in output {
-                            if let Some(c) = item.get("content").and_then(|c| c.as_array()) {
-                                for part in c {
-                                    if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                        if content.is_empty() {
-                                            content.push_str(t);
+                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                    if let Some(t) = v.get("delta").and_then(|d| d.as_str()) {
+                        reasoning.push_str(t);
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    // {item_id, output_index, delta} — key by item_id hash.
+                    let item_id = v.get("item_id").and_then(|i| i.as_str()).unwrap_or("");
+                    let key = item_id
+                        .bytes()
+                        .fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
+                    if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
+                        let entry = tool_calls_map.entry(key).or_insert_with(|| {
+                            serde_json::json!({"index": key, "id": item_id, "type": "function", "function": {"name": "", "arguments": ""}})
+                        });
+                        let existing = entry
+                            .pointer("/function/arguments")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        entry["function"]["arguments"] =
+                            serde_json::json!(format!("{existing}{d}"));
+                    }
+                }
+                "response.output_item.done" => {
+                    // A completed function_call item carries the full
+                    // name/arguments — authoritative over the deltas.
+                    if let Some(item) = v.get("item") {
+                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                            let item_id = item
+                                .get("call_id")
+                                .or_else(|| item.get("id"))
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("");
+                            let key = item_id
+                                .bytes()
+                                .fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
+                            // Delta accumulation keyed by `item_id` (the "fc_…"
+                            // id), while this event keys by call_id — merge onto
+                            // the delta entry when both ids are present.
+                            let delta_key = item
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .bytes()
+                                .fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
+                            tool_calls_map.remove(&delta_key);
+                            tool_calls_map.insert(key, serde_json::json!({
+                                "index": key,
+                                "id": item_id,
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                                    "arguments": item.get("arguments").and_then(|a| a.as_str()).unwrap_or(""),
+                                }
+                            }));
+                        }
+                    }
+                }
+                "response.completed" | "response.done" => {
+                    // Try to extract from the final response object
+                    if let Some(resp) = v.get("response") {
+                        if let Some(output) = resp.get("output").and_then(|o| o.as_array()) {
+                            for item in output {
+                                if let Some(c) = item.get("content").and_then(|c| c.as_array()) {
+                                    for part in c {
+                                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                            if content.is_empty() {
+                                                content.push_str(t);
+                                            }
                                         }
                                     }
                                 }
@@ -410,7 +470,9 @@ fn accumulate_from_sse_event(
                         }
                     }
                 }
+                _ => {}
             }
+            continue;
         }
     }
 }
@@ -503,5 +565,69 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.message().contains("bad upstream event"));
+    }
+
+    fn accumulate(event: &str) -> (String, String, Option<String>, Option<String>, std::collections::BTreeMap<i64, serde_json::Value>) {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut role = None;
+        let mut finish_reason = None;
+        let mut tool_calls = std::collections::BTreeMap::new();
+        accumulate_from_sse_event(
+            event,
+            &mut content,
+            &mut reasoning,
+            &mut role,
+            &mut finish_reason,
+            &mut tool_calls,
+        );
+        (content, reasoning, role, finish_reason, tool_calls)
+    }
+
+    /// Regression: Responses API events carry a `type` field and used to be
+    /// swallowed by the Anthropic branch's unconditional `continue`, leaving
+    /// `response_choices` empty for every streaming Responses request.
+    #[test]
+    fn responses_api_output_text_deltas_are_accumulated() {
+        let (mut content, ..) = accumulate(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}",
+        );
+        let (c2, reasoning, _, _, _) = accumulate(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}",
+        );
+        content.push_str(&c2);
+        assert_eq!(content, "Hello world");
+        assert!(reasoning.is_empty());
+    }
+
+    #[test]
+    fn responses_api_reasoning_deltas_are_accumulated() {
+        let (_, reasoning, ..) = accumulate(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}",
+        );
+        assert_eq!(reasoning, "thinking");
+    }
+
+    #[test]
+    fn responses_api_completed_extracts_text_fallback() {
+        let (content, ..) = accumulate(
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"final answer\"}]}]}}",
+        );
+        assert_eq!(content, "final answer");
+    }
+
+    #[test]
+    fn responses_api_function_call_output_item_is_accumulated() {
+        let (.., tool_calls) = accumulate(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}",
+        );
+        assert_eq!(tool_calls.len(), 1);
+        let tc = tool_calls.values().next().unwrap();
+        assert_eq!(tc.pointer("/function/name").and_then(|n| n.as_str()), Some("get_weather"));
+        assert!(tc
+            .pointer("/function/arguments")
+            .and_then(|a| a.as_str())
+            .unwrap_or("")
+            .contains("Paris"));
     }
 }
