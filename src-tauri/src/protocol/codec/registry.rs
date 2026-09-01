@@ -126,6 +126,7 @@ fn encode_responses_to_chat(
         "store",
         "include",
         "prompt_cache_key",
+        "prompt_cache_options",
         "client_metadata",
     ] {
         if request.get(field).is_some() {

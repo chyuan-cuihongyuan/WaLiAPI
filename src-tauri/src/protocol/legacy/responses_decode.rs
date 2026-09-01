@@ -50,6 +50,7 @@ pub fn responses_to_openai(
         "store",
         "include",
         "prompt_cache_key",
+        "prompt_cache_options",
         "client_metadata",
         // Mapped below: `reasoning.effort` → top-level `reasoning_effort`.
         "reasoning",

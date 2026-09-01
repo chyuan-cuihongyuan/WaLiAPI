@@ -50,3 +50,76 @@ pub async fn get_dashboard_stats_impl(
         total_wiki_pages: s.total_wiki_pages,
     })
 }
+
+// ── 模型分布 ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelStatsDto {
+    pub model: String,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub success_rate: f64,
+    pub avg_latency_ms: f64,
+}
+
+#[tauri::command]
+pub async fn get_model_stats(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<ModelStatsDto>, String> {
+    get_model_stats_impl(&*state).await
+}
+
+pub async fn get_model_stats_impl(
+    state: &std::sync::Arc<AppState>,
+) -> Result<Vec<ModelStatsDto>, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    let stats = repo.get_model_stats().await.map_err(|e| e.to_string())?;
+    Ok(stats.into_iter().map(|s| ModelStatsDto {
+        model: s.model,
+        request_count: s.request_count,
+        input_tokens: s.input_tokens,
+        output_tokens: s.output_tokens,
+        total_tokens: s.total_tokens,
+        success_rate: s.success_rate,
+        avg_latency_ms: s.avg_latency_ms,
+    }).collect())
+}
+
+// ── Token 趋势 ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenTrendPointDto {
+    pub hour: String,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub request_count: i64,
+}
+
+#[tauri::command]
+pub async fn get_token_trend(
+    hours: Option<i64>,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<TokenTrendPointDto>, String> {
+    get_token_trend_impl(hours, &*state).await
+}
+
+pub async fn get_token_trend_impl(
+    hours: Option<i64>,
+    state: &std::sync::Arc<AppState>,
+) -> Result<Vec<TokenTrendPointDto>, String> {
+    let hours = hours.unwrap_or(24);
+    let repo = Repository::new(state.db.pool.clone());
+    let points = repo.get_token_trend(hours).await.map_err(|e| e.to_string())?;
+    Ok(points.into_iter().map(|p| TokenTrendPointDto {
+        hour: p.hour,
+        model: p.model,
+        input_tokens: p.input_tokens,
+        output_tokens: p.output_tokens,
+        total_tokens: p.total_tokens,
+        request_count: p.request_count,
+    }).collect())
+}

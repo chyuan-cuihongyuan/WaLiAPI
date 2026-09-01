@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { statsApi } from "../lib/api";
-import type { DashboardStats } from "../types";
+import type { DashboardStats, ModelStats, TokenTrendPoint } from "../types";
 import { formatNumber, formatDuration } from "../lib/constants";
 import {
   Activity,
@@ -27,6 +27,12 @@ import {
 
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [modelStats, setModelStats] = useState<ModelStats[]>([]);
+  const [tokenTrend, setTokenTrend] = useState<TokenTrendPoint[]>([]);
+  const [trendHours, setTrendHours] = useState<24 | 168 | 720>(24);
+  const [showInputToken, setShowInputToken] = useState(true);
+  const [showOutputToken, setShowOutputToken] = useState(true);
+  const [hoverBar, setHoverBar] = useState<{ x: number; y: number; hour: string; data: { model: string; input: number; output: number }[] } | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const navigate = useNavigate();
@@ -37,6 +43,20 @@ export function DashboardPage() {
     const interval = setInterval(doLoad, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    const doLoad = () => statsApi.getModelStats().then(setModelStats).catch(() => {});
+    doLoad();
+    const interval = setInterval(doLoad, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const doLoad = () => statsApi.getTokenTrend(trendHours).then(setTokenTrend).catch(() => {});
+    doLoad();
+    const interval = setInterval(doLoad, 30000);
+    return () => clearInterval(interval);
+  }, [trendHours]);
 
   if (loadError && !stats) {
     return (
@@ -162,6 +182,22 @@ export function DashboardPage() {
           </div>
         ))}
       </div>
+
+      {/* 模型分布表格 */}
+      <ModelDistributionTable data={modelStats} />
+
+      {/* Token 使用趋势图 */}
+      <TokenTrendChart
+        data={tokenTrend}
+        hours={trendHours}
+        showInput={showInputToken}
+        showOutput={showOutputToken}
+        onHoursChange={setTrendHours}
+        onToggleInput={() => setShowInputToken(v => !v)}
+        onToggleOutput={() => setShowOutputToken(v => !v)}
+        hoverBar={hoverBar}
+        setHoverBar={setHoverBar}
+      />
 
       {/* 运维建议 */}
       <section className="surface rounded-[20px] p-6">
@@ -378,5 +414,598 @@ export function DashboardPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// 模型分布表格
+// ════════════════════════════════════════════════════════════
+
+const MODEL_COLORS = [
+  "bg-blue-500", "bg-emerald-500", "bg-violet-500", "bg-amber-500",
+  "bg-rose-500", "bg-cyan-500", "bg-indigo-500", "bg-teal-500",
+  "bg-fuchsia-500", "bg-orange-500",
+];
+
+function ModelDistributionTable({ data }: { data: ModelStats[] }) {
+  const maxTokens = Math.max(...data.map(d => d.total_tokens), 1);
+
+  return (
+    <section className="surface rounded-[20px] p-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">模型分布</h2>
+          <p className="mt-1 text-sm text-slate-500">各模型调用次数、Token 消耗与成功率</p>
+        </div>
+        <Layers className="h-5 w-5 text-slate-400" />
+      </div>
+
+      {data.length === 0 ? (
+        <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-400">
+          暂无调用记录
+        </div>
+      ) : (
+        <div className="mt-5 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                <th className="pb-2 pr-4 font-medium">模型</th>
+                <th className="pb-2 pr-4 font-medium text-right">请求数</th>
+                <th className="pb-2 pr-4 font-medium text-right">输入 Token</th>
+                <th className="pb-2 pr-4 font-medium text-right">输出 Token</th>
+                <th className="pb-2 pr-4 font-medium text-right">总 Token</th>
+                <th className="pb-2 pr-4 font-medium">Token 占比</th>
+                <th className="pb-2 pr-4 font-medium text-right">成功率</th>
+                <th className="pb-2 font-medium text-right">平均延迟</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.map((row, i) => (
+                <tr key={row.model} className="border-b border-slate-100 last:border-0">
+                  <td className="py-2.5 pr-4">
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${MODEL_COLORS[i % MODEL_COLORS.length]}`} />
+                      <span className="font-medium text-slate-900">{row.model}</span>
+                    </div>
+                  </td>
+                  <td className="py-2.5 pr-4 text-right tabular-nums text-slate-600">{formatNumber(row.request_count)}</td>
+                  <td className="py-2.5 pr-4 text-right tabular-nums text-slate-500">{formatNumber(row.input_tokens)}</td>
+                  <td className="py-2.5 pr-4 text-right tabular-nums text-slate-500">{formatNumber(row.output_tokens)}</td>
+                  <td className="py-2.5 pr-4 text-right tabular-nums font-medium text-slate-900">{formatNumber(row.total_tokens)}</td>
+                  <td className="py-2.5 pr-4">
+                    <div className="h-1.5 w-full rounded-full bg-slate-100">
+                      <div
+                        className={`h-1.5 rounded-full ${MODEL_COLORS[i % MODEL_COLORS.length]}`}
+                        style={{ width: `${(row.total_tokens / maxTokens) * 100}%` }}
+                      />
+                    </div>
+                  </td>
+                  <td className="py-2.5 pr-4 text-right tabular-nums">
+                    <span className={row.success_rate >= 0.95 ? "text-emerald-600" : row.success_rate >= 0.8 ? "text-amber-600" : "text-rose-600"}>
+                      {(row.success_rate * 100).toFixed(1)}%
+                    </span>
+                  </td>
+                  <td className="py-2.5 text-right tabular-nums text-slate-500">{formatDuration(Math.round(row.avg_latency_ms))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// Token 使用趋势图 (纯 SVG 折线图 + 渐变填充)
+// ════════════════════════════════════════════════════════════
+
+const TREND_LINE_COLORS = [
+  { stroke: "#3b82f6", fill: "#3b82f6", light: "#93c5fd" }, // blue
+  { stroke: "#10b981", fill: "#10b981", light: "#6ee7b7" }, // emerald
+  { stroke: "#8b5cf6", fill: "#8b5cf6", light: "#c4b5fd" }, // violet
+  { stroke: "#f59e0b", fill: "#f59e0b", light: "#fcd34d" }, // amber
+  { stroke: "#ef4444", fill: "#ef4444", light: "#fca5a5" }, // rose
+  { stroke: "#06b6d4", fill: "#06b6d4", light: "#67e8f9" }, // cyan
+  { stroke: "#6366f1", fill: "#6366f1", light: "#a5b4fc" }, // indigo
+  { stroke: "#14b8a6", fill: "#14b8a6", light: "#5eead4" }, // teal
+  { stroke: "#d946ef", fill: "#d946ef", light: "#f0abfc" }, // fuchsia
+  { stroke: "#f97316", fill: "#f97316", light: "#fdba74" }, // orange
+];
+
+interface TrendHover {
+  x: number;
+  y: number;
+  hour: string;
+  data: { model: string; input: number; output: number }[];
+}
+
+/** Catmull-Rom → cubic Bézier 转换，生成平滑曲线路径 */
+function smoothPath(points: { x: number; y: number }[]): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  if (points.length === 2) return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
+function TokenTrendChart({
+  data,
+  hours,
+  showInput,
+  showOutput,
+  onHoursChange,
+  onToggleInput,
+  onToggleOutput,
+  hoverBar,
+  setHoverBar,
+}: {
+  data: TokenTrendPoint[];
+  hours: 24 | 168 | 720;
+  showInput: boolean;
+  showOutput: boolean;
+  onHoursChange: (h: 24 | 168 | 720) => void;
+  onToggleInput: () => void;
+  onToggleOutput: () => void;
+  hoverBar: TrendHover | null;
+  setHoverBar: (h: TrendHover | null) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerW, setContainerW] = useState(800);
+
+  useEffect(() => {
+    const update = () => setContainerW(containerRef.current?.clientWidth ?? 800);
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  // 按小时聚合数据
+  const { hoursList, modelList, seriesByModel } = useMemo(() => {
+    const modelSet = new Set<string>();
+    data.forEach(d => modelSet.add(d.model));
+    const modelsArr = Array.from(modelSet);
+
+    // 构建原始数据 map: hour -> model -> point
+    const map = new Map<string, Map<string, TokenTrendPoint>>();
+    data.forEach(d => {
+      if (!map.has(d.hour)) map.set(d.hour, new Map());
+      map.get(d.hour)!.set(d.model, d);
+    });
+
+    // 根据查询范围决定聚合粒度
+    // 日(24h): 1 小时一个点 → 24 点
+    // 周(168h): 3 小时一个点 → 56 点
+    // 月(720h): 1 天一个点 → 30 点
+    const bucketMs = hours === 24 ? 3600_000 : hours === 168 ? 3 * 3600_000 : 86_400_000;
+    const totalBuckets = hours === 24 ? 24 : hours === 168 ? 56 : 30;
+
+    const now = new Date();
+    // 对齐到 bucket 起点
+    const start = new Date(now);
+    if (bucketMs >= 86_400_000) {
+      start.setHours(0, 0, 0, 0);
+    } else {
+      start.setMinutes(0, 0, 0);
+      start.setMinutes(start.getMinutes() - (start.getMinutes() % (bucketMs / 60_000)));
+    }
+    start.setTime(start.getTime() - bucketMs * (totalBuckets - 1));
+
+    // 生成 bucket 标签和聚合数据
+    const hoursArr: string[] = [];
+    for (let i = 0; i < totalBuckets; i++) {
+      const d = new Date(start.getTime() + i * bucketMs);
+      hoursArr.push(d.toISOString());
+    }
+
+    // 将原始数据按 bucket 聚合
+    const series = modelsArr.map(m => ({
+      model: m,
+      points: hoursArr.map(h => {
+        const bucketStart = new Date(h);
+        const bucketEnd = new Date(bucketStart.getTime() + bucketMs);
+        // 在此 bucket 范围内累加该模型的数据
+        let input = 0, output = 0, total = 0, requests = 0;
+        for (const [rawHour, modelMap] of map) {
+          const rawDate = new Date(rawHour);
+          if (rawDate >= bucketStart && rawDate < bucketEnd) {
+            const p = modelMap.get(m);
+            if (p) {
+              input += p.input_tokens;
+              output += p.output_tokens;
+              total += p.total_tokens;
+              requests += p.request_count;
+            }
+          }
+        }
+        return { hour: h, input, output, total, requests };
+      }),
+    }));
+
+    return { hoursList: hoursArr, modelList: modelsArr, seriesByModel: series };
+  }, [data, hours]);
+
+  const chartH = 220;
+  const padding = { top: 20, right: 16, bottom: 36, left: 52 };
+  const chartW = Math.max(containerW - padding.left - padding.right, 100);
+  const stepX = hoursList.length > 1 ? chartW / (hoursList.length - 1) : chartW;
+
+  // Y 轴最大值（选中的所有 mode 中的最大单点值，留 15% headroom）
+  const maxValue = useMemo(() => {
+    let max = 0;
+    seriesByModel.forEach(s => {
+      s.points.forEach(p => {
+        if (showInput && p.input > max) max = p.input;
+        if (showOutput && p.output > max) max = p.output;
+      });
+    });
+    return max > 0 ? max * 1.15 : 1;
+  }, [seriesByModel, showInput, showOutput]);
+
+  const yTicks = 5;
+  const yTickValues = Array.from({ length: yTicks + 1 }, (_, i) => (maxValue / yTicks) * i);
+
+  const formatHourLabel = (h: string) => {
+    const d = new Date(h);
+    if (hours === 24) return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:00`;
+    if (hours === 168) return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:00`;
+    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  const formatHourShort = (h: string) => {
+    const d = new Date(h);
+    if (hours === 24) return `${String(d.getHours()).padStart(2, "0")}:00`;
+    if (hours === 168) return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}h`;
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  const formatTick = (v: number) => {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+    return String(Math.round(v));
+  };
+
+  const labelInterval = Math.max(1, Math.floor(hoursList.length / 10));
+
+  // 为每个模型生成 SVG 坐标点（输入和输出各一条线）
+  const lineData = useMemo(() => {
+    const lines: { model: string; type: "input" | "output"; pts: { x: number; y: number; val: number; hour: string }[]; path: string; areaPath: string; colorIdx: number }[] = [];
+    seriesByModel.forEach((s, idx) => {
+      if (showInput) {
+        const pts = s.points.map((p, i) => ({
+          x: padding.left + i * stepX,
+          y: padding.top + chartH - p.input / maxValue * chartH,
+          val: p.input,
+          hour: p.hour,
+        }));
+        lines.push({ model: s.model, type: "input", pts, path: smoothPath(pts), areaPath: pts.length > 0 ? `${smoothPath(pts)} L ${pts[pts.length - 1].x} ${padding.top + chartH} L ${pts[0].x} ${padding.top + chartH} Z` : "", colorIdx: idx });
+      }
+      if (showOutput) {
+        const pts = s.points.map((p, i) => ({
+          x: padding.left + i * stepX,
+          y: padding.top + chartH - p.output / maxValue * chartH,
+          val: p.output,
+          hour: p.hour,
+        }));
+        lines.push({ model: s.model, type: "output", pts, path: smoothPath(pts), areaPath: pts.length > 0 ? `${smoothPath(pts)} L ${pts[pts.length - 1].x} ${padding.top + chartH} L ${pts[0].x} ${padding.top + chartH} Z` : "", colorIdx: idx });
+      }
+    });
+    return lines;
+  }, [seriesByModel, stepX, showInput, showOutput, maxValue, chartH, padding]);
+
+  // hover 十字线 x 坐标 → 最近的数据点索引
+  const hoverIndex = hoverBar
+    ? Math.round((hoverBar.x - padding.left) / stepX)
+    : -1;
+  const clampedHoverIndex = Math.max(0, Math.min(hoverIndex, hoursList.length - 1));
+
+  return (
+    <section className="surface rounded-[20px] p-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">Token 使用趋势</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            {hours === 24 ? "最近 24 小时" : hours === 168 ? "最近 7 天" : "最近 30 天"} · {hours === 24 ? "按小时" : hours === 168 ? "按 3 小时" : "按天"}粒度 · 按模型分线
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {/* 输入/输出多选切换 */}
+          <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+            <button
+              onClick={onToggleInput}
+              className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                showInput ? "bg-white text-slate-900 shadow-sm" : "text-slate-400 hover:text-slate-600"
+              }`}
+            >
+              输入 Token
+            </button>
+            <button
+              onClick={onToggleOutput}
+              className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                showOutput ? "bg-white text-slate-900 shadow-sm" : "text-slate-400 hover:text-slate-600"
+              }`}
+            >
+              输出 Token
+            </button>
+          </div>
+          {/* 日/周/月切换 */}
+          <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+            {([
+              { v: 24, label: "日" },
+              { v: 168, label: "周" },
+              { v: 720, label: "月" },
+            ] as const).map(opt => (
+              <button
+                key={opt.v}
+                onClick={() => onHoursChange(opt.v)}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                  hours === opt.v ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* 图例 */}
+      {modelList.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          {modelList.map((m, i) => (
+            <div key={m} className="flex items-center gap-1.5">
+              <span
+                className="h-0.5 w-4 rounded-full"
+                style={{ backgroundColor: TREND_LINE_COLORS[i % TREND_LINE_COLORS.length].stroke }}
+              />
+              <span className="text-xs text-slate-600">{m}</span>
+            </div>
+          ))}
+          {showInput && showOutput && (
+            <div className="ml-2 flex items-center gap-3 text-[10px] text-slate-400">
+              <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" />实线=输入</span>
+              <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" style={{ borderTop: "2px dashed" }} />虚线=输出</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 图表 */}
+      <div
+        ref={containerRef}
+        className="relative mt-4"
+        style={{ minHeight: chartH + padding.top + padding.bottom }}
+        onMouseMove={e => {
+          if (data.length === 0) return;
+          const rect = containerRef.current!.getBoundingClientRect();
+          const mx = e.clientX - rect.left;
+          const my = e.clientY - rect.top;
+          // 只在图表区域内触发
+          if (mx < padding.left || mx > containerW - padding.right) {
+            setHoverBar(null);
+            return;
+          }
+          const hi = Math.max(0, Math.min(Math.round((mx - padding.left) / stepX), hoursList.length - 1));
+          const hour = hoursList[hi];
+          const hd = seriesByModel
+            .filter(s => {
+              const p = s.points[hi];
+              return p && (p.input > 0 || p.output > 0);
+            })
+            .map(s => ({ model: s.model, input: s.points[hi].input, output: s.points[hi].output }));
+          setHoverBar({ x: mx, y: my, hour, data: hd });
+        }}
+        onMouseLeave={() => setHoverBar(null)}
+      >
+        {data.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-400">
+            暂无趋势数据
+          </div>
+        ) : (
+          <svg
+            width={containerW}
+            height={chartH + padding.top + padding.bottom}
+            className="overflow-visible"
+          >
+            <defs>
+              {/* 每个模型的渐变定义 */}
+              {lineData.map((ld, i) => (
+                <linearGradient
+                  key={i}
+                  id={`trend-grad-${i}`}
+                  x1="0" y1="0" x2="0" y2="1"
+                >
+                  <stop offset="0%" stopColor={TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length].stroke} stopOpacity={0.18} />
+                  <stop offset="100%" stopColor={TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length].stroke} stopOpacity={0} />
+                </linearGradient>
+              ))}
+            </defs>
+
+            {/* Y 轴网格线 + 标签 */}
+            {yTickValues.map((v, i) => {
+              const y = padding.top + chartH - (v / maxValue) * chartH;
+              return (
+                <g key={i}>
+                  <line
+                    x1={padding.left}
+                    y1={y}
+                    x2={containerW - padding.right}
+                    y2={y}
+                    stroke="#f1f5f9"
+                    strokeWidth={1}
+                  />
+                  <text
+                    x={padding.left - 10}
+                    y={y + 4}
+                    textAnchor="end"
+                    className="fill-slate-400 text-[10px] tabular-nums"
+                  >
+                    {formatTick(v)}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* 渐变填充区域 */}
+            {lineData.map((ld, i) => (
+              <path
+                key={`area-${i}`}
+                d={ld.areaPath}
+                fill={`url(#trend-grad-${i})`}
+              />
+            ))}
+
+            {/* 折线 */}
+            {lineData.map((ld, i) => {
+              const color = TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length];
+              return (
+                <path
+                  key={`line-${i}`}
+                  d={ld.path}
+                  fill="none"
+                  stroke={color.stroke}
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeDasharray={ld.type === "output" ? "6 3" : undefined}
+                />
+              );
+            })}
+
+            {/* Hover 十字线 + 数据点高亮 */}
+            {hoverBar && clampedHoverIndex >= 0 && clampedHoverIndex < hoursList.length && (
+              <g>
+                {/* 垂直虚线 */}
+                <line
+                  x1={padding.left + clampedHoverIndex * stepX}
+                  y1={padding.top}
+                  x2={padding.left + clampedHoverIndex * stepX}
+                  y2={padding.top + chartH}
+                  stroke="#cbd5e1"
+                  strokeWidth={1}
+                  strokeDasharray="4 4"
+                />
+                {/* 每条线上的圆点高亮 */}
+                {lineData.map((ld, i) => {
+                  const pt = ld.pts[clampedHoverIndex];
+                  if (!pt || pt.val === 0) return null;
+                  const color = TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length];
+                  return (
+                    <g key={`hover-dot-${i}`}>
+                      <circle
+                        cx={pt.x}
+                        cy={pt.y}
+                        r={5}
+                        fill="white"
+                        stroke={color.stroke}
+                        strokeWidth={2.5}
+                      />
+                      <circle
+                        cx={pt.x}
+                        cy={pt.y}
+                        r={2}
+                        fill={color.stroke}
+                      />
+                    </g>
+                  );
+                })}
+              </g>
+            )}
+
+            {/* X 轴标签 */}
+            {hoursList.map((h, i) =>
+              i % labelInterval === 0 ? (
+                <text
+                  key={h}
+                  x={padding.left + i * stepX}
+                  y={padding.top + chartH + 20}
+                  textAnchor="middle"
+                  className="fill-slate-400 text-[10px] tabular-nums"
+                >
+                  {formatHourShort(h)}
+                </text>
+              ) : null
+            )}
+
+            {/* X 轴基线 */}
+            <line
+              x1={padding.left}
+              y1={padding.top + chartH}
+              x2={containerW - padding.right}
+              y2={padding.top + chartH}
+              stroke="#e2e8f0"
+              strokeWidth={1}
+            />
+          </svg>
+        )}
+
+        {/* Hover Tooltip */}
+        {hoverBar && (
+          <div
+            className="pointer-events-none absolute z-10 min-w-[180px] max-w-xs rounded-xl border border-slate-200 bg-white/95 p-3 shadow-xl backdrop-blur-sm"
+            style={{
+              left: Math.min(
+                hoverBar.x + 16,
+                containerW - 220,
+              ),
+              top: Math.max(hoverBar.y - 90, 8),
+            }}
+          >
+            <div className="text-xs font-semibold text-slate-900">
+              {formatHourLabel(hoverBar.hour)}
+            </div>
+            <div className="mt-1.5 space-y-1">
+              {hoverBar.data.length === 0 ? (
+                <div className="text-xs text-slate-400">无数据</div>
+              ) : (
+                <>
+                  {/* 表头 */}
+                  <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                    <span className="h-2 w-2" />
+                    <span className="flex-1">模型</span>
+                    {showInput && <span className="w-16 text-right">输入</span>}
+                    {showOutput && <span className="w-16 text-right">输出</span>}
+                  </div>
+                  {hoverBar.data.map((d) => {
+                    const colorIdx = modelList.indexOf(d.model);
+                    const color = TREND_LINE_COLORS[colorIdx % TREND_LINE_COLORS.length];
+                    return (
+                      <div key={d.model} className="flex items-center gap-2 text-xs">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: color.stroke }}
+                        />
+                        <span className="flex-1 text-slate-600">{d.model}</span>
+                        {showInput && <span className="w-16 text-right font-medium tabular-nums text-slate-900">{formatNumber(d.input)}</span>}
+                        {showOutput && <span className="w-16 text-right font-medium tabular-nums text-slate-900">{formatNumber(d.output)}</span>}
+                      </div>
+                    );
+                  })}
+                  <div className="mt-1.5 border-t border-slate-100 pt-1.5 flex justify-between text-xs">
+                    <span className="text-slate-400">合计</span>
+                    <span className="flex gap-3">
+                      {showInput && <span className="w-16 text-right font-semibold tabular-nums text-slate-900">{formatNumber(hoverBar.data.reduce((a, d) => a + d.input, 0))}</span>}
+                      {showOutput && <span className="w-16 text-right font-semibold tabular-nums text-slate-900">{formatNumber(hoverBar.data.reduce((a, d) => a + d.output, 0))}</span>}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }

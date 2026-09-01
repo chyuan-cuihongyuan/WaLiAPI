@@ -367,6 +367,25 @@ export interface DashboardStats {
   total_wiki_pages: number;
 }
 
+export interface ModelStats {
+  model: string;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  success_rate: number;
+  avg_latency_ms: number;
+}
+
+export interface TokenTrendPoint {
+  hour: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  request_count: number;
+}
+
 // Settings types
 export interface Settings {
   server_port: number;

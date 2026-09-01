@@ -227,6 +227,7 @@ fn responses_to_openai_tolerates_codex_controls_and_maps_reasoning_effort() {
         "store": true,
         "include": ["reasoning.encrypted_content"],
         "prompt_cache_key": "key",
+        "prompt_cache_options": {"prompt_cache_key": "key"},
         "client_metadata": {"turn": "1"},
         "reasoning": {"effort": "high"}
     });
@@ -237,6 +238,7 @@ fn responses_to_openai_tolerates_codex_controls_and_maps_reasoning_effort() {
         "store",
         "include",
         "prompt_cache_key",
+        "prompt_cache_options",
         "client_metadata",
     ] {
         assert!(

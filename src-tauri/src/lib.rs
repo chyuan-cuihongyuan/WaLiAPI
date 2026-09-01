@@ -282,6 +282,8 @@ pub fn run() {
             commands::log::delete_all_logs,
             commands::log::get_log_stats,
             commands::stats::get_dashboard_stats,
+            commands::stats::get_model_stats,
+            commands::stats::get_token_trend,
             commands::settings::get_settings,
             commands::settings::get_feature_flags,
             commands::settings::save_settings,

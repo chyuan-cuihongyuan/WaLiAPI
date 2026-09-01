@@ -57,6 +57,7 @@ pub fn encode_responses_to_messages(
         "store",
         "include",
         "prompt_cache_key",
+        "prompt_cache_options",
         "client_metadata",
     ];
     if let Some(object) = body.as_object() {

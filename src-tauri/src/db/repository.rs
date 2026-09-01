@@ -1539,4 +1539,45 @@ impl Repository {
         .fetch_all(&self.pool)
         .await
     }
+
+    /// 按模型分组统计：请求次数、Token 消耗、成功率、平均延迟
+    pub async fn get_model_stats(&self) -> Result<Vec<ModelStats>, sqlx::Error> {
+        let sql = r#"
+            SELECT
+                model,
+                COUNT(*) as request_count,
+                COALESCE(SUM(prompt_tokens), 0) as input_tokens,
+                COALESCE(SUM(completion_tokens), 0) as output_tokens,
+                COALESCE(SUM(total_tokens), 0) as total_tokens,
+                ROUND(CAST(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1.0 ELSE 0.0 END) AS REAL) / COUNT(*), 4) as success_rate,
+                COALESCE(AVG(duration_ms), 0) as avg_latency_ms
+            FROM request_logs
+            GROUP BY model
+            ORDER BY total_tokens DESC
+        "#;
+        sqlx::query_as::<_, ModelStats>(sql).fetch_all(&self.pool).await
+    }
+
+    /// 按小时粒度统计各模型 Token 趋势
+    pub async fn get_token_trend(&self, hours: i64) -> Result<Vec<TokenTrendPoint>, sqlx::Error> {
+        let since = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(hours))
+            .unwrap()
+            .format("%Y-%m-%dT%H:00:00.000Z")
+            .to_string();
+        let sql = r#"
+            SELECT
+                strftime('%Y-%m-%dT%H:00:00.000Z', created_at) as hour,
+                model,
+                COALESCE(SUM(prompt_tokens), 0) as input_tokens,
+                COALESCE(SUM(completion_tokens), 0) as output_tokens,
+                COALESCE(SUM(total_tokens), 0) as total_tokens,
+                COUNT(*) as request_count
+            FROM request_logs
+            WHERE created_at >= ?
+            GROUP BY hour, model
+            ORDER BY hour ASC
+        "#;
+        sqlx::query_as::<_, TokenTrendPoint>(sql).bind(&since).fetch_all(&self.pool).await
+    }
 }

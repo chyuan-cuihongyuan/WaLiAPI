@@ -5,6 +5,8 @@ import type {
   ApiKey, CreateApiKeyInput, ApiKeyStats,
   RequestLog, LogStats, SecurityFinding,
   DashboardStats,
+  ModelStats,
+  TokenTrendPoint,
   Settings,
   ServerStatus,
   BuiltinRule, CustomRule, CreateCustomRuleInput, UpdateBuiltinRuleInput,
@@ -140,6 +142,8 @@ export const authApi = {
 // Stats commands
 export const statsApi = {
   getDashboard: () => invoke<DashboardStats>("get_dashboard_stats"),
+  getModelStats: () => invoke<ModelStats[]>("get_model_stats"),
+  getTokenTrend: (hours?: number) => invoke<TokenTrendPoint[]>("get_token_trend", { hours: hours ?? 24 }),
 };
 
 // Settings commands

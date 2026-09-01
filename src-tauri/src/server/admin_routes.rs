@@ -534,6 +534,8 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
 
         // ── 仪表盘 / 设置 / 服务状态 ──
         "get_dashboard_stats" => to_json(commands::stats::get_dashboard_stats(state).await),
+        "get_model_stats" => to_json(commands::stats::get_model_stats(state).await),
+        "get_token_trend" => to_json(commands::stats::get_token_trend(arg(&args, "hours")?, state).await),
         "get_settings" => to_json(commands::settings::get_settings(state).await),
         "save_settings" => {
             to_json(commands::settings::save_settings(arg(&args, "settings")?, state).await)
