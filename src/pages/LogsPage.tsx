@@ -6,7 +6,7 @@ import { writeClipboard } from "../lib/runtime";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
   Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, ArrowDownLeft, ArrowUpRight, Shield, Timer, Coins,
-  Search, X, Calendar, Key, Server, Box, ShieldAlert,
+  Search, X, Calendar, Key, Server, Box, ShieldAlert, Brain,
 } from "lucide-react";
 
 const PAGE_SIZE = 20;
@@ -746,7 +746,7 @@ function LogDetail({ log }: { log: RequestLog }) {
   return (
     <div className="space-y-4">
       {/* ── Gateway Metadata Cards ── */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-7">
         {/* Token detail */}
         <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><Coins size={13} /> Token 消耗</div>
@@ -792,39 +792,29 @@ function LogDetail({ log }: { log: RequestLog }) {
           </div>
         </div>
 
-        {/* Route / Reasoning — unified card, same width as other dashboard cards */}
+        {/* Upstream route — simple card */}
         <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-xs text-slate-500"><Shield size={13} /> 请求路由</div>
+          <div className="flex items-center justify-between gap-1">
+            <div className="flex items-center gap-1.5 text-xs text-slate-500"><Shield size={13} /> 上游路由</div>
             <UpstreamTypeBadge upstreamType={log.upstream_type} />
           </div>
-          <div className="mt-2 flex-1 divide-y divide-slate-100">
-            <div className="flex items-center justify-between gap-2 py-1.5">
-              <span className="shrink-0 text-[11px] text-slate-400">端点</span>
-              <span className="truncate text-right text-[13px] font-semibold font-mono text-slate-900" title={log.downstream_endpoint || "-"}>
-                {log.downstream_endpoint || "-"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 py-1.5">
-              <span className="shrink-0 text-[11px] text-slate-400">推理协议</span>
-              <span className="truncate text-right text-[13px] font-semibold text-slate-900" title={log.upstream_protocol || log.downstream_protocol || "-"}>
-                {log.upstream_protocol || log.downstream_protocol || "-"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 py-1.5">
-              <span className="shrink-0 text-[11px] text-slate-400">推理档位</span>
-              <span className="truncate text-right text-[13px] font-semibold text-slate-900" title={log.reasoning_effort || "-"}>
-                {log.reasoning_effort || "-"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 py-1.5">
-              <span className="shrink-0 text-[11px] text-slate-400">路由</span>
-              <span className="truncate text-right text-[13px] font-semibold text-slate-900" title={log.channel_name || "-"}>
-                {log.channel_name || "-"}
-              </span>
-            </div>
+          <div className="mt-1.5 truncate text-sm font-semibold text-slate-900" title={log.channel_name || "-"}>
+            {log.channel_name || "-"}
           </div>
-          <div className="mt-1 text-[11px] text-slate-400">{log.is_retry ? "重试转发" : "首选渠道"}</div>
+          <div className="mt-0.5 text-[11px] text-slate-400">
+            {log.is_retry ? "⚠ 重试转发" : "✓ 首选渠道"}
+          </div>
+        </div>
+
+        {/* Reasoning effort — simple card */}
+        <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
+          <div className="flex items-center gap-1.5 text-xs text-slate-500"><Brain size={13} /> 推理档位</div>
+          <div className="mt-1.5 truncate text-sm font-semibold text-slate-900" title={log.reasoning_effort || "-"}>
+            {log.reasoning_effort || "-"}
+          </div>
+          <div className="mt-0.5 truncate text-[11px] text-slate-400" title={`协议: ${log.upstream_protocol || log.downstream_protocol || "-"}`}>
+            {log.upstream_protocol || log.downstream_protocol || "-"}
+          </div>
         </div>
         {/* Model mapping */}
         <div className="rounded-xl border border-slate-200 bg-white p-3 min-h-[120px] flex flex-col">
@@ -839,12 +829,22 @@ function LogDetail({ log }: { log: RequestLog }) {
       </div>
 
       {/* ── Trace ID ── */}
-      {log.trace_id && (
-        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
-          <Search size={14} className="text-slate-400" />
-          <span className="text-xs text-slate-500">Trace ID:</span>
-          <span className="text-xs font-mono text-slate-700 break-all">{log.trace_id}</span>
-        </div>
+      {(log.trace_id || log.downstream_endpoint) && (
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-slate-200 bg-white p-3">
+        {log.trace_id && (
+          <>
+            <Search size={14} className="text-slate-400" />
+            <span className="text-xs text-slate-500">Trace ID:</span>
+            <span className="text-xs font-mono text-slate-700 break-all">{log.trace_id}</span>
+          </>
+        )}
+        {log.downstream_endpoint && (
+          <>
+            <span className="text-xs text-slate-500">端点:</span>
+            <span className="text-xs font-mono text-slate-700 break-all">{log.downstream_endpoint}</span>
+          </>
+        )}
+      </div>
       )}
 
       {/* ── Security Summary ── */}
