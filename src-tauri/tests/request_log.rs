@@ -55,6 +55,7 @@ fn full_log(channel_id: Option<&str>, channel_name: Option<&str>) -> models::Req
         cache_read_tokens: Some(6),
         cache_creation_tokens: Some(2),
         duration_ms: 120,
+        ttft_ms: Some(80),
         error_message: None,
         is_stream: 1,
         is_retry: 0,
@@ -383,4 +384,46 @@ async fn request_log_create_log_persists_cache_tokens_and_log_dto_maps_them() {
     let dto: waliapi_lib::commands::log::LogDto = stored.into();
     assert_eq!(dto.cache_read_tokens, Some(6));
     assert_eq!(dto.cache_creation_tokens, Some(2));
+}
+
+// --- issue #51 TTFT (migration 027) ---
+
+#[tokio::test]
+async fn request_log_migration_027_adds_nullable_ttft_column() {
+    let pool = fresh_db().await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('request_logs') WHERE name = 'ttft_ms'",
+    )
+    .bind("ttft_ms")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "column ttft_ms must exist from migration 027");
+    // 非流式/旧行为 NULL。
+    let repo = Repository::new(pool);
+    let non_stream = models::RequestLog {
+        id: waliapi_lib::utils::id::new_id(),
+        api_key_name: Some("non-stream".into()),
+        is_stream: 0,
+        ..Default::default()
+    };
+    repo.create_log(&non_stream).await.expect("insert");
+    let stored = repo.get_log(&non_stream.id).await.expect("read");
+    assert_eq!(stored.ttft_ms, None);
+}
+
+#[tokio::test]
+async fn request_log_create_log_persists_ttft_and_log_dto_maps_it() {
+    let pool = fresh_db().await;
+    let repo = Repository::new(pool);
+    let log = full_log(Some("ch-1"), Some("stream-channel"));
+    repo.create_log(&log).await.expect("create_log");
+
+    let stored = repo.get_log(&log.id).await.expect("get_log");
+    assert_eq!(stored.ttft_ms, Some(80));
+    // TTFT 不超过总时长（口径自洽性）。
+    assert!(stored.ttft_ms.unwrap() <= stored.duration_ms);
+
+    let dto: waliapi_lib::commands::log::LogDto = stored.into();
+    assert_eq!(dto.ttft_ms, Some(80));
 }

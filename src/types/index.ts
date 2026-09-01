@@ -169,6 +169,8 @@ export interface RequestLog {
   /** 缓存写入的输入 token（Anthropic cache_creation 等；null = 未上报）。 */
   cache_creation_tokens: number | null;
   duration_ms: number;
+  /** 首字延迟（null = 非流式请求或未到达首帧）。 */
+  ttft_ms: number | null;
   error_message: string | null;
   is_stream: boolean;
   is_retry: boolean;

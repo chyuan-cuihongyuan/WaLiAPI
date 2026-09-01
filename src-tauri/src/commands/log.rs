@@ -21,6 +21,8 @@ pub struct LogDto {
     /// 缓存写入（Anthropic cache_creation 等；NULL = 未上报）。
     pub cache_creation_tokens: Option<i64>,
     pub duration_ms: i64,
+    /// 首字延迟（NULL = 非流式或未到达首帧，issue #51）。
+    pub ttft_ms: Option<i64>,
     pub error_message: Option<String>,
     pub is_stream: bool,
     pub is_retry: bool,
@@ -66,6 +68,7 @@ impl From<RequestLog> for LogDto {
             cache_read_tokens: l.cache_read_tokens,
             cache_creation_tokens: l.cache_creation_tokens,
             duration_ms: l.duration_ms,
+            ttft_ms: l.ttft_ms,
             error_message: l.error_message,
             is_stream: l.is_stream == 1,
             is_retry: l.is_retry == 1,

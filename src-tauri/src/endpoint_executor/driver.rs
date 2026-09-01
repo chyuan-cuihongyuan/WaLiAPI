@@ -456,6 +456,8 @@ async fn write_non_stream_log(
         cache_read_tokens,
         cache_creation_tokens,
         duration_ms: duration_ms as i64,
+        // 非流式请求无首字延迟（issue #51：NULL = 不适用）。
+        ttft_ms: None,
         error_message: last_failure.map(|f| f.message.clone()),
         is_stream: 0,
         is_retry: i64::from(is_retry),
@@ -572,6 +574,8 @@ async fn write_stream_precommit_failure_log_with_meta(
         cache_read_tokens: None,
         cache_creation_tokens: None,
         duration_ms: 0,
+        // 预提交失败：未到达首帧，无 TTFT。
+        ttft_ms: None,
         error_message: Some(message.to_string()),
         is_stream: i64::from(is_stream),
         is_retry: 0,
@@ -669,6 +673,9 @@ pub(crate) async fn route_stream_plan_with_auth_service(
     trace_id: Option<String>,
     auth_service: Arc<crate::auth_provider::service::AuthService>,
 ) -> Response {
+    // TTFT 口径（issue #51）：从网关收到下游请求起算（含渠道轮询与首帧
+    // 缓冲验证）；流式日志 duration_ms 的总时长也以此为起点。
+    let request_started = Instant::now();
     let lookup = candidate_lookup(&plan);
     let endpoint = plan.endpoint;
     let mut flow = AttemptFlow::new(plan);
@@ -846,6 +853,9 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                         if supervisor.on_first_frame_validated().is_err() {
                             unreachable!()
                         }
+                        // TTFT：上游首个有效帧已通过缓冲验证（issue #51）。
+                        // 多渠道轮询时此值含失败轮询时间（用户感知口径）。
+                        let ttft_ms = request_started.elapsed().as_millis() as i64;
                         let Some(codec) = attempt.prepared_codec.as_ref() else {
                             let failure = AttemptFailure {
                                 failure_class: FailureClass::CallerTerminal,
@@ -976,6 +986,8 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                             upstream_protocol,
                             upstream_endpoint,
                             upstream_type,
+                            request_started,
+                            ttft_ms,
                         );
                         let mut builder = Response::builder()
                             .status(StatusCode::OK)
@@ -1077,6 +1089,9 @@ struct StreamLogFinalizer {
     upstream_endpoint: String,
     upstream_type: String,
     started: Instant,
+    /// 首字延迟（issue #51）：收到下游请求 → 上游首个有效 SSE 帧；
+    /// `None` = 未到达首帧（499 断连兜底）。
+    ttft_ms: Option<i64>,
     completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1119,6 +1134,7 @@ impl StreamLogFinalizer {
             cache_read_tokens: usage_cache_read,
             cache_creation_tokens: usage_cache_creation,
             duration_ms,
+            ttft_ms: self.ttft_ms,
             error_message: error_message.map(|s| s.to_string()),
             is_stream: 1,
             is_retry: i64::from(self.is_retry),
@@ -1232,6 +1248,9 @@ fn stream_response_body(
     upstream_protocol: String,
     upstream_endpoint: String,
     upstream_type: String,
+    // --- TTFT (issue #51)：请求起点与首帧延迟 ---
+    started: Instant,
+    ttft_ms: i64,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
     let mode_for_error = mode.clone();
     let finalizer = StreamLogFinalizer {
@@ -1253,7 +1272,8 @@ fn stream_response_body(
         upstream_protocol,
         upstream_endpoint,
         upstream_type,
-        started: Instant::now(),
+        started,
+        ttft_ms: Some(ttft_ms),
         completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let completed = finalizer.completed.clone();
@@ -1813,6 +1833,8 @@ mod tests {
             "anthropic".to_string(),
             "messages".to_string(),
             "channel".to_string(),
+            std::time::Instant::now(),
+            0,
         );
 
         let mut bytes = Vec::new();

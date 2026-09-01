@@ -362,6 +362,9 @@ pub struct RequestLog {
     /// 缓存写入的输入 token（Anthropic cache_creation 等；NULL = 未上报）。
     pub cache_creation_tokens: Option<i64>,
     pub duration_ms: i64,
+    /// 首字延迟：收到下游请求 → 上游首个有效 SSE 帧（migration 027；
+    /// NULL = 非流式请求或未到达首帧）。
+    pub ttft_ms: Option<i64>,
     pub error_message: Option<String>,
     pub is_stream: i64,
     pub is_retry: i64,
@@ -411,6 +414,7 @@ impl Default for RequestLog {
             cache_read_tokens: None,
             cache_creation_tokens: None,
             duration_ms: 0,
+            ttft_ms: None,
             error_message: None,
             is_stream: 0,
             is_retry: 0,

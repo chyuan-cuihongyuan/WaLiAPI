@@ -750,7 +750,7 @@ function LogDetail({ log }: { log: RequestLog }) {
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><Timer size={13} /> 响应耗时</div>
           <div className="mt-1.5 text-sm font-semibold text-slate-900">{formatDuration(log.duration_ms)}</div>
           <div className="mt-0.5 text-[11px] text-slate-400">
-            {log.is_stream ? "流式传输" : "非流式"}
+            {log.ttft_ms != null ? `首字 ${formatDuration(log.ttft_ms)} · ` : ""}{log.is_stream ? "流式传输" : "非流式"}
           </div>
         </div>
 

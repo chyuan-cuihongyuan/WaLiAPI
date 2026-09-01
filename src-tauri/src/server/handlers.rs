@@ -761,6 +761,8 @@ async fn handle_stream(
     security_result: security::SecurityScanResult,
     trace_id: Option<String>,
 ) -> Response {
+    // TTFT 口径（issue #51）：从网关收到下游请求起算（含鉴权/渠道轮询）。
+    let request_started = std::time::Instant::now();
     let model = json
         .get("model")
         .and_then(|m| m.as_str())
@@ -921,6 +923,8 @@ async fn handle_stream(
                     let mut usage_total: i64 = 0;
                     let mut usage_cache_read: Option<i64> = None;
                     let mut usage_cache_creation: Option<i64> = None;
+                    // TTFT：上游首个字节到达时刻（issue #51）。
+                    let mut ttft_ms: Option<i64> = None;
                     let mut had_error = false;
                     let mut accumulated_content = String::new();
                     let mut accumulated_reasoning = String::new();
@@ -938,6 +942,10 @@ async fn handle_stream(
                     while let Some(chunk_result) = upstream_stream.next().await {
                         match chunk_result {
                             Ok(bytes) => {
+                                // TTFT：首个上游字节到达（issue #51）。
+                                if ttft_ms.is_none() {
+                                    ttft_ms = Some(request_started.elapsed().as_millis() as i64);
+                                }
                                 // Normalize the chunk through the bridge, then
                                 // accumulate usage/content and relay the records.
                                 //
@@ -1088,6 +1096,7 @@ async fn handle_stream(
                         total_tokens: usage_total,
                         cache_read_tokens: usage_cache_read,
                         cache_creation_tokens: usage_cache_creation,
+                        ttft_ms,
                         duration_ms: start.elapsed().as_millis() as i64,
                         error_message: if had_error { Some("Stream interrupted".to_string()) } else { None },
                         is_stream: 1,
@@ -1378,6 +1387,9 @@ struct StreamLogContext {
     request: serde_json::Value,
     security: security::SecurityScanResult,
     is_stream: bool,
+    /// issue #51：请求起点（duration 修复）与首字延迟（首字节到达时写入）。
+    started: std::time::Instant,
+    ttft_ms: std::sync::Arc<std::sync::Mutex<Option<i64>>>,
 }
 
 const MAX_NATIVE_SSE_RECORD_BYTES: usize = 64 * 1024;
@@ -1540,6 +1552,13 @@ fn native_response(response: reqwest::Response, accounting: Option<StreamLogCont
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
+                    // TTFT：首个上游字节到达（issue #51）。
+                    if let Some(context) = accounting.as_ref() {
+                        let mut ttft = context.ttft_ms.lock().unwrap();
+                        if ttft.is_none() {
+                            *ttft = Some(context.started.elapsed().as_millis() as i64);
+                        }
+                    }
                     if is_sse {
                         usage_parser.feed(&bytes);
                     } else if non_sse_observed.len().saturating_add(bytes.len()) <= MAX_NATIVE_SSE_RECORD_BYTES {
@@ -1554,7 +1573,10 @@ fn native_response(response: reqwest::Response, accounting: Option<StreamLogCont
             if completed {
                 let usage = if is_sse { usage_parser.finish() } else { native_usage(&non_sse_observed, false) };
                 if let Some(usage) = usage {
-                    record_anthropic_success(context.repo, &context.key, &context.channel, &context.model, context.upstream_model.clone(), &context.request, &context.security, context.is_stream, Some(usage)).await;
+                    // duration 修复（issue #51）：原生路径此前恒为 0。
+                    let duration_ms = context.started.elapsed().as_millis() as i64;
+                    let ttft_ms = *context.ttft_ms.lock().unwrap();
+                    record_anthropic_success(context.repo, &context.key, &context.channel, &context.model, context.upstream_model.clone(), &context.request, &context.security, context.is_stream, Some(usage), Some((duration_ms, ttft_ms))).await;
                 }
             }
         }
@@ -1659,6 +1681,9 @@ async fn record_anthropic_outcome(
     status_code: i64,
     error_message: Option<String>,
     usage: Option<UsageParts>,
+    // (duration_ms, ttft_ms)：None = 调用点无可用的计时上下文（issue #51
+    // 修复原生路径 duration 恒 0；ttft 仅流式首帧后可得）。
+    timing: Option<(i64, Option<i64>)>,
 ) {
     let UsageParts {
         input: mut prompt_tokens,
@@ -1703,7 +1728,9 @@ async fn record_anthropic_outcome(
         total_tokens,
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_creation,
-        duration_ms: 0,
+        // issue #51 修复：原生 Messages 路径 duration 此前恒为 0。
+        duration_ms: timing.map(|t| t.0).unwrap_or(0),
+        ttft_ms: timing.and_then(|t| t.1),
         error_message,
         is_stream: i64::from(is_stream),
         is_retry: 0,
@@ -1756,6 +1783,7 @@ async fn record_anthropic_success(
     security_result: &security::SecurityScanResult,
     is_stream: bool,
     usage: Option<UsageParts>,
+    timing: Option<(i64, Option<i64>)>,
 ) {
     record_anthropic_outcome(
         repo,
@@ -1769,6 +1797,7 @@ async fn record_anthropic_success(
         200,
         None,
         usage,
+        timing,
     )
     .await;
 }
@@ -1784,6 +1813,9 @@ pub async fn handle_messages(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    // TTFT / duration 口径（issue #51）：原生 Anthropic 路径此前 duration_ms
+    // 恒为 0，现从网关收到下游请求起算。
+    let request_started = std::time::Instant::now();
     let json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => {
@@ -1878,6 +1910,7 @@ pub async fn handle_messages(
             451,
             security_result.blocked_reason.clone(),
             None,
+            None,
         )
         .await;
         return anthropic_error(
@@ -1964,6 +1997,8 @@ pub async fn handle_messages(
                             request: sanitized_log_json.clone(),
                             security: security_result.clone(),
                             is_stream: stream,
+                            started: request_started,
+                            ttft_ms: std::sync::Arc::new(std::sync::Mutex::new(None)),
                         }),
                     )
                 }
@@ -1987,6 +2022,7 @@ pub async fn handle_messages(
                                 stream,
                                 status.as_u16() as i64,
                                 Some(format!("Native upstream returned HTTP {status}")),
+                                None,
                                 None,
                             )
                             .await;
@@ -2017,6 +2053,7 @@ pub async fn handle_messages(
                         stream,
                         502,
                         Some(last_error.clone()),
+                        None,
                         None,
                     )
                     .await;
@@ -2053,6 +2090,8 @@ pub async fn handle_messages(
                         request: sanitized_log_json.clone(),
                         security: security_result.clone(),
                         is_stream: true,
+                        started: request_started,
+                        ttft_ms: std::sync::Arc::new(std::sync::Mutex::new(None)),
                     },
                 )
             }
@@ -2095,6 +2134,8 @@ pub async fn handle_messages(
                             &security_result,
                             false,
                             usage,
+                            // 非流式：无 TTFT，但 duration 从请求起算（issue #51）。
+                            Some((request_started.elapsed().as_millis() as i64, None)),
                         )
                         .await;
                         (StatusCode::OK, Json(value)).into_response()
@@ -2114,6 +2155,7 @@ pub async fn handle_messages(
                             false,
                             502,
                             Some(message),
+                            None,
                             None,
                         )
                         .await;
@@ -2150,6 +2192,7 @@ pub async fn handle_messages(
                             status.as_u16() as i64,
                             Some(last_error.clone()),
                             None,
+                            None,
                         )
                         .await;
                         // openai_error_response already maps an upstream
@@ -2171,6 +2214,7 @@ pub async fn handle_messages(
                     stream,
                     502,
                     Some(last_error.clone()),
+                    None,
                     None,
                 )
                 .await;
@@ -2196,6 +2240,7 @@ pub async fn handle_messages(
             400,
             Some(last_error.clone()),
             None,
+            None,
         )
         .await;
         return anthropic_error(StatusCode::BAD_REQUEST, "invalid_request_error", last_error);
@@ -2211,6 +2256,7 @@ pub async fn handle_messages(
         stream,
         502,
         Some(last_error.clone()),
+        None,
         None,
     )
     .await;
@@ -2235,19 +2281,28 @@ fn openai_sse_response(
         let mut failed = false;
         while let Some(chunk) = upstream.next().await {
             match chunk {
-                Ok(bytes) => match state.feed(&bytes, &model, &message_id) {
-                    Ok(events) => for event in events { yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes())); },
-                    Err(message) => {
-                        failed = true;
-                        record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None).await;
-                        yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":{}}}}}\n\n", serde_json::to_string(&message).unwrap()).into_bytes()));
-                        break;
+                Ok(bytes) => {
+                    // TTFT：首个上游字节到达（issue #51）。
+                    {
+                        let mut ttft = accounting.ttft_ms.lock().unwrap();
+                        if ttft.is_none() {
+                            *ttft = Some(accounting.started.elapsed().as_millis() as i64);
+                        }
+                    }
+                    match state.feed(&bytes, &model, &message_id) {
+                        Ok(events) => for event in events { yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes())); },
+                        Err(message) => {
+                            failed = true;
+                            record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None, None).await;
+                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":{}}}}}\n\n", serde_json::to_string(&message).unwrap()).into_bytes()));
+                            break;
+                        }
                     }
                 },
                 Err(error) => {
                     failed = true;
                     let message = format!("OpenAI stream interrupted: {error}");
-                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(message.clone()), None).await;
+                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(message.clone()), None, None).await;
                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":{}}}}}\n\n", serde_json::to_string(&message).unwrap()).into_bytes()));
                     break;
                 }
@@ -2259,10 +2314,12 @@ fn openai_sse_response(
                     for event in events { yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes())); }
                     let (input, output, cache_read, cache_creation) = state.usage();
                     let usage = UsageParts { input, output, cache_read, cache_creation };
-                    record_anthropic_success(accounting.repo, &accounting.key, &accounting.channel, &accounting.model, None, &accounting.request, &accounting.security, true, Some(usage)).await;
+                    let duration_ms = accounting.started.elapsed().as_millis() as i64;
+                    let ttft_ms = *accounting.ttft_ms.lock().unwrap();
+                    record_anthropic_success(accounting.repo, &accounting.key, &accounting.channel, &accounting.model, None, &accounting.request, &accounting.security, true, Some(usage), Some((duration_ms, ttft_ms))).await;
                 },
                 Err(message) => {
-                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None).await;
+                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None, None).await;
                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":{}}}}}\n\n", serde_json::to_string(&message).unwrap()).into_bytes()))
                 },
             }
@@ -2726,6 +2783,8 @@ async fn handle_responses_stream(
     security_result: security::SecurityScanResult,
     trace_id: Option<String>,
 ) -> Response {
+    // TTFT 口径（issue #51）：从网关收到下游请求起算（含鉴权/渠道轮询）。
+    let request_started = std::time::Instant::now();
     // Security gate already ran on the ORIGINAL Responses JSON at the entry
     // handler; `request_body` is the gate's sanitized log body.
     let forward_json = openai_body.clone();
@@ -2881,6 +2940,8 @@ async fn handle_responses_stream(
                     let mut usage_total: i64 = 0;
                     let mut usage_cache_read: Option<i64> = None;
                     let mut usage_cache_creation: Option<i64> = None;
+                    // TTFT：上游首个字节到达时刻（issue #51）。
+                    let mut ttft_ms: Option<i64> = None;
                     let mut had_error = false;
                     let mut stream_state = crate::protocol::responses::StreamState::default();
                     let mut accumulated_content = String::new();
@@ -2893,6 +2954,10 @@ async fn handle_responses_stream(
                     while let Some(chunk_result) = upstream_stream.next().await {
                         match chunk_result {
                             Ok(bytes) => {
+                                // TTFT：首个上游字节到达（issue #51）。
+                                if ttft_ms.is_none() {
+                                    ttft_ms = Some(request_started.elapsed().as_millis() as i64);
+                                }
                                 // The bridge reassembles fragmented records AND, on
                                 // Anthropic channels, converts Anthropic SSE → OpenAI
                                 // SSE. The downstream pipeline below only ever sees
@@ -3044,6 +3109,7 @@ async fn handle_responses_stream(
                         total_tokens: usage_total,
                         cache_read_tokens: usage_cache_read,
                         cache_creation_tokens: usage_cache_creation,
+                        ttft_ms,
                         duration_ms: start.elapsed().as_millis() as i64,
                         error_message: if had_error { Some("Stream interrupted".to_string()) } else { None },
                         is_stream: 1,
