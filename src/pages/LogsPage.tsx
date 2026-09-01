@@ -418,7 +418,7 @@ export function LogsPage() {
             <>
               {/* Table header + body share the scroll area */}
               <div className="flex-1 overflow-auto">
-                <table className="w-full table-fixed text-sm">
+                <table className="w-full min-w-max table-auto text-sm">
                   <thead className="sticky top-0 z-10 border-b border-border bg-white/90 backdrop-blur text-muted-foreground">
                     <tr>
                       <th className="w-8 px-2 py-3"></th>
@@ -522,13 +522,13 @@ function LogRow({
           <td className="px-2 py-2.5 text-xs font-mono text-slate-500 whitespace-nowrap overflow-hidden truncate max-w-[180px]" title={log.trace_id || undefined}>{log.trace_id || "-"}</td>
         )}
         <td className="px-2 py-2.5 text-xs overflow-hidden truncate">{log.api_key_name || "-"}</td>
-        <td className="px-2 py-2.5 text-xs overflow-hidden">
+        <td className="px-2 py-2.5 text-xs overflow-hidden max-w-[180px]">
           <div className="flex flex-col gap-1 truncate">
-            <span className="truncate">{log.channel_name || "-"}</span>
+            <span className="truncate" title={log.channel_name || undefined}>{log.channel_name || "-"}</span>
             <UpstreamTypeBadge upstreamType={log.upstream_type} />
           </div>
         </td>
-        <td className="px-2 py-2.5 text-[13px] font-mono overflow-hidden truncate">
+        <td className="px-2 py-2.5 text-[13px] font-mono overflow-hidden truncate max-w-[220px]" title={log.model}>
           <div className="flex flex-col gap-0.5">
             <span className="truncate font-medium text-foreground">{log.model}</span>
             {log.upstream_model && log.upstream_model !== log.model && (
