@@ -29,7 +29,7 @@ bash scripts/fetch-pdfium.sh --dev      # 额外复制到 target/debug/pdfium/�
 
 1. 环境变量 `WALIAPI_PDFIUM_PATH`（指向库文件本体或其所在目录）
 2. 可执行文件同目录 `pdfium/` 子目录
-3. macOS `.app` 包的 `Contents/Resources/pdfium/`
+3. macOS `.app` 包的 `Contents/Resources/pdfium/`，以及 glob `resources/pdfium/*` 保留前缀后的 `Contents/Resources/resources/pdfium/`（0.2.5 安装包实测落点）
 4. Linux 安装包的 `<prefix>/lib/<binary>/pdfium/`
 5. 数据目录 `pdfium/` 子目录
 

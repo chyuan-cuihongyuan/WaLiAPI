@@ -140,35 +140,63 @@ fn platform_library_name() -> &'static str {
 /// 1. 环境变量 WALIAPI_PDFIUM_PATH（可指向库文件本体或其所在目录）
 /// 2. 可执行文件同目录 pdfium/ 子目录（Windows/Linux 下 Tauri resources 的落点）
 /// 3. 可执行文件同目录 Resources/pdfium/（tauri dev 物化 bundle.resources 的位置）
-/// 4. macOS .app 包的 Contents/Resources/pdfium/（exe 位于 Contents/MacOS/）
+/// 4. macOS .app：Contents/Resources/pdfium/ 以及 glob 保留前缀后的
+///    Contents/Resources/resources/pdfium/（0.2.5/0.2.6 安装包实测落点）
 /// 5. Linux deb/rpm/AppImage 的 <prefix>/lib/<binary>/pdfium/（tauri-bundler resources 落点）
 /// 6. 数据目录 pdfium/ 子目录（Docker/手动部署）
 fn library_candidates(data_dir: &Path) -> Vec<PathBuf> {
+    let env_path = std::env::var_os("WALIAPI_PDFIUM_PATH").map(PathBuf::from);
+    let exe = std::env::current_exe().ok();
+    library_candidates_from(env_path.as_deref(), exe.as_deref(), data_dir)
+}
+
+fn library_candidates_from(
+    env_path: Option<&Path>,
+    exe: Option<&Path>,
+    data_dir: &Path,
+) -> Vec<PathBuf> {
     let lib_name = platform_library_name();
     let mut candidates = Vec::new();
 
-    if let Ok(custom) = std::env::var("WALIAPI_PDFIUM_PATH") {
-        let custom = PathBuf::from(custom);
+    if let Some(custom) = env_path {
         if custom.is_dir() {
             candidates.push(custom.join(lib_name));
         } else {
-            candidates.push(custom);
+            candidates.push(custom.to_path_buf());
         }
     }
 
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = exe {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("pdfium").join(lib_name));
+            // glob `resources/pdfium/*` 会保留 resources/ 前缀（Windows/Linux 安装包）
+            candidates.push(exe_dir.join("resources").join("pdfium").join(lib_name));
             // tauri dev 会把 bundle.resources 物化到 target/<profile>/Resources/
             candidates.push(exe_dir.join("Resources").join("pdfium").join(lib_name));
-            // macOS bundle：Contents/MacOS/.. → Contents/Resources/pdfium/
+            candidates.push(
+                exe_dir
+                    .join("Resources")
+                    .join("resources")
+                    .join("pdfium")
+                    .join(lib_name),
+            );
             if let Some(contents) = exe_dir.parent() {
                 candidates.push(contents.join("Resources").join("pdfium").join(lib_name));
+                // macOS .app：Contents/MacOS/.. → Contents/Resources/resources/pdfium/
+                candidates.push(
+                    contents
+                        .join("Resources")
+                        .join("resources")
+                        .join("pdfium")
+                        .join(lib_name),
+                );
             }
             // Linux deb/rpm/AppImage：resources 装在 <prefix>/lib/<binary>/（二进制在 <prefix>/bin/）
             if cfg!(target_os = "linux") {
                 if let (Some(prefix), Some(stem)) = (exe_dir.parent(), exe.file_stem()) {
-                    candidates.push(prefix.join("lib").join(stem).join("pdfium").join(lib_name));
+                    let bundled = prefix.join("lib").join(stem);
+                    candidates.push(bundled.join("pdfium").join(lib_name));
+                    candidates.push(bundled.join("resources").join("pdfium").join(lib_name));
                 }
             }
         }
@@ -219,6 +247,48 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|p| p.ends_with(Path::new("pdfium").join(platform_library_name()))));
+    }
+
+    #[test]
+    fn macos_app_bundle_searches_glob_prefixed_and_legacy_paths() {
+        // 与 0.2.5/0.2.6 安装包、OCR_RENDER_FAILED 弹窗中的搜索列表对齐
+        let exe = Path::new("/Applications/WaLiAPI.app/Contents/MacOS/waliapi");
+        let data_dir = Path::new("/Users/nelson/Library/Application Support/waliapi.xiaofuge.cn");
+        let candidates = library_candidates_from(None, Some(exe), data_dir);
+        let lib = platform_library_name();
+        let required = [
+            Path::new("/Applications/WaLiAPI.app/Contents/MacOS/pdfium").join(lib),
+            Path::new("/Applications/WaLiAPI.app/Contents/MacOS/Resources/pdfium").join(lib),
+            Path::new("/Applications/WaLiAPI.app/Contents/Resources/pdfium").join(lib),
+            Path::new("/Applications/WaLiAPI.app/Contents/Resources/resources/pdfium").join(lib),
+            data_dir.join("pdfium").join(lib),
+        ];
+        for path in &required {
+            assert!(
+                candidates.iter().any(|p| p == path),
+                "缺少候选 {path:?}，实际: {candidates:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn installed_app_pdfium_is_first_existing_candidate_when_present() {
+        let exe = Path::new("/Applications/WaLiAPI.app/Contents/MacOS/waliapi");
+        let data_dir = Path::new("/tmp/waliapi_test_data");
+        let candidates = library_candidates_from(None, Some(exe), data_dir);
+        let actual = PathBuf::from("/Applications/WaLiAPI.app/Contents/Resources/resources/pdfium")
+            .join(platform_library_name());
+        if !actual.is_file() {
+            return;
+        }
+        let first_existing = candidates.iter().find(|p| p.is_file());
+        assert_eq!(
+            first_existing,
+            Some(&actual),
+            "安装包内真实 dylib 必须是第一个存在的候选，避免误绑其它文件"
+        );
+        PdfRenderer::bind_first(std::slice::from_ref(&actual))
+            .unwrap_or_else(|e| panic!("安装包内 pdfium 应能加载: {e}"));
     }
 
     #[test]
