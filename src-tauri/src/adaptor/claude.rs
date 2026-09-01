@@ -135,7 +135,7 @@ impl Adaptor for ClaudeAdaptor {
             .await?;
 
         let status = resp.status().as_u16();
-        let claude_json: serde_json::Value = resp.json().await?;;
+        let claude_json: serde_json::Value = resp.json().await?;
 
         // Convert Claude response to OpenAI format
         let openai_response = convert_claude_to_openai(&claude_json, model);

@@ -87,7 +87,7 @@ impl Adaptor for GeminiAdaptor {
             .send()
             .await?;
         let status = resp.status().as_u16();
-        let gemini_json: serde_json::Value = resp.json().await?;;
+        let gemini_json: serde_json::Value = resp.json().await?;
 
         let openai_response = convert_gemini_to_openai(&gemini_json, model);
         let usage = openai_response.get("usage").and_then(|u| {

@@ -89,24 +89,24 @@ pub async fn delete_wiki_project(
 #[tauri::command]
 pub async fn get_wiki_pages(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
 ) -> Result<Vec<WikiPage>, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.list_pages(&projectId).await
+    repo.list_pages(&project_id).await
 }
 
 #[tauri::command]
 pub async fn get_wiki_page(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
     path: String,
 ) -> Result<serde_json::Value, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
 
-    if let Ok(Some(page)) = repo.get_page(&projectId, &path).await {
-        if let Ok(content) = crate::services::wiki::project::read_page(&projectId, &path).await {
+    if let Ok(Some(page)) = repo.get_page(&project_id, &path).await {
+        if let Ok(content) = crate::services::wiki::project::read_page(&project_id, &path).await {
             return Ok(serde_json::json!({
                 "id": page.id,
                 "project_id": page.project_id,
@@ -124,7 +124,7 @@ pub async fn get_wiki_page(
     }
 
     // Try reading from disk
-    match crate::services::wiki::project::read_page(&projectId, &path).await {
+    match crate::services::wiki::project::read_page(&project_id, &path).await {
         Ok(content) => {
             let title = path
                 .split('/')
@@ -146,12 +146,12 @@ pub async fn get_wiki_page(
 #[tauri::command]
 pub async fn save_wiki_page(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
     path: String,
     content: String,
 ) -> Result<(), String> {
     let pool = state.db.pool.clone();
-    crate::services::wiki::project::write_page(&projectId, &path, &content).await?;
+    crate::services::wiki::project::write_page(&project_id, &path, &content).await?;
 
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
     use sha2::{Digest, Sha256};
@@ -180,7 +180,7 @@ pub async fn save_wiki_page(
     let token_count = (content.len() / 4) as i64;
     let _ = repo
         .upsert_page(
-            &projectId,
+            &project_id,
             &path,
             &title,
             page_type,
@@ -192,7 +192,7 @@ pub async fn save_wiki_page(
         )
         .await;
     let _ =
-        crate::services::wiki::project::append_log(&projectId, &format!("update | {}", path)).await;
+        crate::services::wiki::project::append_log(&project_id, &format!("update | {}", path)).await;
     Ok(())
 }
 
@@ -201,17 +201,17 @@ pub async fn save_wiki_page(
 #[tauri::command]
 pub async fn get_wiki_sources(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
 ) -> Result<Vec<WikiSource>, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.list_sources(&projectId).await
+    repo.list_sources(&project_id).await
 }
 
 #[tauri::command]
 pub async fn add_wiki_source(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
     input: AddSourceInput,
 ) -> Result<WikiSource, String> {
     let pool = state.db.pool.clone();
@@ -226,25 +226,25 @@ pub async fn add_wiki_source(
 
     if let Some(ref content) = input.content {
         crate::services::wiki::project::write_source_file(
-            &projectId,
+            &project_id,
             &input.filename,
             content.as_bytes(),
         )
         .await?;
     }
 
-    repo.add_source(&projectId, &input, content_hash.as_deref(), file_size)
+    repo.add_source(&project_id, &input, content_hash.as_deref(), file_size)
         .await
 }
 
 #[tauri::command]
 pub async fn delete_wiki_source(
     state: State<'_, Arc<AppState>>,
-    sourceId: String,
+    source_id: String,
 ) -> Result<(), String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.delete_source(&sourceId).await
+    repo.delete_source(&source_id).await
 }
 
 // ── Wiki Search ──
@@ -252,13 +252,13 @@ pub async fn delete_wiki_source(
 #[tauri::command]
 pub async fn search_wiki(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
     query: String,
-    topK: Option<usize>,
+    top_k: Option<usize>,
 ) -> Result<Vec<WikiSearchResult>, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.search_pages(&projectId, &query, topK.unwrap_or(10))
+    repo.search_pages(&project_id, &query, top_k.unwrap_or(10))
         .await
 }
 
@@ -267,11 +267,11 @@ pub async fn search_wiki(
 #[tauri::command]
 pub async fn get_wiki_graph(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
 ) -> Result<GraphData, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.get_graph(&projectId).await
+    repo.get_graph(&project_id).await
 }
 
 // ── Wiki Tags ──
@@ -279,12 +279,12 @@ pub async fn get_wiki_graph(
 #[tauri::command]
 pub async fn get_wiki_tags(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<WikiTag>, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.get_tags(&projectId, limit.unwrap_or(15)).await
+    repo.get_tags(&project_id, limit.unwrap_or(15)).await
 }
 
 // ── Wiki Stats ──
@@ -292,11 +292,11 @@ pub async fn get_wiki_tags(
 #[tauri::command]
 pub async fn get_wiki_stats(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
 ) -> Result<serde_json::Value, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool);
-    repo.get_stats(&projectId).await
+    repo.get_stats(&project_id).await
 }
 
 // ── Wiki Ingest ──
@@ -304,16 +304,16 @@ pub async fn get_wiki_stats(
 #[tauri::command]
 pub async fn ingest_wiki_source(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
-    sourceId: String,
+    project_id: String,
+    source_id: String,
 ) -> Result<serde_json::Value, String> {
     let pool = state.db.pool.clone();
     crate::services::wiki::ingest::ingest_source(
         &state.events,
         &state.settings,
         &pool,
-        &projectId,
-        &sourceId,
+        &project_id,
+        &source_id,
     )
     .await
     .map(|r| {
@@ -325,8 +325,8 @@ pub async fn ingest_wiki_source(
     })
     .map_err(|e| {
         let pool_clone = pool.clone();
-        let sid = sourceId.clone();
-        let pid = projectId.clone();
+        let sid = source_id.clone();
+        let pid = project_id.clone();
         let err = e.clone();
         let events = state.events.clone();
         tokio::spawn(async move {
@@ -353,12 +353,12 @@ pub async fn ingest_wiki_source(
 #[tauri::command]
 pub async fn rescan_wiki_sources(
     state: State<'_, Arc<AppState>>,
-    projectId: String,
+    project_id: String,
 ) -> Result<serde_json::Value, String> {
     let pool = state.db.pool.clone();
     let repo = crate::services::wiki::repository::WikiRepository::new(pool.clone());
 
-    let sources = repo.list_sources(&projectId).await?;
+    let sources = repo.list_sources(&project_id).await?;
     let pending: Vec<_> = sources.iter().filter(|s| s.status == "pending").collect();
     let mut results = Vec::new();
 
@@ -367,7 +367,7 @@ pub async fn rescan_wiki_sources(
             &state.events,
             &state.settings,
             &pool,
-            &projectId,
+            &project_id,
             &source.id,
         )
         .await

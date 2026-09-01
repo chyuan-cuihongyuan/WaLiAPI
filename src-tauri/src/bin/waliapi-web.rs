@@ -34,7 +34,7 @@ fn parse_args(args: &[String]) -> Result<WebServerConfig, String> {
     let mut data_dir = None;
     let mut i = 0;
     while i < args.len() {
-        let mut value_of = |i: &mut usize, name: &str| -> Result<String, String> {
+        let value_of = |i: &mut usize, name: &str| -> Result<String, String> {
             *i += 1;
             args.get(*i)
                 .cloned()
