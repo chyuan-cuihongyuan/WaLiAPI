@@ -259,18 +259,7 @@ impl WikiRepository {
                 if let Ok(content) =
                     crate::services::wiki::project::read_page(project_id, &page.path).await
                 {
-                    let content_lower = content.to_lowercase();
-                    let query_lower = query.to_lowercase();
-                    if content_lower.contains(&query_lower) {
-                        // Extract snippet around match
-                        let pos = content_lower.find(&query_lower).unwrap_or(0);
-                        let start = if pos > 60 { pos - 60 } else { 0 };
-                        let end = std::cmp::min(start + 200, content.len());
-                        // Align to char boundaries to avoid splitting multi-byte UTF-8 chars
-                        let start = content.floor_char_boundary(start);
-                        let end = content.ceil_char_boundary(end);
-                        let snippet = format!("...{}...", &content[start..end].replace('\n', " "));
-
+                    if let Some(snippet) = build_search_snippet(&content, query) {
                         results.push(WikiSearchResult {
                             page_id: page.id.clone(),
                             path: page.path.clone(),
@@ -292,12 +281,8 @@ impl WikiRepository {
                 if let Ok(content) =
                     crate::services::wiki::project::read_page(project_id, &r.path).await
                 {
-                    let content_lower = content.to_lowercase();
-                    let query_lower = query.to_lowercase();
-                    if let Some(pos) = content_lower.find(&query_lower) {
-                        let start = if pos > 60 { pos - 60 } else { 0 };
-                        let end = std::cmp::min(start + 200, content.len());
-                        r.snippet = format!("...{}...", &content[start..end].replace('\n', " "));
+                    if let Some(snippet) = build_search_snippet(&content, query) {
+                        r.snippet = snippet;
                     } else {
                         // Use first 200 chars as snippet
                         r.snippet = content.chars().take(200).collect::<String>();
@@ -633,6 +618,37 @@ impl WikiRepository {
     }
 }
 
+fn build_search_snippet(content: &str, query: &str) -> Option<String> {
+    let match_start = find_case_insensitive_match_start(content, query)?;
+    let match_char_index = content[..match_start].chars().count();
+    let snippet_start = match_char_index.saturating_sub(60);
+    let snippet = content
+        .chars()
+        .skip(snippet_start)
+        .take(200)
+        .collect::<String>()
+        .replace('\n', " ");
+    Some(format!("...{}...", snippet))
+}
+
+fn find_case_insensitive_match_start(content: &str, query: &str) -> Option<usize> {
+    let query_lower = query.to_lowercase();
+    let mut content_lower = String::with_capacity(content.len());
+    let mut offsets = Vec::with_capacity(content.chars().count() + 1);
+
+    for (original_offset, ch) in content.char_indices() {
+        offsets.push((content_lower.len(), original_offset));
+        content_lower.extend(ch.to_lowercase());
+    }
+    offsets.push((content_lower.len(), content.len()));
+
+    let match_offset = content_lower.find(&query_lower)?;
+    let offset_index = offsets
+        .partition_point(|(lower_offset, _)| *lower_offset <= match_offset)
+        .saturating_sub(1);
+    Some(offsets[offset_index].1)
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct WikiGraphEdgeRow {
     id: String,
@@ -669,3 +685,32 @@ You are a Wiki maintainer. Your job is to read source documents and maintain a s
 - `wiki/concepts/*.md` — concept pages.
 - `wiki/summaries/*.md` — source summaries.
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_snippet_handles_cjk_without_splitting_utf8() {
+        let content = format!("{}阻止输出或报警{}", "前".repeat(80), "后".repeat(180));
+        let snippet = build_search_snippet(&content, "输出").unwrap();
+
+        assert!(snippet.contains("阻止输出或报警"));
+        assert!(snippet.is_char_boundary(snippet.len()));
+    }
+
+    #[test]
+    fn search_snippet_maps_unicode_lowercase_expansion_to_original_text() {
+        let content = format!("{}İSTANBUL{}", "前".repeat(80), "后".repeat(180));
+        let snippet = build_search_snippet(&content, "i\u{307}stanbul").unwrap();
+
+        assert!(snippet.contains("İSTANBUL"));
+        assert!(snippet.is_char_boundary(snippet.len()));
+    }
+
+    #[test]
+    fn search_snippet_is_case_insensitive_for_ascii() {
+        let snippet = build_search_snippet("WaLiAPI Wiki Gateway", "wiki").unwrap();
+        assert!(snippet.contains("WaLiAPI Wiki Gateway"));
+    }
+}

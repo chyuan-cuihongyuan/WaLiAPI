@@ -5,9 +5,13 @@ use crate::core::proxy;
 use crate::db::repository::Repository;
 use crate::server::event_bridge::EventSink;
 use crate::settings_store::SettingsStore;
+use crate::utils::text::truncate_utf8;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::Arc;
+
+const MAX_SOURCE_CONTEXT_BYTES: usize = 24_000;
+const SOURCE_CONTEXT_TRUNCATION_MARKER: &str = "\n\n[... content truncated ...]";
 
 /// Ingest a source file: read → parse → generate wiki pages via LLM → write to disk+DB.
 pub async fn ingest_source(
@@ -276,7 +280,7 @@ fn emit_wiki_progress(
     stage: &str,
     progress: u8,
     detail: &str,
-    ) {
+) {
     events.emit(
         "wiki-source-progress",
         serde_json::json!({
@@ -427,22 +431,7 @@ async fn generate_wiki_pages(
     sections: &[ContentSection],
     schema: &str,
 ) -> Result<Vec<GeneratedPage>, String> {
-    // Build a combined context from all sections
-    let combined: String = sections
-        .iter()
-        .map(|s| format!("## {}\n{}", s.heading, s.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    // Truncate to fit context window (rough estimate)
-    let max_chars = 24000;
-    let truncated = if combined.len() > max_chars {
-        let mut t = combined[..max_chars].to_string();
-        t.push_str("\n\n[... content truncated ...]");
-        t
-    } else {
-        combined
-    };
+    let truncated = build_source_context(sections);
 
     let system_prompt = format!(
         r#"You are a Wiki maintainer. Read the source document and generate structured wiki pages in Markdown.
@@ -550,6 +539,22 @@ Generate 3-8 pages depending on document complexity. Focus on the most important
 
     // Parse the LLM output into pages
     Ok(parse_generated_pages(raw_text, source_filename))
+}
+
+fn build_source_context(sections: &[ContentSection]) -> String {
+    let combined: String = sections
+        .iter()
+        .map(|s| format!("## {}\n{}", s.heading, s.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if combined.len() <= MAX_SOURCE_CONTEXT_BYTES {
+        return combined;
+    }
+
+    let mut truncated = truncate_utf8(&combined, MAX_SOURCE_CONTEXT_BYTES).to_string();
+    truncated.push_str(SOURCE_CONTEXT_TRUNCATION_MARKER);
+    truncated
 }
 
 /// Parse LLM-generated pages from the response text.
@@ -998,4 +1003,97 @@ async fn resolve_wikilink_to_path(pool: &sqlx::SqlitePool, project_id: &str, lin
     }
     // Fallback to slug-based normalization
     normalize_wikilink(link)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_context_truncates_cjk_at_utf8_boundary() {
+        let sections = vec![ContentSection {
+            heading: String::new(),
+            content: "中".repeat(9_000),
+        }];
+
+        let context = build_source_context(&sections);
+        let content = context
+            .strip_suffix(SOURCE_CONTEXT_TRUNCATION_MARKER)
+            .unwrap();
+
+        assert!(content.len() <= MAX_SOURCE_CONTEXT_BYTES);
+        assert!(content.is_char_boundary(content.len()));
+        assert!(context.ends_with(SOURCE_CONTEXT_TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn source_context_truncates_emoji_at_utf8_boundary() {
+        let sections = vec![ContentSection {
+            heading: "Emoji".to_string(),
+            content: "😀".repeat(7_000),
+        }];
+
+        let context = build_source_context(&sections);
+        let content = context
+            .strip_suffix(SOURCE_CONTEXT_TRUNCATION_MARKER)
+            .unwrap();
+
+        assert!(content.len() <= MAX_SOURCE_CONTEXT_BYTES);
+        assert!(content.is_char_boundary(content.len()));
+    }
+
+    #[test]
+    fn source_context_preserves_content_within_limit() {
+        let sections = vec![ContentSection {
+            heading: "Overview".to_string(),
+            content: "WaLiAPI Wiki".to_string(),
+        }];
+
+        assert_eq!(build_source_context(&sections), "## Overview\nWaLiAPI Wiki");
+    }
+
+    #[test]
+    fn source_context_handles_ascii_at_and_above_byte_limit() {
+        let exact = vec![ContentSection {
+            heading: "A".to_string(),
+            content: "x".repeat(MAX_SOURCE_CONTEXT_BYTES - "## A\n".len()),
+        }];
+        let over = vec![ContentSection {
+            heading: "A".to_string(),
+            content: "x".repeat(MAX_SOURCE_CONTEXT_BYTES - "## A\n".len() + 1),
+        }];
+
+        let exact_context = build_source_context(&exact);
+        assert_eq!(exact_context.len(), MAX_SOURCE_CONTEXT_BYTES);
+        assert!(!exact_context.ends_with(SOURCE_CONTEXT_TRUNCATION_MARKER));
+
+        let over_context = build_source_context(&over);
+        let over_content = over_context
+            .strip_suffix(SOURCE_CONTEXT_TRUNCATION_MARKER)
+            .unwrap();
+        assert_eq!(over_content.len(), MAX_SOURCE_CONTEXT_BYTES);
+    }
+
+    #[test]
+    fn source_context_truncates_combined_sections_at_utf8_boundary() {
+        let sections = vec![
+            ContentSection {
+                heading: "Overview".to_string(),
+                content: "a".repeat(12_000),
+            },
+            ContentSection {
+                heading: "中文".to_string(),
+                content: "界".repeat(5_000),
+            },
+        ];
+
+        let context = build_source_context(&sections);
+        let content = context
+            .strip_suffix(SOURCE_CONTEXT_TRUNCATION_MARKER)
+            .unwrap();
+
+        assert!(content.len() <= MAX_SOURCE_CONTEXT_BYTES);
+        assert!(content.is_char_boundary(content.len()));
+        assert!(content.contains("## 中文"));
+    }
 }
