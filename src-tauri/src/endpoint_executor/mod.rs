@@ -976,6 +976,11 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64)
             .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+            .or_else(|| {
+                usage
+                    .get("prompt_cache_hit_tokens")
+                    .and_then(Value::as_u64)
+            })
             .unwrap_or(0);
         return Some(TokenUsage {
             prompt_tokens: input,
@@ -997,6 +1002,12 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(Value::as_u64)
+        .or_else(|| {
+            // DeepSeek-compatible upstreams use their own cache-hit field.
+            usage
+                .get("prompt_cache_hit_tokens")
+                .and_then(Value::as_u64)
+        })
         .unwrap_or(0);
     Some(TokenUsage {
         prompt_tokens: prompt,

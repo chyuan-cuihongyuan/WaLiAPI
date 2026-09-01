@@ -147,6 +147,7 @@ export interface ApiKeyStats {
   total_tokens: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cached_tokens: number;
   avg_latency_ms: number;
   last_call_at: string | null;
 }
@@ -356,6 +357,10 @@ export interface LogStats {
 export interface DashboardStats {
   today_requests: number;
   today_total_tokens: number;
+  today_cached_tokens: number;
+  today_prompt_tokens: number;
+  total_cached_tokens: number;
+  total_prompt_tokens: number;
   active_channels: number;
   avg_latency_ms: number;
   total_channels: number;
@@ -374,6 +379,7 @@ export interface ModelStats {
   request_count: number;
   input_tokens: number;
   output_tokens: number;
+  cached_tokens: number;
   total_tokens: number;
   success_rate: number;
   avg_latency_ms: number;
@@ -384,6 +390,7 @@ export interface TokenTrendPoint {
   model: string;
   input_tokens: number;
   output_tokens: number;
+  cached_tokens: number;
   total_tokens: number;
   request_count: number;
 }

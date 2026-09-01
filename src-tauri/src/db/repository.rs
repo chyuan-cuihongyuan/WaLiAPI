@@ -1429,6 +1429,36 @@ impl Repository {
         .await
         .unwrap_or(0);
 
+        let today_cached_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs WHERE created_at LIKE ?",
+        )
+        .bind(&today_prefix)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        let today_prompt_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs WHERE created_at LIKE ?",
+        )
+        .bind(&today_prefix)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        let total_cached_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        let total_prompt_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
         let active_channels: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE status = 1")
                 .fetch_one(&self.pool)
@@ -1493,6 +1523,10 @@ impl Repository {
         Ok(DashboardStats {
             today_requests,
             today_total_tokens,
+            today_cached_tokens,
+            today_prompt_tokens,
+            total_cached_tokens,
+            total_prompt_tokens,
             active_channels,
             avg_latency_ms: avg_latency,
             total_channels,
@@ -1517,7 +1551,7 @@ impl Repository {
 
     pub async fn get_api_key_stats(&self) -> Result<Vec<ApiKeyStats>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyStats>(
-            "SELECT\n                r.api_key_id as api_key_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.api_key_id IS NOT NULL\n            GROUP BY r.api_key_id"
+            "SELECT\n                r.api_key_id as api_key_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(SUM(r.cached_tokens), 0) as cached_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.api_key_id IS NOT NULL\n            GROUP BY r.api_key_id"
         )
         .fetch_all(&self.pool)
         .await
@@ -1550,6 +1584,7 @@ impl Repository {
                 COUNT(*) as request_count,
                 COALESCE(SUM(prompt_tokens), 0) as input_tokens,
                 COALESCE(SUM(completion_tokens), 0) as output_tokens,
+                COALESCE(SUM(cached_tokens), 0) as cached_tokens,
                 COALESCE(SUM(total_tokens), 0) as total_tokens,
                 ROUND(CAST(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1.0 ELSE 0.0 END) AS REAL) / COUNT(*), 4) as success_rate,
                 COALESCE(AVG(duration_ms), 0) as avg_latency_ms
@@ -1573,6 +1608,7 @@ impl Repository {
                 model,
                 COALESCE(SUM(prompt_tokens), 0) as input_tokens,
                 COALESCE(SUM(completion_tokens), 0) as output_tokens,
+                COALESCE(SUM(cached_tokens), 0) as cached_tokens,
                 COALESCE(SUM(total_tokens), 0) as total_tokens,
                 COUNT(*) as request_count
             FROM request_logs

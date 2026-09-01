@@ -443,6 +443,10 @@ impl Default for RequestLog {
 pub struct DashboardStats {
     pub today_requests: i64,
     pub today_total_tokens: i64,
+    pub today_cached_tokens: i64,
+    pub today_prompt_tokens: i64,
+    pub total_cached_tokens: i64,
+    pub total_prompt_tokens: i64,
     pub active_channels: i64,
     pub avg_latency_ms: f64,
     pub total_channels: i64,
@@ -485,6 +489,8 @@ pub struct ApiKeyStats {
     pub total_tokens: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    /// Prompt tokens served from upstream cache (migration 026).
+    pub cached_tokens: i64,
     pub avg_latency_ms: f64,
     pub last_call_at: Option<String>,
 }
@@ -499,6 +505,7 @@ pub struct ModelStats {
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cached_tokens: i64,
     pub total_tokens: i64,
     pub success_rate: f64,
     pub avg_latency_ms: f64,
@@ -510,6 +517,7 @@ pub struct TokenTrendPoint {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cached_tokens: i64,
     pub total_tokens: i64,
     pub request_count: i64,
 }

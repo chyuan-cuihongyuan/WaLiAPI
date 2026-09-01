@@ -231,6 +231,11 @@ pub fn usage_from_chat(body: &Value) -> Usage {
             body.pointer("/usage/cache_read_input_tokens")
                 .and_then(Value::as_u64)
         })
+        .or_else(|| {
+            // DeepSeek-compatible upstreams use their own cache-hit field.
+            body.pointer("/usage/prompt_cache_hit_tokens")
+                .and_then(Value::as_u64)
+        })
         .unwrap_or(0);
     let cache_creation = body
         .pointer("/usage/cache_creation_input_tokens")

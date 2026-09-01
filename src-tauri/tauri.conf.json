@@ -14,8 +14,8 @@
     "windows": [
       {
         "title": "WaLiAPI - Local LLM Gateway",
-        "width": 1280,
-        "height": 860,
+        "width": 1440,
+        "height": 900,
         "minWidth": 1000,
         "minHeight": 680,
         "decorations": true,

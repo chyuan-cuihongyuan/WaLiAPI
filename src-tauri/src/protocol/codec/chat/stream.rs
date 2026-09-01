@@ -220,6 +220,10 @@ impl ChatSseState {
         if let Some(c) = u
             .pointer("/prompt_tokens_details/cached_tokens")
             .and_then(Value::as_u64)
+            .or_else(|| {
+                // DeepSeek-compatible upstreams use their own cache-hit field.
+                u.get("prompt_cache_hit_tokens").and_then(Value::as_u64)
+            })
         {
             self.usage.cache_read_input_tokens = c;
         }

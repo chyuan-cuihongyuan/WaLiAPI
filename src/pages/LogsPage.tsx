@@ -428,6 +428,7 @@ export function LogsPage() {
                       <th className="w-24 px-2 py-3 text-left font-medium">密钥</th>
                       <th className="w-24 px-2 py-3 text-left font-medium">上游</th>
                       <th className="px-2 py-3 text-left font-medium">模型</th>
+                      <th className="w-20 px-2 py-3 text-left font-medium">推理档位</th>
                       <th className="w-20 px-2 py-3 text-left font-medium">状态</th>
                       <th className="w-28 px-2 py-3 text-right font-medium">安全</th>
                       <th className="w-28 px-2 py-3 text-right font-medium">Token</th>
@@ -537,6 +538,13 @@ function LogRow({
             )}
           </div>
         </td>
+        <td className="px-2 py-2.5 text-xs overflow-hidden truncate" title={log.reasoning_effort || undefined}>
+          {log.reasoning_effort ? (
+            <span className="rounded-md bg-violet-500/10 px-1.5 py-0.5 text-[11px] font-medium text-violet-500">{log.reasoning_effort}</span>
+          ) : (
+            <span className="text-muted-foreground/50">-</span>
+          )}
+        </td>
         <td className="px-2 py-2.5 text-xs">
           <div className="flex items-center gap-1.5">
             <span className={`rounded-full px-2 py-0.5 ${log.status_code === 200 ? "bg-emerald-500/12 text-emerald-300" : "bg-red-500/12 text-red-300"}`}>
@@ -585,7 +593,7 @@ function LogRow({
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={12} className="px-4 py-4 bg-slate-50/80 border-b border-border">
+          <td colSpan={13} className="px-4 py-4 bg-slate-50/80 border-b border-border">
             <LogDetail log={log} />
           </td>
         </tr>

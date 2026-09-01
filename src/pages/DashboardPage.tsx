@@ -23,6 +23,7 @@ import {
   Terminal,
   Network,
   Puzzle,
+  DatabaseZap,
 } from "lucide-react";
 
 export function DashboardPage() {
@@ -32,7 +33,8 @@ export function DashboardPage() {
   const [trendHours, setTrendHours] = useState<24 | 168 | 720>(24);
   const [showInputToken, setShowInputToken] = useState(true);
   const [showOutputToken, setShowOutputToken] = useState(true);
-  const [hoverBar, setHoverBar] = useState<{ x: number; y: number; hour: string; data: { model: string; input: number; output: number }[] } | null>(null);
+  const [showCachedToken, setShowCachedToken] = useState(true);
+  const [hoverBar, setHoverBar] = useState<{ x: number; y: number; hour: string; data: { model: string; input: number; output: number; cached: number }[] } | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const navigate = useNavigate();
@@ -74,15 +76,20 @@ export function DashboardPage() {
   const availability = stats.total_channels > 0 ? Math.round((stats.active_channels / stats.total_channels) * 100) : 0;
 
   // 上 5：请求与渠道 | 下 5：知识服务
+  const cacheRate = (cached: number, prompt: number) =>
+    prompt > 0 ? `${Math.round((cached / prompt) * 100)}%` : "0%";
+
   const topMetrics = [
     { label: "今日请求", value: formatNumber(stats.today_requests), icon: Activity, color: "text-blue-600", tone: "bg-blue-50" },
     { label: "今日 Token", value: formatNumber(stats.today_total_tokens), icon: Zap, color: "text-amber-600", tone: "bg-amber-50" },
+    { label: "今日缓存命中", value: cacheRate(stats.today_cached_tokens, stats.today_prompt_tokens), sub: `节省 ${formatNumber(stats.today_cached_tokens)} tokens`, icon: DatabaseZap, color: "text-emerald-600", tone: "bg-emerald-50" },
     { label: "累计请求", value: formatNumber(stats.total_requests), icon: TrendingUp, color: "text-indigo-600", tone: "bg-indigo-50" },
     { label: "累计 Token", value: formatNumber(stats.total_tokens), icon: Zap, color: "text-orange-600", tone: "bg-orange-50" },
-    { label: "活跃渠道", value: `${stats.active_channels}/${stats.total_channels}`, icon: Radio, color: "text-emerald-600", tone: "bg-emerald-50" },
+    { label: "活跃渠道", value: `${stats.active_channels}/${stats.total_channels}`, icon: Radio, color: "text-teal-600", tone: "bg-teal-50" },
   ];
   const bottomMetrics = [
     { label: "平均延迟", value: formatDuration(Math.round(stats.avg_latency_ms)), icon: Workflow, color: "text-violet-600", tone: "bg-violet-50" },
+    { label: "累计缓存命中", value: cacheRate(stats.total_cached_tokens, stats.total_prompt_tokens), sub: `节省 ${formatNumber(stats.total_cached_tokens)} tokens`, icon: DatabaseZap, color: "text-lime-600", tone: "bg-lime-50" },
     { label: "RAG", value: formatNumber(stats.total_knowledge_bases), icon: Database, color: "text-cyan-600", tone: "bg-cyan-50" },
     { label: "RAG 文档", value: formatNumber(stats.total_kb_documents), icon: Layers, color: "text-teal-600", tone: "bg-teal-50" },
     { label: "Wiki", value: formatNumber(stats.total_wiki_projects), icon: Network, color: "text-fuchsia-600", tone: "bg-fuchsia-50" },
@@ -154,8 +161,8 @@ export function DashboardPage() {
       </section>
 
       {/* 指标卡片 — 上排：请求与渠道 */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
-        {topMetrics.map(({ label, value, icon: Icon, color, tone }) => (
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+        {topMetrics.map(({ label, value, sub, icon: Icon, color, tone }) => (
           <div key={label} className="surface data-card">
             <div className="flex items-center justify-between">
               <div className={`rounded-xl ${tone} p-2`}>
@@ -164,13 +171,14 @@ export function DashboardPage() {
             </div>
             <div className="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{value}</div>
             <div className="text-xs text-slate-500">{label}</div>
+            {sub && <div className="mt-0.5 text-[11px] text-slate-400">{sub}</div>}
           </div>
         ))}
       </div>
 
       {/* 指标卡片 — 下排：知识服务 */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
-        {bottomMetrics.map(({ label, value, icon: Icon, color, tone }) => (
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+        {bottomMetrics.map(({ label, value, sub, icon: Icon, color, tone }) => (
           <div key={label} className="surface data-card">
             <div className="flex items-center justify-between">
               <div className={`rounded-xl ${tone} p-2`}>
@@ -179,6 +187,7 @@ export function DashboardPage() {
             </div>
             <div className="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{value}</div>
             <div className="text-xs text-slate-500">{label}</div>
+            {sub && <div className="mt-0.5 text-[11px] text-slate-400">{sub}</div>}
           </div>
         ))}
       </div>
@@ -192,9 +201,11 @@ export function DashboardPage() {
         hours={trendHours}
         showInput={showInputToken}
         showOutput={showOutputToken}
+        showCached={showCachedToken}
         onHoursChange={setTrendHours}
         onToggleInput={() => setShowInputToken(v => !v)}
         onToggleOutput={() => setShowOutputToken(v => !v)}
+        onToggleCached={() => setShowCachedToken(v => !v)}
         hoverBar={hoverBar}
         setHoverBar={setHoverBar}
       />
@@ -435,7 +446,7 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">模型分布</h2>
-          <p className="mt-1 text-sm text-slate-500">各模型调用次数、Token 消耗与成功率</p>
+          <p className="mt-1 text-sm text-slate-500">各模型调用次数、Token 消耗、缓存命中与成功率</p>
         </div>
         <Layers className="h-5 w-5 text-slate-400" />
       </div>
@@ -453,6 +464,7 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
                 <th className="pb-2 pr-4 font-medium text-right">请求数</th>
                 <th className="pb-2 pr-4 font-medium text-right">输入 Token</th>
                 <th className="pb-2 pr-4 font-medium text-right">输出 Token</th>
+                <th className="pb-2 pr-4 font-medium text-right">缓存命中</th>
                 <th className="pb-2 pr-4 font-medium text-right">总 Token</th>
                 <th className="pb-2 pr-4 font-medium">Token 占比</th>
                 <th className="pb-2 pr-4 font-medium text-right">成功率</th>
@@ -471,6 +483,18 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
                   <td className="py-2.5 pr-4 text-right tabular-nums text-slate-600">{formatNumber(row.request_count)}</td>
                   <td className="py-2.5 pr-4 text-right tabular-nums text-slate-500">{formatNumber(row.input_tokens)}</td>
                   <td className="py-2.5 pr-4 text-right tabular-nums text-slate-500">{formatNumber(row.output_tokens)}</td>
+                  <td className="py-2.5 pr-4 text-right tabular-nums">
+                    {(row.cached_tokens ?? 0) > 0 ? (
+                      <div>
+                        <div className="font-medium text-emerald-600">{formatNumber(row.cached_tokens)}</div>
+                        <div className="text-[10px] text-slate-400">
+                          {row.input_tokens > 0 ? `${((row.cached_tokens / row.input_tokens) * 100).toFixed(1)}%` : "-"}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-slate-300">-</span>
+                    )}
+                  </td>
                   <td className="py-2.5 pr-4 text-right tabular-nums font-medium text-slate-900">{formatNumber(row.total_tokens)}</td>
                   <td className="py-2.5 pr-4">
                     <div className="h-1.5 w-full rounded-full bg-slate-100">
@@ -500,6 +524,8 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
 // Token 使用趋势图 (纯 SVG 折线图 + 渐变填充)
 // ════════════════════════════════════════════════════════════
 
+const CACHED_LINE_COLOR = "#10b981"; // emerald-500，缓存曲线统一色，与模型配色区分
+
 const TREND_LINE_COLORS = [
   { stroke: "#3b82f6", fill: "#3b82f6", light: "#93c5fd" }, // blue
   { stroke: "#10b981", fill: "#10b981", light: "#6ee7b7" }, // emerald
@@ -517,7 +543,7 @@ interface TrendHover {
   x: number;
   y: number;
   hour: string;
-  data: { model: string; input: number; output: number }[];
+  data: { model: string; input: number; output: number; cached: number }[];
 }
 
 /** Catmull-Rom → cubic Bézier 转换，生成平滑曲线路径 */
@@ -546,9 +572,11 @@ function TokenTrendChart({
   hours,
   showInput,
   showOutput,
+  showCached,
   onHoursChange,
   onToggleInput,
   onToggleOutput,
+  onToggleCached,
   hoverBar,
   setHoverBar,
 }: {
@@ -556,9 +584,11 @@ function TokenTrendChart({
   hours: 24 | 168 | 720;
   showInput: boolean;
   showOutput: boolean;
+  showCached: boolean;
   onHoursChange: (h: 24 | 168 | 720) => void;
   onToggleInput: () => void;
   onToggleOutput: () => void;
+  onToggleCached: () => void;
   hoverBar: TrendHover | null;
   setHoverBar: (h: TrendHover | null) => void;
 }) {
@@ -617,7 +647,7 @@ function TokenTrendChart({
         const bucketStart = new Date(h);
         const bucketEnd = new Date(bucketStart.getTime() + bucketMs);
         // 在此 bucket 范围内累加该模型的数据
-        let input = 0, output = 0, total = 0, requests = 0;
+        let input = 0, output = 0, cached = 0, total = 0, requests = 0;
         for (const [rawHour, modelMap] of map) {
           const rawDate = new Date(rawHour);
           if (rawDate >= bucketStart && rawDate < bucketEnd) {
@@ -625,17 +655,32 @@ function TokenTrendChart({
             if (p) {
               input += p.input_tokens;
               output += p.output_tokens;
+              cached += p.cached_tokens ?? 0;
               total += p.total_tokens;
               requests += p.request_count;
             }
           }
         }
-        return { hour: h, input, output, total, requests };
+        return { hour: h, input, output, cached, total, requests };
       }),
     }));
 
     return { hoursList: hoursArr, modelList: modelsArr, seriesByModel: series };
   }, [data, hours]);
+
+  // 图例点击显隐模型（隐藏后曲线/hover/Y轴都不再计入）
+  const [hiddenModels, setHiddenModels] = useState<Set<string>>(new Set());
+  const toggleModel = (m: string) => {
+    setHiddenModels(prev => {
+      const next = new Set(prev);
+      if (next.has(m)) next.delete(m); else next.add(m);
+      return next;
+    });
+  };
+  const visibleSeries = useMemo(
+    () => seriesByModel.filter(s => !hiddenModels.has(s.model)),
+    [seriesByModel, hiddenModels]
+  );
 
   const chartH = 220;
   const padding = { top: 20, right: 16, bottom: 36, left: 52 };
@@ -645,14 +690,15 @@ function TokenTrendChart({
   // Y 轴最大值（选中的所有 mode 中的最大单点值，留 15% headroom）
   const maxValue = useMemo(() => {
     let max = 0;
-    seriesByModel.forEach(s => {
+    visibleSeries.forEach(s => {
       s.points.forEach(p => {
         if (showInput && p.input > max) max = p.input;
         if (showOutput && p.output > max) max = p.output;
+        if (showCached && p.cached > max) max = p.cached;
       });
     });
     return max > 0 ? max * 1.15 : 1;
-  }, [seriesByModel, showInput, showOutput]);
+  }, [visibleSeries, showInput, showOutput, showCached]);
 
   const yTicks = 5;
   const yTickValues = Array.from({ length: yTicks + 1 }, (_, i) => (maxValue / yTicks) * i);
@@ -681,8 +727,9 @@ function TokenTrendChart({
 
   // 为每个模型生成 SVG 坐标点（输入和输出各一条线）
   const lineData = useMemo(() => {
-    const lines: { model: string; type: "input" | "output"; pts: { x: number; y: number; val: number; hour: string }[]; path: string; areaPath: string; colorIdx: number }[] = [];
-    seriesByModel.forEach((s, idx) => {
+    const lines: { model: string; type: "input" | "output" | "cached"; pts: { x: number; y: number; val: number; hour: string }[]; path: string; areaPath: string; colorIdx: number }[] = [];
+    visibleSeries.forEach((s) => {
+      const idx = Math.max(0, modelList.indexOf(s.model));
       if (showInput) {
         const pts = s.points.map((p, i) => ({
           x: padding.left + i * stepX,
@@ -701,9 +748,18 @@ function TokenTrendChart({
         }));
         lines.push({ model: s.model, type: "output", pts, path: smoothPath(pts), areaPath: pts.length > 0 ? `${smoothPath(pts)} L ${pts[pts.length - 1].x} ${padding.top + chartH} L ${pts[0].x} ${padding.top + chartH} Z` : "", colorIdx: idx });
       }
+      if (showCached) {
+        const pts = s.points.map((p, i) => ({
+          x: padding.left + i * stepX,
+          y: padding.top + chartH - p.cached / maxValue * chartH,
+          val: p.cached,
+          hour: p.hour,
+        }));
+        lines.push({ model: s.model, type: "cached", pts, path: smoothPath(pts), areaPath: "", colorIdx: idx });
+      }
     });
     return lines;
-  }, [seriesByModel, stepX, showInput, showOutput, maxValue, chartH, padding]);
+  }, [visibleSeries, modelList, stepX, showInput, showOutput, showCached, maxValue, chartH, padding]);
 
   // hover 十字线 x 坐标 → 最近的数据点索引
   const hoverIndex = hoverBar
@@ -739,6 +795,14 @@ function TokenTrendChart({
             >
               输出 Token
             </button>
+            <button
+              onClick={onToggleCached}
+              className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                showCached ? "bg-white text-slate-900 shadow-sm" : "text-slate-400 hover:text-slate-600"
+              }`}
+            >
+              缓存命中
+            </button>
           </div>
           {/* 日/周/月切换 */}
           <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
@@ -764,21 +828,30 @@ function TokenTrendChart({
       {/* 图例 */}
       {modelList.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          {modelList.map((m, i) => (
-            <div key={m} className="flex items-center gap-1.5">
-              <span
-                className="h-0.5 w-4 rounded-full"
-                style={{ backgroundColor: TREND_LINE_COLORS[i % TREND_LINE_COLORS.length].stroke }}
-              />
-              <span className="text-xs text-slate-600">{m}</span>
-            </div>
-          ))}
-          {showInput && showOutput && (
-            <div className="ml-2 flex items-center gap-3 text-[10px] text-slate-400">
-              <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" />实线=输入</span>
-              <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" style={{ borderTop: "2px dashed" }} />虚线=输出</span>
-            </div>
-          )}
+          {modelList.map((m, i) => {
+            const hidden = hiddenModels.has(m);
+            return (
+              <button
+                key={m}
+                onClick={() => toggleModel(m)}
+                title={hidden ? "点击显示该模型" : "点击隐藏该模型"}
+                className={`flex items-center gap-1.5 rounded-md px-1.5 py-0.5 transition-all hover:bg-slate-100 ${
+                  hidden ? "opacity-40" : ""
+                }`}
+              >
+                <span
+                  className="h-0.5 w-4 rounded-full"
+                  style={{ backgroundColor: TREND_LINE_COLORS[i % TREND_LINE_COLORS.length].stroke }}
+                />
+                <span className={`text-xs ${hidden ? "text-slate-400 line-through" : "text-slate-600"}`}>{m}</span>
+              </button>
+            );
+          })}
+          <div className="ml-2 flex items-center gap-3 text-[10px] text-slate-400">
+            {showInput && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" />实线=输入</span>}
+            {showOutput && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" style={{ borderTop: "2px dashed" }} />虚线=输出</span>}
+            {showCached && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full" style={{ backgroundColor: CACHED_LINE_COLOR }} />点线=缓存</span>}
+          </div>
         </div>
       )}
 
@@ -799,12 +872,12 @@ function TokenTrendChart({
           }
           const hi = Math.max(0, Math.min(Math.round((mx - padding.left) / stepX), hoursList.length - 1));
           const hour = hoursList[hi];
-          const hd = seriesByModel
+          const hd = visibleSeries
             .filter(s => {
               const p = s.points[hi];
-              return p && (p.input > 0 || p.output > 0);
+              return p && (p.input > 0 || p.output > 0 || p.cached > 0);
             })
-            .map(s => ({ model: s.model, input: s.points[hi].input, output: s.points[hi].output }));
+            .map(s => ({ model: s.model, input: s.points[hi].input, output: s.points[hi].output, cached: s.points[hi].cached }));
           setHoverBar({ x: mx, y: my, hour, data: hd });
         }}
         onMouseLeave={() => setHoverBar(null)}
@@ -875,11 +948,12 @@ function TokenTrendChart({
                   key={`line-${i}`}
                   d={ld.path}
                   fill="none"
-                  stroke={color.stroke}
+                  stroke={ld.type === "cached" ? CACHED_LINE_COLOR : color.stroke}
                   strokeWidth={2}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  strokeDasharray={ld.type === "output" ? "6 3" : undefined}
+                  strokeDasharray={ld.type === "output" ? "6 3" : ld.type === "cached" ? "2 3" : undefined}
+                  strokeOpacity={ld.type === "cached" ? 0.85 : undefined}
                 />
               );
             })}
@@ -977,6 +1051,7 @@ function TokenTrendChart({
                     <span className="flex-1">模型</span>
                     {showInput && <span className="w-16 text-right">输入</span>}
                     {showOutput && <span className="w-16 text-right">输出</span>}
+                    {showCached && <span className="w-16 text-right">缓存</span>}
                   </div>
                   {hoverBar.data.map((d) => {
                     const colorIdx = modelList.indexOf(d.model);
@@ -990,6 +1065,7 @@ function TokenTrendChart({
                         <span className="flex-1 text-slate-600">{d.model}</span>
                         {showInput && <span className="w-16 text-right font-medium tabular-nums text-slate-900">{formatNumber(d.input)}</span>}
                         {showOutput && <span className="w-16 text-right font-medium tabular-nums text-slate-900">{formatNumber(d.output)}</span>}
+                        {showCached && <span className="w-16 text-right font-medium tabular-nums text-slate-900">{formatNumber(d.cached)}</span>}
                       </div>
                     );
                   })}
@@ -998,6 +1074,7 @@ function TokenTrendChart({
                     <span className="flex gap-3">
                       {showInput && <span className="w-16 text-right font-semibold tabular-nums text-slate-900">{formatNumber(hoverBar.data.reduce((a, d) => a + d.input, 0))}</span>}
                       {showOutput && <span className="w-16 text-right font-semibold tabular-nums text-slate-900">{formatNumber(hoverBar.data.reduce((a, d) => a + d.output, 0))}</span>}
+                      {showCached && <span className="w-16 text-right font-semibold tabular-nums text-slate-900">{formatNumber(hoverBar.data.reduce((a, d) => a + d.cached, 0))}</span>}
                     </span>
                   </div>
                 </>

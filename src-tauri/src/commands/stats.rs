@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 pub struct DashboardStatsDto {
     pub today_requests: i64,
     pub today_total_tokens: i64,
+    pub today_cached_tokens: i64,
+    pub today_prompt_tokens: i64,
+    pub total_cached_tokens: i64,
+    pub total_prompt_tokens: i64,
     pub active_channels: i64,
     pub avg_latency_ms: f64,
     pub total_channels: i64,
@@ -37,6 +41,10 @@ pub async fn get_dashboard_stats_impl(
     Ok(DashboardStatsDto {
         today_requests: s.today_requests,
         today_total_tokens: s.today_total_tokens,
+        today_cached_tokens: s.today_cached_tokens,
+        today_prompt_tokens: s.today_prompt_tokens,
+        total_cached_tokens: s.total_cached_tokens,
+        total_prompt_tokens: s.total_prompt_tokens,
         active_channels: s.active_channels,
         avg_latency_ms: s.avg_latency_ms,
         total_channels: s.total_channels,
@@ -59,6 +67,7 @@ pub struct ModelStatsDto {
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cached_tokens: i64,
     pub total_tokens: i64,
     pub success_rate: f64,
     pub avg_latency_ms: f64,
@@ -81,6 +90,7 @@ pub async fn get_model_stats_impl(
         request_count: s.request_count,
         input_tokens: s.input_tokens,
         output_tokens: s.output_tokens,
+        cached_tokens: s.cached_tokens,
         total_tokens: s.total_tokens,
         success_rate: s.success_rate,
         avg_latency_ms: s.avg_latency_ms,
@@ -95,6 +105,7 @@ pub struct TokenTrendPointDto {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cached_tokens: i64,
     pub total_tokens: i64,
     pub request_count: i64,
 }
@@ -119,6 +130,7 @@ pub async fn get_token_trend_impl(
         model: p.model,
         input_tokens: p.input_tokens,
         output_tokens: p.output_tokens,
+        cached_tokens: p.cached_tokens,
         total_tokens: p.total_tokens,
         request_count: p.request_count,
     }).collect())

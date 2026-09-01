@@ -124,7 +124,18 @@ export function ApiKeysPage() {
                 <div className="min-w-0 flex-1">
                   <div className="mb-3 flex items-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${k.status === 1 ? "bg-emerald-400 shadow-[0_0_16px_rgba(52,211,153,0.8)]" : "bg-zinc-500"}`} />
-                    <h3 className="text-lg font-semibold tracking-tight">{k.name}</h3>
+                    <button
+                      onClick={() => copyKey(k.key)}
+                      title="点击复制密钥"
+                      className="group flex items-center gap-1.5 text-left"
+                    >
+                      <h3 className="text-lg font-semibold tracking-tight group-hover:text-primary transition-colors">{k.name}</h3>
+                      {copied === k.key ? (
+                        <Check size={13} className="text-emerald-400" />
+                      ) : (
+                        <Copy size={13} className="text-muted-foreground/0 group-hover:text-muted-foreground/60 transition-colors" />
+                      )}
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-2 rounded-2xl border border-white/8 bg-black/16 px-3 py-3">
@@ -159,6 +170,7 @@ export function ApiKeysPage() {
                   {stats[k.id] && (() => {
                     const s = stats[k.id];
                     const successRate = s.total_calls > 0 ? (s.success_calls / s.total_calls * 100) : 0;
+                    const cacheRate = s.prompt_tokens > 0 ? (s.cached_tokens / s.prompt_tokens * 100) : 0;
                     return (
                       <div className="mt-4 rounded-2xl border border-slate-200/60 bg-gradient-to-br from-slate-50/80 to-white p-4">
                         <div className="mb-3 flex items-center justify-between">
@@ -204,6 +216,9 @@ export function ApiKeysPage() {
                               </div>
                               <div className="text-[10px] text-slate-400">
                                 ↑{formatNumber(s.prompt_tokens)} ↓{formatNumber(s.completion_tokens)}
+                              </div>
+                              <div className="text-[10px] text-emerald-500" title="命中上游缓存的 prompt token 量及占输入比">
+                                缓存 {formatNumber(s.cached_tokens)} · {cacheRate.toFixed(1)}%
                               </div>
                             </div>
 
