@@ -153,3 +153,47 @@ pub async fn get_token_trend_impl(
         })
         .collect())
 }
+
+// ── 分布统计（issue #51）──
+
+#[tauri::command]
+pub async fn get_stats_distribution(
+    hours: Option<i64>,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<crate::db::models::StatsDistribution, String> {
+    get_stats_distribution_impl(hours, &*state).await
+}
+
+pub async fn get_stats_distribution_impl(
+    hours: Option<i64>,
+    state: &std::sync::Arc<AppState>,
+) -> Result<crate::db::models::StatsDistribution, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.get_stats_distribution(hours)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_dimension_percentiles(
+    hours: Option<i64>,
+    dimension: Option<String>,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<Vec<crate::db::models::DimensionPercentile>, String> {
+    get_dimension_percentiles_impl(hours, dimension, &*state).await
+}
+
+pub async fn get_dimension_percentiles_impl(
+    hours: Option<i64>,
+    dimension: Option<String>,
+    state: &std::sync::Arc<AppState>,
+) -> Result<Vec<crate::db::models::DimensionPercentile>, String> {
+    let dimension = dimension.unwrap_or_else(|| "model".to_string());
+    if !matches!(dimension.as_str(), "model" | "channel" | "key") {
+        return Err(format!("未知统计维度: {dimension}"));
+    }
+    let repo = Repository::new(state.db.pool.clone());
+    repo.get_dimension_percentiles(hours, &dimension)
+        .await
+        .map_err(|e| e.to_string())
+}

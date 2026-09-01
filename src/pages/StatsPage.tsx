@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { BarChart3 } from "lucide-react";
 import { channelApi, apiKeyApi, statsApi } from "../lib/api";
 import { formatDuration, formatNumber } from "../lib/constants";
@@ -6,9 +7,12 @@ import { MultiLineChart, seriesColor } from "../components/MultiLineChart";
 import type {
   ApiKey,
   ApiKeyStats,
+  BucketCount,
   Channel,
   ChannelStats,
+  DimensionPercentile,
   ModelStats,
+  StatsDistribution,
   TokenTrendPoint,
 } from "../types";
 
@@ -59,6 +63,7 @@ function formatHourLabel(h: string): string {
 }
 
 export function StatsPage() {
+  const navigate = useNavigate();
   const [hours, setHours] = useState<TimeRange>(24);
   const [metric, setMetric] = useState<MetricKey>("total_tokens");
   const [dimension, setDimension] = useState<Dimension>("model");
@@ -69,6 +74,8 @@ export function StatsPage() {
   const [apiKeyStats, setApiKeyStats] = useState<ApiKeyStats[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [distribution, setDistribution] = useState<StatsDistribution | null>(null);
+  const [percentiles, setPercentiles] = useState<DimensionPercentile[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -79,12 +86,14 @@ export function StatsPage() {
         statsApi.getModelStats(hours).catch(() => []),
         statsApi.getChannelStats(hours).catch(() => []),
         statsApi.getApiKeyStats(hours).catch(() => []),
-      ]).then(([t, m, c, k]) => {
+        statsApi.getStatsDistribution(hours).catch(() => null),
+      ]).then(([t, m, c, k, d]) => {
         if (cancelled) return;
         setTrend(t);
         setModelStats(m);
         setChannelStats(c);
         setApiKeyStats(k);
+        setDistribution(d);
         setLoading(false);
       });
     };
@@ -96,6 +105,20 @@ export function StatsPage() {
       clearInterval(interval);
     };
   }, [hours]);
+
+  // 维度分位数（p50/p95 列）
+  useEffect(() => {
+    let cancelled = false;
+    statsApi
+      .getDimensionPercentiles(hours, dimension)
+      .then((p) => {
+        if (!cancelled) setPercentiles(p);
+      })
+      .catch(() => setPercentiles([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [hours, dimension]);
 
   // 名称映射（渠道/密钥表展示用）
   useEffect(() => {
@@ -140,6 +163,11 @@ export function StatsPage() {
 
   const channelName = (id: string) => channels.find((c) => c.id === id)?.name ?? id;
   const keyName = (id: string) => apiKeys.find((k) => k.id === id)?.name ?? id;
+  const percentileOf = (id: string) => percentiles.find((p) => p.dimension_id === id);
+  const dimensionIdOf = (dimension: Dimension, row: ModelStats | ChannelStats | ApiKeyStats): string =>
+    dimension === "model" ? (row as ModelStats).model
+      : dimension === "channel" ? (row as ChannelStats).channel_id
+        : (row as ApiKeyStats).api_key_id;
 
   return (
     <div className="page-shell space-y-5">
@@ -194,6 +222,53 @@ export function StatsPage() {
         )}
       </section>
 
+      {/* 分布统计：直方图 + 分位数 + 失败分类 */}
+      <section className="grid gap-5 lg:grid-cols-2">
+        <div className="surface p-5">
+          <h2 className="text-base font-semibold text-slate-900">耗时分布</h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            p50 {distribution?.duration_p50_ms != null ? formatDuration(Math.round(distribution.duration_p50_ms)) : "—"}
+            <span className="mx-1.5 text-slate-300">·</span>
+            p95 {distribution?.duration_p95_ms != null ? formatDuration(Math.round(distribution.duration_p95_ms)) : "—"}
+          </p>
+          <HistogramChart buckets={distribution?.duration_buckets ?? []} tone="bg-blue-500" />
+        </div>
+        <div className="surface p-5">
+          <h2 className="text-base font-semibold text-slate-900">首字延迟（TTFT）分布</h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            p50 {distribution?.ttft_p50_ms != null ? formatDuration(Math.round(distribution.ttft_p50_ms)) : "—"}
+            <span className="mx-1.5 text-slate-300">·</span>
+            p95 {distribution?.ttft_p95_ms != null ? formatDuration(Math.round(distribution.ttft_p95_ms)) : "—"}
+          </p>
+          <HistogramChart buckets={distribution?.ttft_buckets ?? []} tone="bg-emerald-500" />
+        </div>
+      </section>
+
+      {(distribution?.failure_classes?.length ?? 0) > 0 && (
+        <section className="surface p-5">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold text-slate-900">失败分类</h2>
+            <button
+              onClick={() => navigate("/logs")}
+              className="text-xs font-medium text-blue-600 hover:text-blue-700"
+            >
+              查看审计日志 →
+            </button>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {distribution!.failure_classes.map((f) => (
+              <span
+                key={f.failure_class}
+                className="rounded-full border border-rose-100 bg-rose-50 px-3 py-1 text-xs text-rose-600"
+                title={`failure_class: ${f.failure_class}`}
+              >
+                {f.failure_class} · {formatNumber(f.count)}
+              </span>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* 维度明细表 */}
       <section className="surface p-5">
         <div className="mb-4 flex items-center justify-between">
@@ -215,47 +290,82 @@ export function StatsPage() {
 
         {dimension === "model" && (
           <StatsTable
-            head={["模型", "请求", "成功率", "输入", "输出", "Token", "平均延迟"]}
-            rows={modelStats.map((s) => [
-              s.model,
-              formatNumber(s.request_count),
-              `${(s.success_rate * 100).toFixed(1)}%`,
-              formatNumber(s.input_tokens),
-              formatNumber(s.output_tokens),
-              formatNumber(s.total_tokens),
-              formatDuration(Math.round(s.avg_latency_ms)),
-            ])}
+            head={["模型", "请求", "成功率", "Token", "平均延迟", "p50", "p95"]}
+            rows={modelStats.map((s) => {
+              const p = percentileOf(dimensionIdOf("model", s));
+              return [
+                s.model,
+                formatNumber(s.request_count),
+                `${(s.success_rate * 100).toFixed(1)}%`,
+                formatNumber(s.total_tokens),
+                formatDuration(Math.round(s.avg_latency_ms)),
+                p ? formatDuration(Math.round(p.p50_ms)) : "—",
+                p ? formatDuration(Math.round(p.p95_ms)) : "—",
+              ];
+            })}
           />
         )}
         {dimension === "channel" && (
           <StatsTable
-            head={["渠道", "调用", "成功", "失败", "成功率", "Token", "平均延迟"]}
-            rows={channelStats.map((s) => [
-              channelName(s.channel_id),
-              formatNumber(s.total_calls),
-              formatNumber(s.success_calls),
-              formatNumber(s.failed_calls),
-              s.total_calls > 0 ? `${((s.success_calls / s.total_calls) * 100).toFixed(1)}%` : "—",
-              formatNumber(s.total_tokens),
-              formatDuration(Math.round(s.avg_latency_ms)),
-            ])}
+            head={["渠道", "调用", "失败", "成功率", "Token", "平均延迟", "p50", "p95"]}
+            rows={channelStats.map((s) => {
+              const p = percentileOf(dimensionIdOf("channel", s));
+              return [
+                channelName(s.channel_id),
+                formatNumber(s.total_calls),
+                formatNumber(s.failed_calls),
+                s.total_calls > 0 ? `${((s.success_calls / s.total_calls) * 100).toFixed(1)}%` : "—",
+                formatNumber(s.total_tokens),
+                formatDuration(Math.round(s.avg_latency_ms)),
+                p ? formatDuration(Math.round(p.p50_ms)) : "—",
+                p ? formatDuration(Math.round(p.p95_ms)) : "—",
+              ];
+            })}
           />
         )}
         {dimension === "key" && (
           <StatsTable
-            head={["密钥", "调用", "成功", "失败", "成功率", "Token", "平均延迟"]}
-            rows={apiKeyStats.map((s) => [
-              keyName(s.api_key_id),
-              formatNumber(s.total_calls),
-              formatNumber(s.success_calls),
-              formatNumber(s.failed_calls),
-              s.total_calls > 0 ? `${((s.success_calls / s.total_calls) * 100).toFixed(1)}%` : "—",
-              formatNumber(s.total_tokens),
-              formatDuration(Math.round(s.avg_latency_ms)),
-            ])}
+            head={["密钥", "调用", "失败", "成功率", "Token", "平均延迟", "p50", "p95"]}
+            rows={apiKeyStats.map((s) => {
+              const p = percentileOf(dimensionIdOf("key", s));
+              return [
+                keyName(s.api_key_id),
+                formatNumber(s.total_calls),
+                formatNumber(s.failed_calls),
+                s.total_calls > 0 ? `${((s.success_calls / s.total_calls) * 100).toFixed(1)}%` : "—",
+                formatNumber(s.total_tokens),
+                formatDuration(Math.round(s.avg_latency_ms)),
+                p ? formatDuration(Math.round(p.p50_ms)) : "—",
+                p ? formatDuration(Math.round(p.p95_ms)) : "—",
+              ];
+            })}
           />
         )}
       </section>
+    </div>
+  );
+}
+
+/** 纯 div 直方图（横向条），零依赖。 */
+function HistogramChart({ buckets, tone }: { buckets: BucketCount[]; tone: string }) {
+  const max = Math.max(...buckets.map((b) => b.count), 1);
+  if (buckets.length === 0) {
+    return <div className="flex h-40 items-center justify-center text-sm text-slate-400">暂无数据</div>;
+  }
+  return (
+    <div className="mt-3 space-y-2">
+      {buckets.map((b) => (
+        <div key={b.label} className="flex items-center gap-3 text-xs">
+          <span className="w-20 shrink-0 text-right font-mono text-slate-500">{b.label}</span>
+          <div className="h-4 flex-1 overflow-hidden rounded-md bg-slate-100">
+            <div
+              className={`h-full rounded-md ${tone} transition-[width]`}
+              style={{ width: `${Math.max((b.count / max) * 100, b.count > 0 ? 2 : 0)}%` }}
+            />
+          </div>
+          <span className="w-16 shrink-0 font-mono text-slate-600">{formatNumber(b.count)}</span>
+        </div>
+      ))}
     </div>
   );
 }

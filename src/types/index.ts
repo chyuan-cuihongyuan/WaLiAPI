@@ -163,6 +163,33 @@ export interface ChannelStats {
   last_call_at: string | null;
 }
 
+// --- issue #51 分布统计 ---
+export interface BucketCount {
+  label: string;
+  count: number;
+}
+
+export interface FailureClassCount {
+  failure_class: string;
+  count: number;
+}
+
+export interface StatsDistribution {
+  duration_buckets: BucketCount[];
+  ttft_buckets: BucketCount[];
+  duration_p50_ms: number | null;
+  duration_p95_ms: number | null;
+  ttft_p50_ms: number | null;
+  ttft_p95_ms: number | null;
+  failure_classes: FailureClassCount[];
+}
+
+export interface DimensionPercentile {
+  dimension_id: string;
+  p50_ms: number;
+  p95_ms: number;
+}
+
 // Log types
 export interface RequestLog {
   id: string;

@@ -1646,4 +1646,221 @@ impl Repository {
             .fetch_all(&self.pool)
             .await
     }
+
+    // --- issue #51 分布统计 ---
+
+    /// 组合分布：总耗时/TTFT 直方图 + 全局 p50/p95 + 失败分类。
+    pub async fn get_stats_distribution(
+        &self,
+        hours: Option<i64>,
+    ) -> Result<StatsDistribution, sqlx::Error> {
+        let duration_buckets = self.get_duration_buckets(hours).await?;
+        let ttft_buckets = self.get_ttft_buckets(hours).await?;
+        let failure_classes = self.get_failure_class_stats(hours).await?;
+
+        let dur_counts = bucket_counts_by_label(&duration_buckets, &DURATION_LABELS);
+        let ttft_counts = bucket_counts_by_label(&ttft_buckets, &TTFT_LABELS);
+
+        Ok(StatsDistribution {
+            duration_buckets,
+            ttft_buckets,
+            duration_p50_ms: interpolate_percentile(&DURATION_BOUNDS, &dur_counts, 0.50),
+            duration_p95_ms: interpolate_percentile(&DURATION_BOUNDS, &dur_counts, 0.95),
+            ttft_p50_ms: interpolate_percentile(&TTFT_BOUNDS, &ttft_counts, 0.50),
+            ttft_p95_ms: interpolate_percentile(&TTFT_BOUNDS, &ttft_counts, 0.95),
+            failure_classes,
+        })
+    }
+
+    /// 总耗时直方图桶（预定义边界；SQL 桶聚合，不拉全量行）。
+    pub async fn get_duration_buckets(
+        &self,
+        hours: Option<i64>,
+    ) -> Result<Vec<BucketCount>, sqlx::Error> {
+        let since = stats_since(hours);
+        sqlx::query_as::<_, BucketCount>(
+            r#"
+            SELECT label, COUNT(*) as count FROM (
+                SELECT CASE
+                    WHEN duration_ms < 100 THEN '<100ms'
+                    WHEN duration_ms < 300 THEN '100-300ms'
+                    WHEN duration_ms < 1000 THEN '300ms-1s'
+                    WHEN duration_ms < 3000 THEN '1-3s'
+                    WHEN duration_ms < 10000 THEN '3-10s'
+                    ELSE '>=10s' END as label
+                FROM request_logs
+                WHERE (? IS NULL OR created_at >= ?)
+            ) GROUP BY label
+            "#,
+        )
+        .bind(&since)
+        .bind(&since)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// 首字延迟直方图桶（仅流式请求的 ttft_ms 非 NULL 行）。
+    pub async fn get_ttft_buckets(
+        &self,
+        hours: Option<i64>,
+    ) -> Result<Vec<BucketCount>, sqlx::Error> {
+        let since = stats_since(hours);
+        sqlx::query_as::<_, BucketCount>(
+            r#"
+            SELECT label, COUNT(*) as count FROM (
+                SELECT CASE
+                    WHEN ttft_ms < 100 THEN '<100ms'
+                    WHEN ttft_ms < 300 THEN '100-300ms'
+                    WHEN ttft_ms < 1000 THEN '300ms-1s'
+                    WHEN ttft_ms < 3000 THEN '1-3s'
+                    ELSE '>=3s' END as label
+                FROM request_logs
+                WHERE ttft_ms IS NOT NULL AND (? IS NULL OR created_at >= ?)
+            ) GROUP BY label
+            "#,
+        )
+        .bind(&since)
+        .bind(&since)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// 失败分类聚合（failure_class 非空的行 = 请求失败且已归因）。
+    pub async fn get_failure_class_stats(
+        &self,
+        hours: Option<i64>,
+    ) -> Result<Vec<FailureClassCount>, sqlx::Error> {
+        let since = stats_since(hours);
+        sqlx::query_as::<_, FailureClassCount>(
+            r#"
+            SELECT failure_class, COUNT(*) as count
+            FROM request_logs
+            WHERE failure_class IS NOT NULL AND (? IS NULL OR created_at >= ?)
+            GROUP BY failure_class
+            ORDER BY count DESC
+            "#,
+        )
+        .bind(&since)
+        .bind(&since)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// 按维度（model / channel / api_key）统计总耗时 p50/p95：
+    /// SQL 先按维度聚合出桶计数，Rust 侧做累积分布的桶内线性插值。
+    pub async fn get_dimension_percentiles(
+        &self,
+        hours: Option<i64>,
+        dimension: &str,
+    ) -> Result<Vec<DimensionPercentile>, sqlx::Error> {
+        let since = stats_since(hours);
+        let dim = match dimension {
+            "channel" => "channel_id",
+            "key" => "api_key_id",
+            _ => "model",
+        };
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            dimension_id: String,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+            b4: i64,
+            b5: i64,
+        }
+        let sql = format!(
+            r#"
+            SELECT {dim} as dimension_id,
+                SUM(CASE WHEN duration_ms < 100 THEN 1 ELSE 0 END) as b0,
+                SUM(CASE WHEN duration_ms >= 100 AND duration_ms < 300 THEN 1 ELSE 0 END) as b1,
+                SUM(CASE WHEN duration_ms >= 300 AND duration_ms < 1000 THEN 1 ELSE 0 END) as b2,
+                SUM(CASE WHEN duration_ms >= 1000 AND duration_ms < 3000 THEN 1 ELSE 0 END) as b3,
+                SUM(CASE WHEN duration_ms >= 3000 AND duration_ms < 10000 THEN 1 ELSE 0 END) as b4,
+                SUM(CASE WHEN duration_ms >= 10000 THEN 1 ELSE 0 END) as b5
+            FROM request_logs
+            WHERE {dim} IS NOT NULL AND (? IS NULL OR created_at >= ?)
+            GROUP BY {dim}
+            "#
+        );
+        let rows: Vec<Row> = sqlx::query_as::<_, Row>(&sql)
+            .bind(&since)
+            .bind(&since)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let counts = [r.b0, r.b1, r.b2, r.b3, r.b4, r.b5];
+                let p50 = interpolate_percentile(&DURATION_BOUNDS, &counts, 0.50)?;
+                let p95 = interpolate_percentile(&DURATION_BOUNDS, &counts, 0.95)?;
+                Some(DimensionPercentile {
+                    dimension_id: r.dimension_id,
+                    p50_ms: p50,
+                    p95_ms: p95,
+                })
+            })
+            .collect())
+    }
+}
+
+/// 总耗时桶边界（与 get_duration_buckets 的 CASE 一致）：闭区间近似为
+/// [lower, upper)，最后一个是开区间（用下界估计）。
+const DURATION_BOUNDS: [(f64, f64); 6] = [
+    (0.0, 100.0),
+    (100.0, 300.0),
+    (300.0, 1000.0),
+    (1000.0, 3000.0),
+    (3000.0, 10000.0),
+    (10000.0, 10000.0),
+];
+
+const DURATION_LABELS: [&str; 6] = ["<100ms", "100-300ms", "300ms-1s", "1-3s", "3-10s", ">=10s"];
+
+/// 首字延迟桶边界（比总耗时更细的上限——TTFT 通常远小于总耗时）。
+const TTFT_BOUNDS: [(f64, f64); 5] = [
+    (0.0, 100.0),
+    (100.0, 300.0),
+    (300.0, 1000.0),
+    (1000.0, 3000.0),
+    (3000.0, 3000.0),
+];
+
+const TTFT_LABELS: [&str; 5] = ["<100ms", "100-300ms", "300ms-1s", "1-3s", ">=3s"];
+
+/// 把 SQL 返回的桶计数按固定标签顺序排列（缺失桶补 0）。
+fn bucket_counts_by_label(buckets: &[BucketCount], labels: &[&str]) -> Vec<i64> {
+    labels
+        .iter()
+        .map(|label| {
+            buckets
+                .iter()
+                .find(|b| b.label == *label)
+                .map(|b| b.count)
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// 从桶计数做累积分布插值求分位数（桶内假设均匀分布）。
+/// `bounds` 与 `counts` 等长；最后一桶为开区间，用其下界作为估计值。
+fn interpolate_percentile(bounds: &[(f64, f64)], counts: &[i64], q: f64) -> Option<f64> {
+    let total: i64 = counts.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let target = q * total as f64;
+    let mut cumulative = 0.0f64;
+    for ((lo, hi), &count) in bounds.iter().zip(counts.iter()) {
+        if count == 0 {
+            continue;
+        }
+        let next = cumulative + count as f64;
+        if target <= next {
+            let in_bucket = (target - cumulative) / count as f64;
+            return Some(lo + in_bucket * (hi - lo));
+        }
+        cumulative = next;
+    }
+    bounds.last().map(|(lo, _)| *lo)
 }

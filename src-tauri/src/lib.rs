@@ -12,8 +12,8 @@ mod protocol;
 mod rollout_integration_tests;
 pub mod security;
 pub mod server;
-pub mod settings_store;
 pub mod services;
+pub mod settings_store;
 pub mod utils;
 pub mod web_server;
 
@@ -72,7 +72,11 @@ pub struct AppState {
 pub fn run() {
     // 获取可执行文件所在目录
     let exe_dir = std::env::current_exe()
-        .map(|path| path.parent().map(|p| p.to_path_buf()).unwrap_or(std::path::PathBuf::from(".")))
+        .map(|path| {
+            path.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(std::path::PathBuf::from("."))
+        })
         .unwrap_or(std::path::PathBuf::from("."));
 
     // 创建日志目录
@@ -188,9 +192,8 @@ pub fn run() {
                     Arc::new(db::repository::Repository::new(db.pool.clone())),
                     auth_provider::ProviderRegistry::new(),
                 ));
-                let (event_tx, _) = tokio::sync::broadcast::channel(
-                    server::event_bridge::EVENT_CHANNEL_CAPACITY,
-                );
+                let (event_tx, _) =
+                    tokio::sync::broadcast::channel(server::event_bridge::EVENT_CHANNEL_CAPACITY);
                 let emit_handle = app_handle.clone();
                 let state = Arc::new(AppState {
                     db,
@@ -284,6 +287,8 @@ pub fn run() {
             commands::stats::get_dashboard_stats,
             commands::stats::get_model_stats,
             commands::stats::get_token_trend,
+            commands::stats::get_stats_distribution,
+            commands::stats::get_dimension_percentiles,
             commands::settings::get_settings,
             commands::settings::get_feature_flags,
             commands::settings::save_settings,
@@ -393,6 +398,11 @@ fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }

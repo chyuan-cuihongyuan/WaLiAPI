@@ -7,6 +7,8 @@ import type {
   DashboardStats,
   ModelStats,
   TokenTrendPoint,
+  StatsDistribution,
+  DimensionPercentile,
   Settings,
   ServerStatus,
   BuiltinRule, CustomRule, CreateCustomRuleInput, UpdateBuiltinRuleInput,
@@ -146,6 +148,8 @@ export const statsApi = {
   getTokenTrend: (hours?: number) => invoke<TokenTrendPoint[]>("get_token_trend", { hours: hours ?? 24 }),
   getChannelStats: (hours?: number) => invoke<ChannelStats[]>("get_channel_stats", { hours: hours ?? null }),
   getApiKeyStats: (hours?: number) => invoke<ApiKeyStats[]>("get_api_key_stats", { hours: hours ?? null }),
+  getStatsDistribution: (hours?: number) => invoke<StatsDistribution>("get_stats_distribution", { hours: hours ?? null }),
+  getDimensionPercentiles: (hours?: number, dimension?: string) => invoke<DimensionPercentile[]>("get_dimension_percentiles", { hours: hours ?? null, dimension: dimension ?? "model" }),
 };
 
 // Settings commands

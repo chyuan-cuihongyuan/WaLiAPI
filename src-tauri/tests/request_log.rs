@@ -427,3 +427,82 @@ async fn request_log_create_log_persists_ttft_and_log_dto_maps_it() {
     let dto: waliapi_lib::commands::log::LogDto = stored.into();
     assert_eq!(dto.ttft_ms, Some(80));
 }
+
+// --- issue #51 分布统计（桶 + 插值分位数 + 过滤） ---
+
+#[tokio::test]
+async fn stats_distribution_buckets_and_interpolated_percentiles() {
+    let pool = fresh_db().await;
+    let repo = Repository::new(pool);
+    // 12 条：2 条 <100ms，10 条 150ms（落在 100-300ms 桶）；
+    // 其中 5 条流式 ttft=150ms。
+    for i in 0..12 {
+        let mut log = full_log(Some("ch-dist"), Some("dist"));
+        log.duration_ms = if i < 2 { 50 } else { 150 };
+        log.ttft_ms = (i < 5).then_some(150);
+        log.failure_class = (i >= 10).then(|| "upstream_error".to_string());
+        repo.create_log(&log).await.expect("insert");
+    }
+
+    let dist = repo
+        .get_stats_distribution(None)
+        .await
+        .expect("distribution");
+    let find = |label: &str| {
+        dist.duration_buckets
+            .iter()
+            .find(|b| b.label == label)
+            .map(|b| b.count)
+            .unwrap_or(0)
+    };
+    assert_eq!(find("<100ms"), 2);
+    assert_eq!(find("100-300ms"), 10);
+    // p50：目标位次 0.5*12=6 → 在 100-300 桶内 (6-2)/10 → 100+0.4*200=180。
+    assert_eq!(dist.duration_p50_ms, Some(180.0));
+    // p95：0.95*12=11.4 → (11.4-2)/10=0.94 → 100+188=288。
+    assert_eq!(dist.duration_p95_ms, Some(288.0));
+    // TTFT：5 条 150ms → p50 = 100 + 0.5*200 = 200。
+    assert_eq!(dist.ttft_p50_ms, Some(200.0));
+    // 失败分类：2 条 upstream_error。
+    assert_eq!(dist.failure_classes.len(), 1);
+    assert_eq!(dist.failure_classes[0].failure_class, "upstream_error");
+    assert_eq!(dist.failure_classes[0].count, 2);
+}
+
+#[tokio::test]
+async fn channel_stats_filters_upstream_type_and_time_window() {
+    let pool = fresh_db().await;
+    let repo = Repository::new(pool);
+
+    let mut api_row = full_log(Some("ch-A"), Some("API 渠道"));
+    api_row.upstream_type = "channel".to_string();
+    repo.create_log(&api_row).await.expect("api row");
+
+    // auth 账号尝试：channel_id 存的是账号 id，不应混入渠道统计。
+    let mut auth_row = full_log(Some("acc-1"), Some("Codex 账号"));
+    auth_row.upstream_type = "auth_account".to_string();
+    repo.create_log(&auth_row).await.expect("auth row");
+
+    // 旧数据：2020 年的渠道请求，时间窗内应被排除。
+    let mut old_row = full_log(Some("ch-old"), Some("旧渠道"));
+    old_row.upstream_type = "channel".to_string();
+    old_row.created_at = "2020-01-01T00:00:00.000Z".to_string();
+    repo.create_log(&old_row).await.expect("old row");
+
+    let all = repo.get_channel_stats(None).await.expect("all");
+    let ids: Vec<&str> = all.iter().map(|s| s.channel_id.as_str()).collect();
+    assert!(ids.contains(&"ch-A"));
+    assert!(!ids.contains(&"acc-1"), "auth 账号不得混入渠道统计");
+    assert!(ids.contains(&"ch-old"));
+
+    let recent = repo.get_channel_stats(Some(24)).await.expect("recent");
+    let recent_ids: Vec<&str> = recent.iter().map(|s| s.channel_id.as_str()).collect();
+    assert!(recent_ids.contains(&"ch-A"));
+    assert!(!recent_ids.contains(&"ch-old"), "时间窗外应被排除");
+
+    // 模型统计的时间过滤同样生效。
+    let models_recent = repo.get_model_stats(Some(24)).await.expect("models recent");
+    assert!(!models_recent.is_empty());
+    let models_all = repo.get_model_stats(None).await.expect("models all");
+    assert!(models_all.len() >= models_recent.len());
+}

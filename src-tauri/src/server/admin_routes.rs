@@ -533,6 +533,17 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "get_token_trend" => {
             to_json(commands::stats::get_token_trend(arg(&args, "hours")?, state).await)
         }
+        "get_stats_distribution" => {
+            to_json(commands::stats::get_stats_distribution(arg(&args, "hours")?, state).await)
+        }
+        "get_dimension_percentiles" => to_json(
+            commands::stats::get_dimension_percentiles(
+                arg(&args, "hours")?,
+                arg(&args, "dimension")?,
+                state,
+            )
+            .await,
+        ),
         "get_settings" => to_json(commands::settings::get_settings(state).await),
         "save_settings" => {
             to_json(commands::settings::save_settings(arg(&args, "settings")?, state).await)

@@ -529,6 +529,42 @@ pub struct TokenTrendPoint {
     pub cache_read_tokens: i64,
 }
 
+// --- issue #51 分布统计（直方图桶 + 插值分位数 + 失败分类） ---
+
+/// 一个直方图桶：`label` 形如 "100-300ms"，`count` 为落在桶内的请求数。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BucketCount {
+    pub label: String,
+    pub count: i64,
+}
+
+/// 失败分类聚合计数（failure_class 非空的行）。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct FailureClassCount {
+    pub failure_class: String,
+    pub count: i64,
+}
+
+/// 全局分布：直方图 + p50/p95（桶内线性插值近似）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsDistribution {
+    pub duration_buckets: Vec<BucketCount>,
+    pub ttft_buckets: Vec<BucketCount>,
+    pub duration_p50_ms: Option<f64>,
+    pub duration_p95_ms: Option<f64>,
+    pub ttft_p50_ms: Option<f64>,
+    pub ttft_p95_ms: Option<f64>,
+    pub failure_classes: Vec<FailureClassCount>,
+}
+
+/// 按维度（模型/渠道/密钥）的总耗时分位数（插值近似）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DimensionPercentile {
+    pub dimension_id: String,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RequestSecurityFinding {
     pub id: String,
