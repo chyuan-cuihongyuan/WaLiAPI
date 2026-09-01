@@ -194,6 +194,10 @@ pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// 缓存命中读取的输入 token；`None` = 上游未上报（估算路径/无该字段）。
+    pub cache_read_tokens: Option<u64>,
+    /// 缓存写入的输入 token（Anthropic cache_creation 等）；`None` = 未上报。
+    pub cache_creation_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

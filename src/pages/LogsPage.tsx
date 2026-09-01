@@ -552,7 +552,14 @@ function LogRow({
           </div>
         </td>
         <td className="px-3 py-2.5 text-right text-xs">
-          <span title={`Prompt: ${log.prompt_tokens}, Completion: ${log.completion_tokens}`}>
+          <span
+            title={`Prompt: ${log.prompt_tokens}, Completion: ${log.completion_tokens}${
+              log.cache_read_tokens != null ? `, 缓存读: ${log.cache_read_tokens}` : ""
+            }${
+              log.cache_creation_tokens != null ? `, 缓存写: ${log.cache_creation_tokens}` : ""
+            }`}
+            className={log.cache_read_tokens != null && log.cache_read_tokens > 0 ? "text-emerald-600" : undefined}
+          >
             {log.total_tokens > 0 ? formatNumber(log.total_tokens) : <span className="text-muted-foreground/50">0</span>}
           </span>
         </td>
@@ -730,6 +737,12 @@ function LogDetail({ log }: { log: RequestLog }) {
           <div className="mt-0.5 text-[11px] text-slate-400">
             输入 {log.prompt_tokens} · 输出 {log.completion_tokens}
           </div>
+          {(log.cache_read_tokens != null || log.cache_creation_tokens != null) && (
+            <div className="mt-0.5 text-[11px] text-emerald-600">
+              缓存读 {log.cache_read_tokens ?? 0}
+              {log.cache_creation_tokens != null ? ` · 缓存写 ${log.cache_creation_tokens}` : ""}
+            </div>
+          )}
         </div>
 
         {/* Duration */}

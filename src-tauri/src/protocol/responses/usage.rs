@@ -1,7 +1,9 @@
 use serde_json::Value;
 
 /// Parse usage from OpenAI SSE chunk (reuses logic from handlers).
-pub fn parse_usage_from_sse_chunk(text: &str) -> Option<(i64, i64, i64)> {
+/// Returns (prompt, completion, total, cache_read, cache_creation); cache
+/// annotations follow the issue #51 normalization (>0 = reported).
+pub fn parse_usage_from_sse_chunk(text: &str) -> Option<(i64, i64, i64, Option<i64>, Option<i64>)> {
     for line in text.lines() {
         let trimmed = line.trim();
         if !trimmed.starts_with("data:") {
@@ -26,7 +28,9 @@ pub fn parse_usage_from_sse_chunk(text: &str) -> Option<(i64, i64, i64)> {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 if total > 0 || prompt > 0 || completion > 0 {
-                    return Some((prompt, completion, total));
+                    let (cache_read, cache_creation) =
+                        crate::protocol::codec::cache_fields_from_openai_usage(usage);
+                    return Some((prompt, completion, total, cache_read, cache_creation));
                 }
             }
         }

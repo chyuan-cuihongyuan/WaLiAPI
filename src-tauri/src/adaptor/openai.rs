@@ -88,13 +88,9 @@ impl Adaptor for OpenAIAdaptor {
         let status = resp.status().as_u16();
         let json: serde_json::Value = resp.json().await?;
 
-        let usage = json.get("usage").and_then(|u| {
-            Some(TokenUsage {
-                prompt_tokens: u.get("prompt_tokens")?.as_u64()?,
-                completion_tokens: u.get("completion_tokens")?.as_u64()?,
-                total_tokens: u.get("total_tokens")?.as_u64()?,
-            })
-        });
+        let usage = json
+            .get("usage")
+            .and_then(super::parse_openai_compatible_usage);
 
         Ok((status, json, usage))
     }

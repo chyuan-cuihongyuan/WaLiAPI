@@ -46,7 +46,7 @@ pub use error::{
 pub use ports::{DecodedResponse, NonStreamDecoder, StreamDecoder};
 pub use registry::CodecRegistry;
 #[allow(unused_imports)]
-pub use report::{ConversionContext, ConversionReport, Usage};
+pub use report::{cache_fields_from_openai_usage, ConversionContext, ConversionReport, Usage};
 #[allow(unused_imports)]
 pub use types::{CodecId, PreparedCodec, PreparedConversion, Protocol};
 // Auth transport still needs to assemble the provider's Responses SSE into a

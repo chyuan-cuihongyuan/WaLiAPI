@@ -1081,17 +1081,14 @@ impl Repository {
         // and merged (not overwriting) so login metadata like email/plan_type
         // survives.  The DTO surfaces it again as `invalidation_reason`.
         let merged_attributes: Option<String> = if reason.is_some() {
-            let row: Option<(String,)> = sqlx::query_as(
-                "SELECT attributes_json FROM auth_accounts WHERE id = ?",
-            )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT attributes_json FROM auth_accounts WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?;
             row.map(|(attributes_json,)| {
-                let mut value: serde_json::Value =
-                    serde_json::from_str(&attributes_json).unwrap_or(serde_json::Value::Object(
-                        serde_json::Map::new(),
-                    ));
+                let mut value: serde_json::Value = serde_json::from_str(&attributes_json)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 value["invalidation_reason"] = reason.unwrap().into();
                 serde_json::to_string(&value).unwrap_or(attributes_json)
             })
@@ -1185,8 +1182,8 @@ impl Repository {
         // The 11 T09 observability columns (migration 016) are bound as Option<> so
         // legacy callers using `..Default::default()` persist NULLs for them.
         sqlx::query(
-            "INSERT INTO request_logs (id, seq, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body, response_choices, risk_level, risk_score, risk_summary, security_action, sanitized, blocked_reason, trace_id, downstream_protocol, downstream_endpoint, route_group, upstream_protocol, upstream_endpoint, provider, codec_version, failure_class, identity_revision, client_cancelled, stream_committed, upstream_type)
-             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO request_logs (id, seq, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body, response_choices, risk_level, risk_score, risk_summary, security_action, sanitized, blocked_reason, trace_id, downstream_protocol, downstream_endpoint, route_group, upstream_protocol, upstream_endpoint, provider, codec_version, failure_class, identity_revision, client_cancelled, stream_committed, upstream_type)
+             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&log.id)
         .bind(&log.api_key_id)
@@ -1200,6 +1197,8 @@ impl Repository {
         .bind(log.prompt_tokens)
         .bind(log.completion_tokens)
         .bind(log.total_tokens)
+        .bind(&log.cache_read_tokens)
+        .bind(&log.cache_creation_tokens)
         .bind(log.duration_ms)
         .bind(&log.error_message)
         .bind(log.is_stream)
@@ -1555,7 +1554,9 @@ impl Repository {
             GROUP BY model
             ORDER BY total_tokens DESC
         "#;
-        sqlx::query_as::<_, ModelStats>(sql).fetch_all(&self.pool).await
+        sqlx::query_as::<_, ModelStats>(sql)
+            .fetch_all(&self.pool)
+            .await
     }
 
     /// 按小时粒度统计各模型 Token 趋势
@@ -1578,6 +1579,9 @@ impl Repository {
             GROUP BY hour, model
             ORDER BY hour ASC
         "#;
-        sqlx::query_as::<_, TokenTrendPoint>(sql).bind(&since).fetch_all(&self.pool).await
+        sqlx::query_as::<_, TokenTrendPoint>(sql)
+            .bind(&since)
+            .fetch_all(&self.pool)
+            .await
     }
 }

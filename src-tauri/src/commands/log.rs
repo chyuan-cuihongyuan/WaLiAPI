@@ -16,6 +16,10 @@ pub struct LogDto {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    /// 缓存命中读取（NULL = 上游未上报/本地估算，issue #51）。
+    pub cache_read_tokens: Option<i64>,
+    /// 缓存写入（Anthropic cache_creation 等；NULL = 未上报）。
+    pub cache_creation_tokens: Option<i64>,
     pub duration_ms: i64,
     pub error_message: Option<String>,
     pub is_stream: bool,
@@ -59,6 +63,8 @@ impl From<RequestLog> for LogDto {
             prompt_tokens: l.prompt_tokens,
             completion_tokens: l.completion_tokens,
             total_tokens: l.total_tokens,
+            cache_read_tokens: l.cache_read_tokens,
+            cache_creation_tokens: l.cache_creation_tokens,
             duration_ms: l.duration_ms,
             error_message: l.error_message,
             is_stream: l.is_stream == 1,

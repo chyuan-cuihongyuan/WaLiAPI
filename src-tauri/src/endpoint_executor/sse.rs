@@ -100,7 +100,14 @@ impl StreamPumpCore {
             })?;
             for event in &events {
                 output.extend_from_slice(event.as_bytes());
-                accumulate_from_sse_event(event, &mut accumulated_content, &mut accumulated_reasoning, &mut response_role, &mut finish_reason, &mut tool_calls_map);
+                accumulate_from_sse_event(
+                    event,
+                    &mut accumulated_content,
+                    &mut accumulated_reasoning,
+                    &mut response_role,
+                    &mut finish_reason,
+                    &mut tool_calls_map,
+                );
             }
         }
         Ok(Self {
@@ -176,6 +183,18 @@ impl StreamPumpCore {
             let prompt = usage.input_tokens as i64;
             let completion = usage.output_tokens as i64;
             (prompt, completion, prompt + completion)
+        })
+    }
+
+    /// 缓存注解（读取/写入）；codec Usage 无法区分「上报 0」与「未上报」，
+    /// 统一按 >0 视为已上报，否则 None。
+    pub fn cache_usage(&self) -> (Option<i64>, Option<i64>) {
+        self.decoder.usage().map_or((None, None), |usage| {
+            (
+                (usage.cache_read_input_tokens > 0).then_some(usage.cache_read_input_tokens as i64),
+                (usage.cache_creation_input_tokens > 0)
+                    .then_some(usage.cache_creation_input_tokens as i64),
+            )
         })
     }
 
@@ -266,19 +285,13 @@ fn accumulate_from_sse_event(
         if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
             for choice in choices {
                 // role (usually on the first delta)
-                if let Some(r) = choice
-                    .pointer("/delta/role")
-                    .and_then(|r| r.as_str())
-                {
+                if let Some(r) = choice.pointer("/delta/role").and_then(|r| r.as_str()) {
                     if role.is_none() {
                         *role = Some(r.to_string());
                     }
                 }
                 // content
-                if let Some(c) = choice
-                    .pointer("/delta/content")
-                    .and_then(|c| c.as_str())
-                {
+                if let Some(c) = choice.pointer("/delta/content").and_then(|c| c.as_str()) {
                     content.push_str(c);
                 }
                 // reasoning_content (DeepSeek / OpenAI o-series)
@@ -294,10 +307,7 @@ fn accumulate_from_sse_event(
                     .and_then(|tc| tc.as_array())
                 {
                     for tc in tcs {
-                        let idx = tc
-                            .get("index")
-                            .and_then(|i| i.as_i64())
-                            .unwrap_or(0);
+                        let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
                         let entry = tool_calls_map
                             .entry(idx)
                             .or_insert_with(|| serde_json::json!({"index": idx, "id": null, "type": "function", "function": {"name": "", "arguments": ""}}));
@@ -307,9 +317,15 @@ fn accumulate_from_sse_event(
                         if let Some(t) = tc.pointer("/function/name").and_then(|n| n.as_str()) {
                             entry["function"]["name"] = serde_json::json!(t);
                         }
-                        if let Some(args) = tc.pointer("/function/arguments").and_then(|a| a.as_str()) {
-                            if let Some(existing) = entry.pointer("/function/arguments").and_then(|a| a.as_str()) {
-                                entry["function"]["arguments"] = serde_json::json!(format!("{existing}{args}"));
+                        if let Some(args) =
+                            tc.pointer("/function/arguments").and_then(|a| a.as_str())
+                        {
+                            if let Some(existing) = entry
+                                .pointer("/function/arguments")
+                                .and_then(|a| a.as_str())
+                            {
+                                entry["function"]["arguments"] =
+                                    serde_json::json!(format!("{existing}{args}"));
                             } else {
                                 entry["function"]["arguments"] = serde_json::json!(args);
                             }
@@ -333,7 +349,9 @@ fn accumulate_from_sse_event(
                         if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                             let idx = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
                             // Use a hash of the id as the key for tool calls
-                            let key = idx.bytes().fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
+                            let key = idx
+                                .bytes()
+                                .fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
                             tool_calls_map.insert(key, serde_json::json!({
                                 "index": key,
                                 "id": idx,
@@ -360,8 +378,13 @@ fn accumulate_from_sse_event(
                                 // Append to the most recent tool call's arguments
                                 if let Some((&_k, _)) = tool_calls_map.last_key_value() {
                                     if let Some(entry) = tool_calls_map.get_mut(&_k) {
-                                        let existing = entry.pointer("/function/arguments").and_then(|a| a.as_str()).unwrap_or("").to_string();
-                                        entry["function"]["arguments"] = serde_json::json!(format!("{existing}{pj}"));
+                                        let existing = entry
+                                            .pointer("/function/arguments")
+                                            .and_then(|a| a.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        entry["function"]["arguments"] =
+                                            serde_json::json!(format!("{existing}{pj}"));
                                     }
                                 }
                             }

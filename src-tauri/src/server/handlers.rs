@@ -608,7 +608,9 @@ pub async fn handle_chat_completions(
 
 /// Parse token usage from an SSE chunk's data line.
 /// Looks for `usage` field in the JSON payload of `data: {...}` lines.
-fn parse_usage_from_chunk(text: &str) -> Option<(i64, i64, i64)> {
+/// Returns (prompt, completion, total, cache_read, cache_creation); cache
+/// annotations follow the issue #51 normalization (>0 = reported).
+fn parse_usage_from_chunk(text: &str) -> Option<(i64, i64, i64, Option<i64>, Option<i64>)> {
     for line in text.lines() {
         let trimmed = line.trim();
         if !trimmed.starts_with("data:") {
@@ -633,7 +635,9 @@ fn parse_usage_from_chunk(text: &str) -> Option<(i64, i64, i64)> {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 if total > 0 || prompt > 0 || completion > 0 {
-                    return Some((prompt, completion, total));
+                    let (cache_read, cache_creation) =
+                        crate::protocol::codec::cache_fields_from_openai_usage(usage);
+                    return Some((prompt, completion, total, cache_read, cache_creation));
                 }
             }
         }
@@ -649,16 +653,20 @@ fn accumulate_openai_chat_record(
     usage_prompt: &mut i64,
     usage_completion: &mut i64,
     usage_total: &mut i64,
+    usage_cache_read: &mut Option<i64>,
+    usage_cache_creation: &mut Option<i64>,
     accumulated_content: &mut String,
     accumulated_reasoning: &mut String,
     response_role: &mut Option<String>,
     finish_reason: &mut Option<String>,
     tool_calls_map: &mut std::collections::BTreeMap<i64, serde_json::Value>,
 ) {
-    if let Some((p, c, t)) = parse_usage_from_chunk(record) {
+    if let Some((p, c, t, cache_read, cache_creation)) = parse_usage_from_chunk(record) {
         *usage_prompt = p;
         *usage_completion = c;
         *usage_total = t;
+        *usage_cache_read = cache_read;
+        *usage_cache_creation = cache_creation;
     }
     // Accumulate delta content from SSE records
     for line in record.lines() {
@@ -872,9 +880,8 @@ async fn handle_stream(
                             // channels; the tail returns this status (an
                             // upstream 401/403 is masked to 502; last_error
                             // above keeps the real response text).
-                            last_error_status = Some(
-                                StatusCode::from_u16(downstream_status).unwrap_or(status),
-                            );
+                            last_error_status =
+                                Some(StatusCode::from_u16(downstream_status).unwrap_or(status));
                             break;
                         }
                     }
@@ -912,6 +919,8 @@ async fn handle_stream(
                     let mut usage_prompt: i64 = 0;
                     let mut usage_completion: i64 = 0;
                     let mut usage_total: i64 = 0;
+                    let mut usage_cache_read: Option<i64> = None;
+                    let mut usage_cache_creation: Option<i64> = None;
                     let mut had_error = false;
                     let mut accumulated_content = String::new();
                     let mut accumulated_reasoning = String::new();
@@ -950,6 +959,8 @@ async fn handle_stream(
                                                 &mut usage_prompt,
                                                 &mut usage_completion,
                                                 &mut usage_total,
+                                                &mut usage_cache_read,
+                                                &mut usage_cache_creation,
                                                 &mut accumulated_content,
                                                 &mut accumulated_reasoning,
                                                 &mut response_role,
@@ -996,6 +1007,8 @@ async fn handle_stream(
                                         &mut usage_prompt,
                                         &mut usage_completion,
                                         &mut usage_total,
+                                        &mut usage_cache_read,
+                                        &mut usage_cache_creation,
                                         &mut accumulated_content,
                                         &mut accumulated_reasoning,
                                         &mut response_role,
@@ -1073,6 +1086,8 @@ async fn handle_stream(
                         prompt_tokens: usage_prompt,
                         completion_tokens: usage_completion,
                         total_tokens: usage_total,
+                        cache_read_tokens: usage_cache_read,
+                        cache_creation_tokens: usage_cache_creation,
                         duration_ms: start.elapsed().as_millis() as i64,
                         error_message: if had_error { Some("Stream interrupted".to_string()) } else { None },
                         is_stream: 1,
@@ -1367,6 +1382,17 @@ struct StreamLogContext {
 
 const MAX_NATIVE_SSE_RECORD_BYTES: usize = 64 * 1024;
 
+/// usage 分解（issue #51 缓存命中统计）：input 保持窄值，缓存读取/写入
+/// 单独携带。Anthropic 三字段（input / cache_creation / cache_read）并列，
+/// 不再把 cache 求和混入 input（quota 与统计口径与 codec 路径统一）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct UsageParts {
+    input: i64,
+    output: i64,
+    cache_read: Option<i64>,
+    cache_creation: Option<i64>,
+}
+
 /// Incrementally extracts the cumulative usage fields from a native Anthropic
 /// SSE stream.  It deliberately retains at most one bounded record rather
 /// than every byte forwarded to the client.
@@ -1375,6 +1401,8 @@ struct NativeSseUsageParser {
     pending: Vec<u8>,
     input: Option<i64>,
     output: Option<i64>,
+    cache_read: Option<i64>,
+    cache_creation: Option<i64>,
     stopped: bool,
     malformed_or_oversized: bool,
 }
@@ -1413,7 +1441,14 @@ impl NativeSseUsageParser {
         };
         match value.get("type").and_then(|value| value.as_str()) {
             Some("message_start") => {
-                self.input = value.pointer("/message/usage").map(anthropic_input_usage)
+                if let Some(parts) = value
+                    .pointer("/message/usage")
+                    .and_then(anthropic_usage_parts)
+                {
+                    self.input = Some(parts.input);
+                    self.cache_read = parts.cache_read;
+                    self.cache_creation = parts.cache_creation;
+                }
             }
             Some("message_delta") => {
                 self.output = value
@@ -1425,9 +1460,13 @@ impl NativeSseUsageParser {
         }
     }
 
-    fn finish(self) -> Option<(i64, i64)> {
-        (!self.malformed_or_oversized && self.stopped)
-            .then(|| (self.input.unwrap_or(0), self.output.unwrap_or(0)))
+    fn finish(self) -> Option<UsageParts> {
+        (!self.malformed_or_oversized && self.stopped).then(|| UsageParts {
+            input: self.input.unwrap_or(0),
+            output: self.output.unwrap_or(0),
+            cache_read: self.cache_read,
+            cache_creation: self.cache_creation,
+        })
     }
 }
 
@@ -1447,37 +1486,37 @@ fn sse_record_end(input: &[u8]) -> Option<usize> {
     }
 }
 
-fn native_usage(bytes: &[u8], is_sse: bool) -> Option<(i64, i64)> {
+fn native_usage(bytes: &[u8], is_sse: bool) -> Option<UsageParts> {
     let text = std::str::from_utf8(bytes).ok()?;
     if !is_sse {
         let value: serde_json::Value = serde_json::from_str(text).ok()?;
         let usage = value.get("usage")?;
-        return Some((
-            anthropic_input_usage(usage),
-            usage
-                .get("output_tokens")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0),
-        ));
+        return anthropic_usage_parts(usage);
     }
     let mut parser = NativeSseUsageParser::default();
     parser.feed(text.as_bytes());
     parser.finish()
 }
 
-fn anthropic_input_usage(usage: &serde_json::Value) -> i64 {
-    usage
-        .get("input_tokens")
-        .and_then(|value| value.as_i64())
-        .unwrap_or(0)
-        + usage
-            .get("cache_creation_input_tokens")
+/// 解析 Anthropic 原生 usage：input_tokens 保持窄值，cache 读取/写入单独
+/// 提取（>0 视为已上报）。
+fn anthropic_usage_parts(usage: &serde_json::Value) -> Option<UsageParts> {
+    let input = usage.get("input_tokens").and_then(|value| value.as_i64())?;
+    Some(UsageParts {
+        input,
+        output: usage
+            .get("output_tokens")
             .and_then(|value| value.as_i64())
-            .unwrap_or(0)
-        + usage
+            .unwrap_or(0),
+        cache_read: usage
             .get("cache_read_input_tokens")
             .and_then(|value| value.as_i64())
-            .unwrap_or(0)
+            .filter(|v| *v > 0),
+        cache_creation: usage
+            .get("cache_creation_input_tokens")
+            .and_then(|value| value.as_i64())
+            .filter(|v| *v > 0),
+    })
 }
 
 fn native_response(response: reqwest::Response, accounting: Option<StreamLogContext>) -> Response {
@@ -1619,12 +1658,15 @@ async fn record_anthropic_outcome(
     is_stream: bool,
     status_code: i64,
     error_message: Option<String>,
-    usage: Option<(i64, i64)>,
+    usage: Option<UsageParts>,
 ) {
-    let (prompt_tokens, completion_tokens) = usage.unwrap_or((0, 0));
+    let UsageParts {
+        input: mut prompt_tokens,
+        output: mut completion_tokens,
+        cache_read,
+        cache_creation,
+    } = usage.unwrap_or_default();
     let mut total_tokens = prompt_tokens + completion_tokens;
-    let mut prompt_tokens = prompt_tokens;
-    let mut completion_tokens = completion_tokens;
 
     // Fallback: estimate tokens when upstream didn't return usage.
     if total_tokens == 0
@@ -1659,6 +1701,8 @@ async fn record_anthropic_outcome(
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
         duration_ms: 0,
         error_message,
         is_stream: i64::from(is_stream),
@@ -1711,7 +1755,7 @@ async fn record_anthropic_success(
     request: &serde_json::Value,
     security_result: &security::SecurityScanResult,
     is_stream: bool,
-    usage: Option<(i64, i64)>,
+    usage: Option<UsageParts>,
 ) {
     record_anthropic_outcome(
         repo,
@@ -2025,14 +2069,22 @@ pub async fn handle_messages(
                 };
                 return match protocol::openai_to_anthropic(&body, &model) {
                     Ok(value) => {
-                        let usage = Some((
-                            body.pointer("/usage/prompt_tokens")
+                        let (cache_read, cache_creation) = body
+                            .get("usage")
+                            .map(crate::protocol::codec::cache_fields_from_openai_usage)
+                            .unwrap_or((None, None));
+                        let usage = Some(UsageParts {
+                            input: body
+                                .pointer("/usage/prompt_tokens")
                                 .and_then(|value| value.as_i64())
                                 .unwrap_or(0),
-                            body.pointer("/usage/completion_tokens")
+                            output: body
+                                .pointer("/usage/completion_tokens")
                                 .and_then(|value| value.as_i64())
                                 .unwrap_or(0),
-                        ));
+                            cache_read,
+                            cache_creation,
+                        });
                         record_anthropic_success(
                             repo.clone(),
                             &key,
@@ -2205,7 +2257,8 @@ fn openai_sse_response(
             match state.finish(&model, &message_id) {
                 Ok(events) => {
                     for event in events { yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes())); }
-                    let usage = state.usage();
+                    let (input, output, cache_read, cache_creation) = state.usage();
+                    let usage = UsageParts { input, output, cache_read, cache_creation };
                     record_anthropic_success(accounting.repo, &accounting.key, &accounting.channel, &accounting.model, None, &accounting.request, &accounting.security, true, Some(usage)).await;
                 },
                 Err(message) => {
@@ -2608,11 +2661,17 @@ fn process_openai_record_for_responses(
     usage_prompt: &mut i64,
     usage_completion: &mut i64,
     usage_total: &mut i64,
+    usage_cache_read: &mut Option<i64>,
+    usage_cache_creation: &mut Option<i64>,
 ) -> Vec<String> {
-    if let Some((p, c, t)) = crate::protocol::responses::parse_usage_from_sse_chunk(record) {
+    if let Some((p, c, t, cache_read, cache_creation)) =
+        crate::protocol::responses::parse_usage_from_sse_chunk(record)
+    {
         *usage_prompt = p;
         *usage_completion = c;
         *usage_total = t;
+        *usage_cache_read = cache_read;
+        *usage_cache_creation = cache_creation;
     }
     // Accumulate content for logging
     for line in record.lines() {
@@ -2780,9 +2839,8 @@ async fn handle_responses_stream(
                             // channels; the tail returns this status (an
                             // upstream 401/403 is masked to 502; last_error
                             // above keeps the real response text).
-                            last_error_status = Some(
-                                StatusCode::from_u16(downstream_status).unwrap_or(status),
-                            );
+                            last_error_status =
+                                Some(StatusCode::from_u16(downstream_status).unwrap_or(status));
                             break;
                         }
                     }
@@ -2821,6 +2879,8 @@ async fn handle_responses_stream(
                     let mut usage_prompt: i64 = 0;
                     let mut usage_completion: i64 = 0;
                     let mut usage_total: i64 = 0;
+                    let mut usage_cache_read: Option<i64> = None;
+                    let mut usage_cache_creation: Option<i64> = None;
                     let mut had_error = false;
                     let mut stream_state = crate::protocol::responses::StreamState::default();
                     let mut accumulated_content = String::new();
@@ -2857,6 +2917,8 @@ async fn handle_responses_stream(
                                                     &mut usage_prompt,
                                                     &mut usage_completion,
                                                     &mut usage_total,
+                                                    &mut usage_cache_read,
+                                                    &mut usage_cache_creation,
                                                 );
                                                 for event in events {
                                                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes()));
@@ -2906,6 +2968,8 @@ async fn handle_responses_stream(
                                     &mut usage_prompt,
                                     &mut usage_completion,
                                     &mut usage_total,
+                                    &mut usage_cache_read,
+                                    &mut usage_cache_creation,
                                 );
                                 for event in events {
                                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes()));
@@ -2978,6 +3042,8 @@ async fn handle_responses_stream(
                         prompt_tokens: usage_prompt,
                         completion_tokens: usage_completion,
                         total_tokens: usage_total,
+                        cache_read_tokens: usage_cache_read,
+                        cache_creation_tokens: usage_cache_creation,
                         duration_ms: start.elapsed().as_millis() as i64,
                         error_message: if had_error { Some("Stream interrupted".to_string()) } else { None },
                         is_stream: 1,
@@ -3803,17 +3869,39 @@ mod anthropic_handler_tests {
     fn reads_native_message_and_sse_usage_without_changing_payload() {
         assert_eq!(
             native_usage(br#"{"usage":{"input_tokens":12,"output_tokens":4}}"#, false),
-            Some((12, 4))
+            Some(UsageParts {
+                input: 12,
+                output: 4,
+                cache_read: None,
+                cache_creation: None
+            })
         );
         let sse = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
-        assert_eq!(native_usage(sse, true), Some((17, 4)));
+        // input 保持窄值：cache 读取/写入单独分列，不再求和混入 input（issue #51）。
+        assert_eq!(
+            native_usage(sse, true),
+            Some(UsageParts {
+                input: 12,
+                output: 4,
+                cache_read: Some(3),
+                cache_creation: Some(2)
+            })
+        );
         assert_eq!(native_usage(&sse[..sse.len() - 48], true), None);
 
         let mut incremental = NativeSseUsageParser::default();
         for piece in sse.chunks(7) {
             incremental.feed(piece);
         }
-        assert_eq!(incremental.finish(), Some((17, 4)));
+        assert_eq!(
+            incremental.finish(),
+            Some(UsageParts {
+                input: 12,
+                output: 4,
+                cache_read: Some(3),
+                cache_creation: Some(2)
+            })
+        );
         let mut oversized = NativeSseUsageParser::default();
         oversized.feed(&vec![b'x'; MAX_NATIVE_SSE_RECORD_BYTES + 1]);
         assert!(oversized.finish().is_none());

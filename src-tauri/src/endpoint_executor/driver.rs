@@ -364,9 +364,12 @@ async fn write_non_stream_log(
             u.prompt_tokens as i64,
             u.completion_tokens as i64,
             u.total_tokens as i64,
+            u.cache_read_tokens.map(|v| v as i64),
+            u.cache_creation_tokens.map(|v| v as i64),
         )
     });
-    let (mut prompt, mut completion, mut total) = usage.unwrap_or((0, 0, 0));
+    let (mut prompt, mut completion, mut total, cache_read_tokens, cache_creation_tokens) =
+        usage.unwrap_or((0, 0, 0, None, None));
 
     // Fallback: estimate tokens locally when upstream didn't return usage.
     // Only estimate for successful (2xx) responses — errors have no real content.
@@ -415,16 +418,19 @@ async fn write_non_stream_log(
         }
         // OpenAI Responses API: synthesize from `output`
         else if let Some(output) = execution.body.get("output").and_then(|o| o.as_array()) {
-            let choices: Vec<serde_json::Value> = output.iter().map(|item| {
-                serde_json::json!({
-                    "index": item.get("index").unwrap_or(&serde_json::json!(0)),
-                    "message": {
-                        "role": "assistant",
-                        "content": item.get("content"),
-                    },
-                    "finish_reason": "stop",
+            let choices: Vec<serde_json::Value> = output
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "index": item.get("index").unwrap_or(&serde_json::json!(0)),
+                        "message": {
+                            "role": "assistant",
+                            "content": item.get("content"),
+                        },
+                        "finish_reason": "stop",
+                    })
                 })
-            }).collect();
+                .collect();
             serde_json::to_string(&choices).ok()
         } else {
             None
@@ -447,6 +453,8 @@ async fn write_non_stream_log(
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
+        cache_read_tokens,
+        cache_creation_tokens,
         duration_ms: duration_ms as i64,
         error_message: last_failure.map(|f| f.message.clone()),
         is_stream: 0,
@@ -561,6 +569,8 @@ async fn write_stream_precommit_failure_log_with_meta(
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
         duration_ms: 0,
         error_message: Some(message.to_string()),
         is_stream: i64::from(is_stream),
@@ -1079,6 +1089,8 @@ impl StreamLogFinalizer {
         usage_prompt: i64,
         usage_completion: i64,
         usage_total: i64,
+        usage_cache_read: Option<i64>,
+        usage_cache_creation: Option<i64>,
         response_choices: Option<String>,
     ) {
         let duration_ms = self.started.elapsed().as_millis() as i64;
@@ -1104,6 +1116,8 @@ impl StreamLogFinalizer {
             prompt_tokens: usage_prompt,
             completion_tokens: usage_completion,
             total_tokens: usage_total,
+            cache_read_tokens: usage_cache_read,
+            cache_creation_tokens: usage_cache_creation,
             duration_ms,
             error_message: error_message.map(|s| s.to_string()),
             is_stream: 1,
@@ -1178,8 +1192,18 @@ impl Drop for StreamLogFinalizer {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let f = self.clone();
             tokio::spawn(async move {
-                f.write(true, false, Some("client_cancelled"), 0, 0, 0, None)
-                    .await;
+                f.write(
+                    true,
+                    false,
+                    Some("client_cancelled"),
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
             });
         }
     }
@@ -1313,6 +1337,7 @@ fn stream_response_body(
         }
 
         let (mut usage_prompt, mut usage_completion, mut usage_total) = pump.usage();
+        let (usage_cache_read, usage_cache_creation) = pump.cache_usage();
 
         // Fallback: estimate tokens locally when upstream didn't return usage.
         // Only estimate for successful streams (no error).
@@ -1337,7 +1362,7 @@ fn stream_response_body(
             None
         };
         finalizer
-            .write(false, had_error, error_message.as_deref(), usage_prompt, usage_completion, usage_total, response_choices)
+            .write(false, had_error, error_message.as_deref(), usage_prompt, usage_completion, usage_total, usage_cache_read, usage_cache_creation, response_choices)
             .await;
     }
 }

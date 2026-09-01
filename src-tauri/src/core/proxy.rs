@@ -307,7 +307,7 @@ pub async fn handle_request(
                     }
                 }
 
-                let (prompt_tokens, completion_tokens, total_tokens) = {
+                let (prompt_tokens, completion_tokens, total_tokens, cache_read, cache_creation) = {
                     let (p, c, t) = (
                         usage.as_ref().map(|u| u.prompt_tokens as i64).unwrap_or(0),
                         usage
@@ -315,6 +315,14 @@ pub async fn handle_request(
                             .map(|u| u.completion_tokens as i64)
                             .unwrap_or(0),
                         usage.as_ref().map(|u| u.total_tokens as i64).unwrap_or(0),
+                    );
+                    let (cr, cc) = (
+                        usage
+                            .as_ref()
+                            .and_then(|u| u.cache_read_tokens.map(|v| v as i64)),
+                        usage
+                            .as_ref()
+                            .and_then(|u| u.cache_creation_tokens.map(|v| v as i64)),
                     );
                     // Fallback: estimate tokens when upstream didn't return usage.
                     if t == 0 && p == 0 && c == 0 && status >= 200 && status < 300 {
@@ -329,12 +337,12 @@ pub async fn handle_request(
                         );
                         if et > 0 {
                             eprintln!("[INFO] token usage estimated (proxy.rs): prompt={}, completion={}, total={}", ep, ec, et);
-                            (ep, ec, et)
+                            (ep, ec, et, None, None)
                         } else {
-                            (p, c, t)
+                            (p, c, t, cr, cc)
                         }
                     } else {
-                        (p, c, t)
+                        (p, c, t, cr, cc)
                     }
                 };
 
@@ -352,6 +360,8 @@ pub async fn handle_request(
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
+                    cache_read_tokens: cache_read,
+                    cache_creation_tokens: cache_creation,
                     duration_ms: duration_ms as i64,
                     error_message: None,
                     is_stream: if is_stream { 1 } else { 0 },

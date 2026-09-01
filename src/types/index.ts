@@ -164,6 +164,10 @@ export interface RequestLog {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** 缓存命中读取的输入 token（null = 上游未上报/本地估算）。 */
+  cache_read_tokens: number | null;
+  /** 缓存写入的输入 token（Anthropic cache_creation 等；null = 未上报）。 */
+  cache_creation_tokens: number | null;
   duration_ms: number;
   error_message: string | null;
   is_stream: boolean;

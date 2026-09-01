@@ -139,13 +139,11 @@ impl Adaptor for ClaudeAdaptor {
 
         // Convert Claude response to OpenAI format
         let openai_response = convert_claude_to_openai(&claude_json, model);
-        let usage = openai_response.get("usage").and_then(|u| {
-            Some(TokenUsage {
-                prompt_tokens: u.get("prompt_tokens")?.as_u64()?,
-                completion_tokens: u.get("completion_tokens")?.as_u64()?,
-                total_tokens: u.get("total_tokens")?.as_u64()?,
-            })
-        });
+        // usage（含缓存读/写）直接从 Anthropic 原生 usage 解析，
+        // input_tokens 保持窄值，不再把 cache 求和混入 prompt。
+        let usage = claude_json
+            .get("usage")
+            .and_then(super::parse_anthropic_usage);
 
         Ok((status, openai_response, usage))
     }

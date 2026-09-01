@@ -90,13 +90,8 @@ impl Adaptor for GeminiAdaptor {
         let gemini_json: serde_json::Value = resp.json().await?;
 
         let openai_response = convert_gemini_to_openai(&gemini_json, model);
-        let usage = openai_response.get("usage").and_then(|u| {
-            Some(TokenUsage {
-                prompt_tokens: u.get("prompt_tokens")?.as_u64()?,
-                completion_tokens: u.get("completion_tokens")?.as_u64()?,
-                total_tokens: u.get("total_tokens")?.as_u64()?,
-            })
-        });
+        // cachedContentTokenCount 是 promptTokenCount 的子集，归一化为缓存读取。
+        let usage = super::parse_gemini_usage(&gemini_json);
 
         Ok((status, openai_response, usage))
     }

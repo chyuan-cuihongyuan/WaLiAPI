@@ -2,6 +2,26 @@
 
 use super::types::CodecId;
 use serde::Serialize;
+use serde_json::Value;
+
+/// 从 OpenAI 兼容 usage JSON 提取缓存注解（issue #51 缓存命中统计）。
+/// 归一化口径：`prompt_tokens_details.cached_tokens`（OpenAI）、
+/// `prompt_cache_hit_tokens`（DeepSeek）、`cache_read_input_tokens`
+/// （Anthropic 兼容层）都视为缓存读取；`cache_creation_input_tokens`
+/// 视为缓存写入。读取/写入均以 >0 视为已上报（0 与缺失对统计等价）。
+pub fn cache_fields_from_openai_usage(u: &Value) -> (Option<i64>, Option<i64>) {
+    let read = u
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_i64)
+        .or_else(|| u.get("prompt_cache_hit_tokens").and_then(Value::as_i64))
+        .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_i64))
+        .filter(|v| *v > 0);
+    let creation = u
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_i64)
+        .filter(|v| *v > 0);
+    (read, creation)
+}
 
 /// What the codec did to the request/response it converted.
 /// Token usage observed from a real upstream response.

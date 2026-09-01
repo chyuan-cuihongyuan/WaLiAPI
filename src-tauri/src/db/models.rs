@@ -357,6 +357,10 @@ pub struct RequestLog {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    /// 缓存命中读取的输入 token（migration 026；NULL = 上游未上报/本地估算）。
+    pub cache_read_tokens: Option<i64>,
+    /// 缓存写入的输入 token（Anthropic cache_creation 等；NULL = 未上报）。
+    pub cache_creation_tokens: Option<i64>,
     pub duration_ms: i64,
     pub error_message: Option<String>,
     pub is_stream: i64,
@@ -404,6 +408,8 @@ impl Default for RequestLog {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
             duration_ms: 0,
             error_message: None,
             is_stream: 0,

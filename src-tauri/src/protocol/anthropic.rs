@@ -15,6 +15,9 @@ pub struct AnthropicStreamState {
     finish_reason: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    /// 缓存命中注解（issue #51）：None = 上游未上报。
+    cache_read_tokens: Option<u64>,
+    cache_creation_tokens: Option<u64>,
     next_content_index: usize,
     open_text: Option<usize>,
     open_thinking: Option<usize>,
@@ -35,8 +38,13 @@ fn event(name: &str, value: Value) -> String {
 }
 
 impl AnthropicStreamState {
-    pub fn usage(&self) -> (i64, i64) {
-        (self.input_tokens as i64, self.output_tokens as i64)
+    pub fn usage(&self) -> (i64, i64, Option<i64>, Option<i64>) {
+        (
+            self.input_tokens as i64,
+            self.output_tokens as i64,
+            self.cache_read_tokens.map(|v| v as i64),
+            self.cache_creation_tokens.map(|v| v as i64),
+        )
     }
     /// Feed arbitrary network bytes.  A TCP chunk may split a UTF-8 codepoint,
     /// an SSE field, or the CRLF event delimiter, so bytes are retained until a
@@ -161,6 +169,14 @@ impl AnthropicStreamState {
                 .get("completion_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(self.output_tokens);
+            let (cache_read, cache_creation) =
+                crate::protocol::codec::cache_fields_from_openai_usage(usage);
+            if cache_read.is_some() {
+                self.cache_read_tokens = cache_read.map(|v| v as u64);
+            }
+            if cache_creation.is_some() {
+                self.cache_creation_tokens = cache_creation.map(|v| v as u64);
+            }
         }
     }
 
@@ -257,7 +273,7 @@ impl AnthropicStreamState {
             None if !self.tools.is_empty() => "tool_use",
             _ => "end_turn",
         };
-        events.push(event("message_delta", serde_json::json!({"type":"message_delta", "delta":{"stop_reason":stop_reason, "stop_sequence":null}, "usage":{"input_tokens":self.input_tokens, "output_tokens":self.output_tokens}})));
+        events.push(event("message_delta", serde_json::json!({"type":"message_delta", "delta":{"stop_reason":stop_reason, "stop_sequence":null}, "usage":{"input_tokens":self.input_tokens, "output_tokens":self.output_tokens, "cache_read_input_tokens":self.cache_read_tokens.unwrap_or(0), "cache_creation_input_tokens":self.cache_creation_tokens.unwrap_or(0)}})));
         events.push(event(
             "message_stop",
             serde_json::json!({"type":"message_stop"}),

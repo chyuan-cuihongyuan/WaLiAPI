@@ -692,6 +692,12 @@ fn convert_gemini_to_chat(gemini_json: &Value, model: &str) -> Value {
         .pointer("/usageMetadata/candidatesTokenCount")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    // cachedContentTokenCount 是 promptTokenCount 的子集；折成 OpenAI 的
+    // cached_tokens 形态，让下游 usage 解析统一拿到缓存读取。
+    let cached_tokens = gemini_json
+        .pointer("/usageMetadata/cachedContentTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
 
     serde_json::json!({
         "id": format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
@@ -707,6 +713,7 @@ fn convert_gemini_to_chat(gemini_json: &Value, model: &str) -> Value {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "prompt_tokens_details": { "cached_tokens": cached_tokens },
         }
     })
 }
@@ -935,6 +942,11 @@ fn decode_non_stream(
             prompt_tokens: usage.input_tokens,
             completion_tokens: usage.output_tokens,
             total_tokens: usage.input_tokens + usage.output_tokens,
+            // codec Usage 无法区分「上报 0」与「未上报」，统一按 >0 视为已上报。
+            cache_read_tokens: (usage.cache_read_input_tokens > 0)
+                .then_some(usage.cache_read_input_tokens),
+            cache_creation_tokens: (usage.cache_creation_input_tokens > 0)
+                .then_some(usage.cache_creation_input_tokens),
         }),
     ))
 }
@@ -948,10 +960,21 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        // input_tokens 保持窄值；cache 读取/写入单独落列（Anthropic 三字段并列）。
+        let cache_read = usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0);
+        let cache_creation = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0);
         return Some(TokenUsage {
             prompt_tokens: input,
             completion_tokens: output,
             total_tokens: input + output,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_creation,
         });
     }
     if endpoint == "responses" {
@@ -964,10 +987,21 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
             .and_then(Value::as_u64)
             .or_else(|| usage.get("completion_tokens").and_then(Value::as_u64))
             .unwrap_or(0);
+        let cache_read = usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+            .filter(|v| *v > 0);
+        let cache_creation = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0);
         return Some(TokenUsage {
             prompt_tokens: input,
             completion_tokens: output,
             total_tokens: input + output,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_creation,
         });
     }
     let prompt = usage.get("prompt_tokens").and_then(Value::as_u64)?;
@@ -979,10 +1013,14 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
         .get("total_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(prompt + completion);
+    let (cache_read, cache_creation) =
+        crate::protocol::codec::cache_fields_from_openai_usage(usage);
     Some(TokenUsage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
+        cache_read_tokens: cache_read.map(|v| v as u64),
+        cache_creation_tokens: cache_creation.map(|v| v as u64),
     })
 }
 

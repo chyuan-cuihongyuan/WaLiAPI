@@ -52,6 +52,8 @@ fn full_log(channel_id: Option<&str>, channel_name: Option<&str>) -> models::Req
         prompt_tokens: 10,
         completion_tokens: 5,
         total_tokens: 15,
+        cache_read_tokens: Some(6),
+        cache_creation_tokens: Some(2),
         duration_ms: 120,
         error_message: None,
         is_stream: 1,
@@ -337,4 +339,48 @@ async fn request_log_sanitized_log_body_is_what_gets_persisted() {
     assert!(serde_json::to_string(&raw)
         .unwrap()
         .contains("abcdefghijklmnopqrstuvwx"));
+}
+
+// --- issue #51 cache-hit statistics (migration 026) ---
+
+#[tokio::test]
+async fn request_log_migration_026_adds_nullable_cache_columns() {
+    let pool = fresh_db().await;
+    for col in ["cache_read_tokens", "cache_creation_tokens"] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('request_logs') WHERE name = ?",
+        )
+        .bind(col)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "column {col} must exist from migration 026");
+    }
+    // Legacy callers (Default) persist NULLs for both cache columns.
+    let repo = Repository::new(pool);
+    let legacy = models::RequestLog {
+        id: waliapi_lib::utils::id::new_id(),
+        api_key_name: Some("legacy".into()),
+        ..Default::default()
+    };
+    repo.create_log(&legacy).await.expect("legacy insert");
+    let stored = repo.get_log(&legacy.id).await.expect("legacy read");
+    assert_eq!(stored.cache_read_tokens, None);
+    assert_eq!(stored.cache_creation_tokens, None);
+}
+
+#[tokio::test]
+async fn request_log_create_log_persists_cache_tokens_and_log_dto_maps_them() {
+    let pool = fresh_db().await;
+    let repo = Repository::new(pool);
+    let log = full_log(Some("ch-1"), Some("cache-channel"));
+    repo.create_log(&log).await.expect("create_log");
+
+    let stored = repo.get_log(&log.id).await.expect("get_log");
+    assert_eq!(stored.cache_read_tokens, Some(6));
+    assert_eq!(stored.cache_creation_tokens, Some(2));
+
+    let dto: waliapi_lib::commands::log::LogDto = stored.into();
+    assert_eq!(dto.cache_read_tokens, Some(6));
+    assert_eq!(dto.cache_creation_tokens, Some(2));
 }
