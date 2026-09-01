@@ -66,7 +66,7 @@ impl Adaptor for DeepSeekAdaptor {
             .send()
             .await?;
         let status = resp.status().as_u16();
-        let json: serde_json::Value = resp.json().await?;;
+        let json: serde_json::Value = resp.json().await?;
         let usage = json.get("usage").and_then(|u| {
             Some(TokenUsage {
                 prompt_tokens: u.get("prompt_tokens")?.as_u64()?,

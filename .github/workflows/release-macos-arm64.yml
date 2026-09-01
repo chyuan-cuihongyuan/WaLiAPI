@@ -83,6 +83,24 @@ jobs:
         shell: bash
         run: bash scripts/fetch-pdfium.sh
 
+      # pdfium dylib 必须用 Developer ID 签名并带安全时间戳，
+      # 否则 macOS 公证（notarization）会因未签名的二进制资源而失败。
+      - name: sign pdfium dylib
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          dylib="src-tauri/resources/pdfium/libpdfium.dylib"
+          if [[ ! -f "$dylib" ]]; then
+            echo "libpdfium.dylib 不存在，跳过签名" >&2; exit 1
+          fi
+          codesign --force --options runtime \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --timestamp \
+            "$dylib"
+          codesign --verify --verbose=2 "$dylib"
+
       - name: build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:

@@ -72,7 +72,6 @@ async fn select_channel_key(channel: &Channel, repo: &Arc<Repository>) -> Channe
     if total <= 0 {
         return channel.clone();
     }
-    let mut rng = rand::rng();
     let mut pick = rand::rng().random_range(0..total);
     let mut chosen = &pool[0].0;
     for (key, w) in &pool {
@@ -82,7 +81,6 @@ async fn select_channel_key(channel: &Channel, repo: &Arc<Repository>) -> Channe
             break;
         }
     }
-    let _ = rng; // suppress unused warning
     let mut ch = channel.clone();
     ch.api_key = chosen.clone();
     ch
