@@ -171,7 +171,22 @@ impl IdentityStreamDecoder {
         {
             merged.cache_creation_input_tokens = cache_creation;
         }
-        if let Some(cache_read) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
+        if let Some(cache_read) = usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            })
+        {
             merged.cache_read_input_tokens = cache_read;
         }
         merged.usage_unknown = !(self.saw_input_usage && self.saw_output_usage);
@@ -265,6 +280,18 @@ pub(crate) fn parse_usage(protocol: Protocol, body: &Value) -> Option<Usage> {
         cache_read_input_tokens: usage
             .get("cache_read_input_tokens")
             .and_then(Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            })
             .unwrap_or_default(),
         usage_unknown: input.is_none() || output.is_none(),
     })

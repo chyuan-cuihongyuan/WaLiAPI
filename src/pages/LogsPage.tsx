@@ -552,9 +552,14 @@ function LogRow({
           </div>
         </td>
         <td className="px-3 py-2.5 text-right text-xs">
-          <span title={`Prompt: ${log.prompt_tokens}, Completion: ${log.completion_tokens}`}>
+          <span title={`Prompt: ${log.prompt_tokens}, Completion: ${log.completion_tokens}, Cached: ${log.cached_tokens ?? 0}`}>
             {log.total_tokens > 0 ? formatNumber(log.total_tokens) : <span className="text-muted-foreground/50">0</span>}
           </span>
+          {log.cached_tokens > 0 && (
+            <div className="text-[10px] text-muted-foreground/70 mt-0.5">
+              缓存 {formatNumber(log.cached_tokens)} · {log.prompt_tokens > 0 ? Math.round((log.cached_tokens / log.prompt_tokens) * 100) : 0}%
+            </div>
+          )}
         </td>
         <td className="px-3 py-2.5 text-right text-xs text-muted-foreground">{formatDuration(log.duration_ms)}</td>
         <td className="px-3 py-2.5">
@@ -729,6 +734,7 @@ function LogDetail({ log }: { log: RequestLog }) {
           <div className="mt-1.5 text-sm font-semibold text-slate-900">{formatNumber(log.total_tokens)}</div>
           <div className="mt-0.5 text-[11px] text-slate-400">
             输入 {log.prompt_tokens} · 输出 {log.completion_tokens}
+            {log.cached_tokens > 0 && ` · 缓存 ${log.cached_tokens} (${log.prompt_tokens > 0 ? Math.round((log.cached_tokens / log.prompt_tokens) * 100) : 0}%)`}
           </div>
         </div>
 

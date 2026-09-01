@@ -15,6 +15,7 @@ pub struct AnthropicStreamState {
     finish_reason: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    cached_tokens: u64,
     next_content_index: usize,
     open_text: Option<usize>,
     open_thinking: Option<usize>,
@@ -35,8 +36,8 @@ fn event(name: &str, value: Value) -> String {
 }
 
 impl AnthropicStreamState {
-    pub fn usage(&self) -> (i64, i64) {
-        (self.input_tokens as i64, self.output_tokens as i64)
+    pub fn usage(&self) -> (i64, i64, i64) {
+        (self.input_tokens as i64, self.output_tokens as i64, self.cached_tokens as i64)
     }
     /// Feed arbitrary network bytes.  A TCP chunk may split a UTF-8 codepoint,
     /// an SSE field, or the CRLF event delimiter, so bytes are retained until a
@@ -161,6 +162,10 @@ impl AnthropicStreamState {
                 .get("completion_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(self.output_tokens);
+            self.cached_tokens = usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(self.cached_tokens);
         }
     }
 

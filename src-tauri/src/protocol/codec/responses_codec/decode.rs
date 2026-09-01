@@ -156,9 +156,15 @@ pub fn usage_from_responses(response: &Value) -> Usage {
     let output = response
         .pointer("/usage/output_tokens")
         .and_then(Value::as_u64);
+    let cached = response
+        .pointer("/usage/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| response.pointer("/usage/cache_read_input_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
     Usage {
         input_tokens: input.unwrap_or(0),
         output_tokens: output.unwrap_or(0),
+        cache_read_input_tokens: cached,
         usage_unknown: input.is_none() || output.is_none(),
         ..Usage::default()
     }

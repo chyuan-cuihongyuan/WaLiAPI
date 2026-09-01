@@ -386,6 +386,8 @@ pub struct RequestLog {
     /// `channel` for legacy API channels and `auth_account` for provider
     /// accounts. The database default makes upgraded historical rows channel.
     pub upstream_type: String,
+    /// Prompt tokens served from upstream cache (migration 026).
+    pub cached_tokens: i64,
 }
 
 impl Default for RequestLog {
@@ -430,6 +432,7 @@ impl Default for RequestLog {
             client_cancelled: None,
             stream_committed: None,
             upstream_type: "channel".into(),
+            cached_tokens: 0,
         }
     }
 }

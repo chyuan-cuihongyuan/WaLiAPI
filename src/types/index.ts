@@ -164,6 +164,7 @@ export interface RequestLog {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  cached_tokens: number;
   duration_ms: number;
   error_message: string | null;
   is_stream: boolean;

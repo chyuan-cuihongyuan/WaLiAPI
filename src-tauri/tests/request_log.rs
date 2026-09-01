@@ -52,6 +52,7 @@ fn full_log(channel_id: Option<&str>, channel_name: Option<&str>) -> models::Req
         prompt_tokens: 10,
         completion_tokens: 5,
         total_tokens: 15,
+        cached_tokens: 0,
         duration_ms: 120,
         error_message: None,
         is_stream: 1,

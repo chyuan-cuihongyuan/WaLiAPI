@@ -85,6 +85,7 @@ fn usage_from_messages(value: &Value) -> Usage {
         cache_read_input_tokens: value
             .pointer("/usage/cache_read_input_tokens")
             .and_then(Value::as_u64)
+            .or_else(|| value.pointer("/usage/input_tokens_details/cached_tokens").and_then(Value::as_u64))
             .unwrap_or(0),
         usage_unknown: input.is_none() || output.is_none(),
     }
@@ -103,7 +104,11 @@ pub(super) fn merge_usage(usage: &mut Usage, value: &Value) {
     {
         usage.cache_creation_input_tokens = cache_creation;
     }
-    if let Some(cache_read) = value.get("cache_read_input_tokens").and_then(Value::as_u64) {
+    if let Some(cache_read) = value
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| value.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_u64))
+    {
         usage.cache_read_input_tokens = cache_read;
     }
     usage.usage_unknown =

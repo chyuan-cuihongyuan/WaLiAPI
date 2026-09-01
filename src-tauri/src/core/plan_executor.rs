@@ -482,6 +482,7 @@ mod tests {
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,
+                cached_tokens: 0,
             };
             let um = attempt.upstream_model.clone();
             async move {

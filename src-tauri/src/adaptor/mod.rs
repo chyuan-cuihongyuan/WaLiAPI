@@ -60,6 +60,8 @@ pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Prompt tokens served from upstream cache.
+    pub cached_tokens: u64,
 }
 
 #[async_trait]

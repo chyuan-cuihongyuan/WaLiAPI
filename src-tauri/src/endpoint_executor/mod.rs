@@ -935,6 +935,7 @@ fn decode_non_stream(
             prompt_tokens: usage.input_tokens,
             completion_tokens: usage.output_tokens,
             total_tokens: usage.input_tokens + usage.output_tokens,
+            cached_tokens: usage.cache_read_input_tokens,
         }),
     ))
 }
@@ -948,10 +949,15 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        let cached = usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         return Some(TokenUsage {
             prompt_tokens: input,
             completion_tokens: output,
             total_tokens: input + output,
+            cached_tokens: cached,
         });
     }
     if endpoint == "responses" {
@@ -964,10 +970,18 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
             .and_then(Value::as_u64)
             .or_else(|| usage.get("completion_tokens").and_then(Value::as_u64))
             .unwrap_or(0);
+        // OpenAI Responses API returns cached tokens inside input_tokens_details.cached_tokens
+        let cached = usage
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+            .unwrap_or(0);
         return Some(TokenUsage {
             prompt_tokens: input,
             completion_tokens: output,
             total_tokens: input + output,
+            cached_tokens: cached,
         });
     }
     let prompt = usage.get("prompt_tokens").and_then(Value::as_u64)?;
@@ -979,10 +993,16 @@ pub fn extract_usage(protocol: &str, endpoint: &str, body: &Value) -> Option<Tok
         .get("total_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(prompt + completion);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     Some(TokenUsage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
+        cached_tokens: cached,
     })
 }
 

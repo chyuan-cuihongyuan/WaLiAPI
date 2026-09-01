@@ -144,6 +144,11 @@ impl Adaptor for ClaudeAdaptor {
                 prompt_tokens: u.get("prompt_tokens")?.as_u64()?,
                 completion_tokens: u.get("completion_tokens")?.as_u64()?,
                 total_tokens: u.get("total_tokens")?.as_u64()?,
+                cached_tokens: u
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
             })
         });
 

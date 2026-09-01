@@ -1375,6 +1375,7 @@ struct NativeSseUsageParser {
     pending: Vec<u8>,
     input: Option<i64>,
     output: Option<i64>,
+    cached: Option<i64>,
     stopped: bool,
     malformed_or_oversized: bool,
 }
@@ -1413,7 +1414,8 @@ impl NativeSseUsageParser {
         };
         match value.get("type").and_then(|value| value.as_str()) {
             Some("message_start") => {
-                self.input = value.pointer("/message/usage").map(anthropic_input_usage)
+                self.input = value.pointer("/message/usage").map(anthropic_input_usage);
+                self.cached = value.pointer("/message/usage/cache_read_input_tokens").and_then(|v| v.as_i64());
             }
             Some("message_delta") => {
                 self.output = value
@@ -1425,9 +1427,9 @@ impl NativeSseUsageParser {
         }
     }
 
-    fn finish(self) -> Option<(i64, i64)> {
+    fn finish(self) -> Option<(i64, i64, i64)> {
         (!self.malformed_or_oversized && self.stopped)
-            .then(|| (self.input.unwrap_or(0), self.output.unwrap_or(0)))
+            .then(|| (self.input.unwrap_or(0), self.output.unwrap_or(0), self.cached.unwrap_or(0)))
     }
 }
 
@@ -1447,17 +1449,22 @@ fn sse_record_end(input: &[u8]) -> Option<usize> {
     }
 }
 
-fn native_usage(bytes: &[u8], is_sse: bool) -> Option<(i64, i64)> {
+fn native_usage(bytes: &[u8], is_sse: bool) -> Option<(i64, i64, i64)> {
     let text = std::str::from_utf8(bytes).ok()?;
     if !is_sse {
         let value: serde_json::Value = serde_json::from_str(text).ok()?;
         let usage = value.get("usage")?;
+        let cached = usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         return Some((
             anthropic_input_usage(usage),
             usage
                 .get("output_tokens")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0),
+            cached,
         ));
     }
     let mut parser = NativeSseUsageParser::default();
@@ -1619,9 +1626,9 @@ async fn record_anthropic_outcome(
     is_stream: bool,
     status_code: i64,
     error_message: Option<String>,
-    usage: Option<(i64, i64)>,
+    usage: Option<(i64, i64, i64)>,
 ) {
-    let (prompt_tokens, completion_tokens) = usage.unwrap_or((0, 0));
+    let (prompt_tokens, completion_tokens, cached_tokens) = usage.unwrap_or((0, 0, 0));
     let mut total_tokens = prompt_tokens + completion_tokens;
     let mut prompt_tokens = prompt_tokens;
     let mut completion_tokens = completion_tokens;
@@ -1659,6 +1666,7 @@ async fn record_anthropic_outcome(
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        cached_tokens,
         duration_ms: 0,
         error_message,
         is_stream: i64::from(is_stream),
@@ -1711,7 +1719,7 @@ async fn record_anthropic_success(
     request: &serde_json::Value,
     security_result: &security::SecurityScanResult,
     is_stream: bool,
-    usage: Option<(i64, i64)>,
+    usage: Option<(i64, i64, i64)>,
 ) {
     record_anthropic_outcome(
         repo,
@@ -2030,6 +2038,9 @@ pub async fn handle_messages(
                                 .and_then(|value| value.as_i64())
                                 .unwrap_or(0),
                             body.pointer("/usage/completion_tokens")
+                                .and_then(|value| value.as_i64())
+                                .unwrap_or(0),
+                            body.pointer("/usage/prompt_tokens_details/cached_tokens")
                                 .and_then(|value| value.as_i64())
                                 .unwrap_or(0),
                         ));
@@ -3803,17 +3814,17 @@ mod anthropic_handler_tests {
     fn reads_native_message_and_sse_usage_without_changing_payload() {
         assert_eq!(
             native_usage(br#"{"usage":{"input_tokens":12,"output_tokens":4}}"#, false),
-            Some((12, 4))
+            Some((12, 4, 0))
         );
         let sse = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
-        assert_eq!(native_usage(sse, true), Some((17, 4)));
+        assert_eq!(native_usage(sse, true), Some((17, 4, 3)));
         assert_eq!(native_usage(&sse[..sse.len() - 48], true), None);
 
         let mut incremental = NativeSseUsageParser::default();
         for piece in sse.chunks(7) {
             incremental.feed(piece);
         }
-        assert_eq!(incremental.finish(), Some((17, 4)));
+        assert_eq!(incremental.finish(), Some((17, 4, 3)));
         let mut oversized = NativeSseUsageParser::default();
         oversized.feed(&vec![b'x'; MAX_NATIVE_SSE_RECORD_BYTES + 1]);
         assert!(oversized.finish().is_none());

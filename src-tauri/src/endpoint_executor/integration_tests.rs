@@ -259,7 +259,7 @@ async fn protocol_routing_integration_chat_native_first_then_conversion() {
                     crate::core::plan_executor::ok_result(
                         200,
                         json!({"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}),
-                        Some(crate::core::attempt::TokenUsage { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }),
+                        Some(crate::core::attempt::TokenUsage { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5, cached_tokens: 0 }),
                     )
                 } else {
                     // Anthropic conversion attempt: verify the prepared body is

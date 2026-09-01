@@ -171,11 +171,12 @@ impl StreamPumpCore {
         self.supervisor.terminal_emitted()
     }
 
-    pub fn usage(&self) -> (i64, i64, i64) {
-        self.decoder.usage().map_or((0, 0, 0), |usage| {
+    pub fn usage(&self) -> (i64, i64, i64, i64) {
+        self.decoder.usage().map_or((0, 0, 0, 0), |usage| {
             let prompt = usage.input_tokens as i64;
             let completion = usage.output_tokens as i64;
-            (prompt, completion, prompt + completion)
+            let cached = usage.cache_read_input_tokens as i64;
+            (prompt, completion, prompt + completion, cached)
         })
     }
 
@@ -484,7 +485,7 @@ mod tests {
         )
         .unwrap();
         pump.push(b"usage").unwrap();
-        assert_eq!(pump.usage(), (2, 3, 5));
+        assert_eq!(pump.usage(), (2, 3, 5, 0));
         assert_eq!(pump.finish().unwrap(), b"done");
         assert!(pump.terminated());
     }
