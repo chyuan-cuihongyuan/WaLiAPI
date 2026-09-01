@@ -5,7 +5,7 @@ import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import { writeClipboard } from "../lib/runtime";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
-  Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, Shield, Timer, Coins,
+  Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, ArrowDownLeft, ArrowUpRight, Shield, Timer, Coins,
   Search, X, Calendar, Key, Server, Box, ShieldAlert,
 } from "lucide-react";
 
@@ -430,8 +430,8 @@ export function LogsPage() {
                       <th className="px-2 py-3 text-left font-medium">模型</th>
                       <th className="w-20 px-2 py-3 text-left font-medium">状态</th>
                       <th className="w-28 px-2 py-3 text-right font-medium">安全</th>
-                      <th className="w-24 px-2 py-3 text-right font-medium">Token</th>
-                      <th className="w-16 px-2 py-3 text-right font-medium">耗时</th>
+                      <th className="w-28 px-2 py-3 text-right font-medium">Token</th>
+                      <th className="w-18 px-2 py-3 text-right font-medium">耗时</th>
                       <th className="w-20 px-2 py-3">
                         <button
                           onClick={() => setShowTraceColumn(!showTraceColumn)}
@@ -551,17 +551,28 @@ function LogRow({
             <RiskBadge log={log} />
           </div>
         </td>
-        <td className="px-3 py-2.5 text-right text-xs">
-          <span title={`Prompt: ${log.prompt_tokens}, Completion: ${log.completion_tokens}, Cached: ${log.cached_tokens ?? 0}`}>
-            {log.total_tokens > 0 ? formatNumber(log.total_tokens) : <span className="text-muted-foreground/50">0</span>}
-          </span>
-          {log.cached_tokens > 0 && (
-            <div className="text-[10px] text-muted-foreground/70 mt-0.5">
-              缓存 {formatNumber(log.cached_tokens)} · {log.prompt_tokens > 0 ? Math.round((log.cached_tokens / log.prompt_tokens) * 100) : 0}%
+        <td className="px-3 py-2.5 text-right text-xs align-middle">
+          <div className="flex flex-col items-end gap-1" title={`Prompt: ${log.prompt_tokens}, Completion: ${log.completion_tokens}, Cached: ${log.cached_tokens ?? 0}`}>
+            <div className="text-base font-semibold text-foreground tabular-nums tracking-tight leading-none">
+              {log.total_tokens > 0 ? formatNumber(log.total_tokens) : <span className="text-muted-foreground/50">0</span>}
             </div>
-          )}
+            <div className="text-[10px] text-muted-foreground/75 whitespace-nowrap">
+              <span className="inline-flex items-center gap-0.5">
+                <ArrowDownLeft size={10} /> {formatNumber(log.prompt_tokens)}
+              </span>
+              <span className="mx-1 text-slate-300">·</span>
+              <span className="inline-flex items-center gap-0.5">
+                <ArrowUpRight size={10} /> {formatNumber(log.completion_tokens)}
+              </span>
+            </div>
+            {log.cached_tokens > 0 && (
+              <div className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 whitespace-nowrap">
+                命中 {formatNumber(log.cached_tokens)} · {log.prompt_tokens > 0 ? Math.round((log.cached_tokens / log.prompt_tokens) * 100) : 0}%
+              </div>
+            )}
+          </div>
         </td>
-        <td className="px-3 py-2.5 text-right text-xs text-muted-foreground">{formatDuration(log.duration_ms)}</td>
+        <td className="px-3 py-2.5 text-right text-xs text-muted-foreground align-middle whitespace-nowrap">{formatDuration(log.duration_ms)}</td>
         <td className="px-3 py-2.5">
           <button
             onClick={onDelete}
@@ -731,11 +742,21 @@ function LogDetail({ log }: { log: RequestLog }) {
         {/* Token detail */}
         <div className="rounded-xl border border-slate-200 bg-white p-3">
           <div className="flex items-center gap-1.5 text-xs text-slate-500"><Coins size={13} /> Token 消耗</div>
-          <div className="mt-1.5 text-sm font-semibold text-slate-900">{formatNumber(log.total_tokens)}</div>
-          <div className="mt-0.5 text-[11px] text-slate-400">
-            输入 {log.prompt_tokens} · 输出 {log.completion_tokens}
-            {log.cached_tokens > 0 && ` · 缓存 ${log.cached_tokens} (${log.prompt_tokens > 0 ? Math.round((log.cached_tokens / log.prompt_tokens) * 100) : 0}%)`}
+          <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900 tabular-nums leading-none">{formatNumber(log.total_tokens)}</div>
+          <div className="mt-2 text-[11px] text-slate-500">
+            <span className="inline-flex items-center gap-1">
+              <ArrowDownLeft size={11} /> <span className="font-medium text-slate-700 tabular-nums">{formatNumber(log.prompt_tokens)}</span>
+            </span>
+            <span className="mx-2 text-slate-300">·</span>
+            <span className="inline-flex items-center gap-1">
+              <ArrowUpRight size={11} /> <span className="font-medium text-slate-700 tabular-nums">{formatNumber(log.completion_tokens)}</span>
+            </span>
           </div>
+          {log.cached_tokens > 0 && (
+            <div className="mt-2 inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+              命中 {formatNumber(log.cached_tokens)} · {log.prompt_tokens > 0 ? Math.round((log.cached_tokens / log.prompt_tokens) * 100) : 0}%
+            </div>
+          )}
         </div>
 
         {/* Duration */}
