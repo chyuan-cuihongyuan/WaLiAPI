@@ -10,6 +10,7 @@ import { SettingsPage } from "@app/pages/SettingsPage";
 import { UsagePage } from "@app/pages/UsagePage";
 import { KnowledgeBasePage } from "@app/pages/KnowledgeBasePage";
 import { settingsApi } from "@app/lib/api";
+import { ErrorBoundary } from "@app/components/ErrorBoundary";
 import { checkAuth, getToken } from "./lib/auth";
 import { LoginPage } from "./pages/LoginPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
@@ -66,7 +67,8 @@ function App() {
   }, []);
 
   return (
-    <BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/change-password" element={<ChangePasswordPage />} />
@@ -95,7 +97,8 @@ function App() {
           }
         />
       </Routes>
-    </BrowserRouter>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }
 

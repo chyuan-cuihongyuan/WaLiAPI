@@ -28,6 +28,7 @@ import type { Channel } from "../types";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import {
@@ -3192,7 +3193,12 @@ function WikiMarkdown({ content }: { content: string }) {
     <div className="wiki-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw]}
+        rehypePlugins={[
+          // 先让 rehype-raw 解析内嵌 HTML，再用 sanitize 按 GitHub 白名单过滤，
+          // 阻止 Wiki 内容中的 iframe/form/script/事件属性等直接进入 DOM（XSS 面）
+          rehypeRaw,
+          rehypeSanitize,
+        ]}
         components={{
           code({ className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || "");

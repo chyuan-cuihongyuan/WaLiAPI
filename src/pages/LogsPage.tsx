@@ -3,6 +3,7 @@ import { logApi } from "../lib/api";
 import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import { writeClipboard } from "../lib/runtime";
+import { safeJsonParse } from "../lib/json";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
   Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, ArrowDownLeft, ArrowUpRight, Shield, Timer, Coins,
@@ -90,6 +91,30 @@ function formatArguments(args?: string): string {
   }
 }
 
+/**
+ * 消息 content 字段转可展示字符串：undefined/null → ""；数组（Anthropic 内容块）按块拼接文本；
+ * 其余类型 JSON 序列化。防止 undefined 调 .replace 或数组被当作字符串断言导致渲染崩溃。
+ */
+function contentToString(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (content === undefined || content === null) return "";
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => {
+        if (block && typeof block === "object" && !Array.isArray(block)) {
+          const b = block as Record<string, unknown>;
+          if (typeof b.text === "string" && b.text) return b.text;
+          if (typeof b.type === "string") return `[${b.type}]`;
+          return "";
+        }
+        return String(block);
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return JSON.stringify(content) ?? "";
+}
+
 /** Get a short preview of message content */
 function getContentPreview(msg: Record<string, unknown>, maxLen: number = 140): string {
   const content = msg.content;
@@ -128,7 +153,8 @@ function getContentPreview(msg: Record<string, unknown>, maxLen: number = 140): 
   }
   if (msg.tool_calls) return `🔧 ${extractToolNames(msg).join(", ")}`;
   if (msg.function_call) return `🔧 ${(msg.function_call as Record<string, unknown>).name as string}`;
-  const str = JSON.stringify(content);
+  // content 为 undefined 时 JSON.stringify 返回 undefined，需兜底为空串
+  const str = JSON.stringify(content) ?? "";
   const compacted = str.replace(/\n+/g, " ").trim();
   return compacted.length > maxLen ? compacted.slice(0, maxLen) + "…" : compacted;
 }
@@ -1084,8 +1110,9 @@ function LogDetail({ log }: { log: RequestLog }) {
                         // Normalize line endings
                         return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
                       }
-                      return JSON.stringify(content);
-                    })();
+                      // 非字符串（undefined/数组/对象）统一转可展示字符串，undefined 时为 ""
+                      return contentToString(content);
+                      })();
                     const isLongContent = fullContent.length > 140;
                     const messageKey = `msg-${i}`;
 
@@ -1188,7 +1215,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                     type: tc.type,
                                     function: {
                                       name: tc.function?.name,
-                                      arguments: tc.function?.arguments ? (typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments) : undefined,
+                                      arguments: tc.function?.arguments ? (typeof tc.function.arguments === 'string' ? safeJsonParse(tc.function.arguments, tc.function.arguments) : tc.function.arguments) : undefined,
                                     }
                                   }, null, 2);
 
@@ -1353,8 +1380,9 @@ function LogDetail({ log }: { log: RequestLog }) {
                     const Icon = meta.icon;
                     const toolCalls = extractToolCalls(message);
 
-                    const content = (message.content as string) || "";
-                    const reasoningContent = (message.reasoning_content as string) || "";
+                    // content 可能是 undefined/数组（Anthropic 内容块），统一转字符串防止后续 .replace/.length 崩溃
+                    const content = contentToString(message.content);
+                    const reasoningContent = typeof message.reasoning_content === "string" ? message.reasoning_content : "";
 
                     const reasoningExpanded = expandedChoices.has(`${i}-reasoning`);
                     const contentExpanded = expandedChoices.has(`${i}-content`);
@@ -1563,7 +1591,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                   type: tc.type,
                                   function: {
                                     name: tc.function?.name,
-                                    arguments: tc.function?.arguments ? JSON.parse(tc.function.arguments) : undefined,
+                                    arguments: typeof tc.function?.arguments === 'string' ? safeJsonParse(tc.function.arguments, tc.function.arguments) : tc.function?.arguments,
                                   }
                                 }, null, 2);
 

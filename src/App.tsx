@@ -4,6 +4,7 @@ import { Layout } from "./components/layout/Layout";
 import { settingsApi } from "./lib/api";
 import { isTauriRuntime } from "./lib/runtime";
 import { WebAdminGate } from "./components/WebAdminGate";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then(module => ({ default: module.DashboardPage })));
 const ChannelsPage = lazy(() => import("./pages/ChannelsPage").then(module => ({ default: module.ChannelsPage })));
@@ -44,8 +45,9 @@ function App() {
   }, []);
 
   return (
-    <WebAdminGate>
-      <BrowserRouter>
+    <ErrorBoundary>
+      <WebAdminGate>
+        <BrowserRouter>
         <Layout hasUpdate={hasUpdate} onCheckUpdate={() => isTauriRuntime() && setShowUpdater(true)}>
           <Suspense fallback={<div className="page-shell text-sm text-muted-foreground">加载中...</div>}>
           <Routes>
@@ -74,7 +76,8 @@ function App() {
           </Suspense>
         )}
       </BrowserRouter>
-    </WebAdminGate>
+      </WebAdminGate>
+    </ErrorBoundary>
   );
 }
 
