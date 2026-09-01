@@ -1096,4 +1096,23 @@ mod tests {
         assert!(content.is_char_boundary(content.len()));
         assert!(content.contains("## 中文"));
     }
+
+    /// 回归测试（issue #55，FIX-03 移植适配）：摄入 >24KB 纯中文文档时，
+    /// parse_content → 上下文组装的真实崩溃路径不得因字节切片 panic。
+    /// 上游 PR #58 的用例直接构造 sections，本用例补齐从原始文档进出的端到端覆盖。
+    #[test]
+    fn source_context_large_cjk_document_via_parse_content_does_not_panic() {
+        // 48000 字节纯中文（单行，保证切点落在多字节字符中间），超过上限。
+        let doc = "知识库摄入测试。".repeat(2000);
+        assert!(doc.len() > MAX_SOURCE_CONTEXT_BYTES);
+        let sections = parse_content(&doc, "txt");
+        assert!(!sections.is_empty());
+        let context = build_source_context(&sections);
+        let content = context
+            .strip_suffix(SOURCE_CONTEXT_TRUNCATION_MARKER)
+            .unwrap();
+        assert!(content.len() <= MAX_SOURCE_CONTEXT_BYTES);
+        assert!(content.is_char_boundary(content.len()));
+        assert!(std::str::from_utf8(content.as_bytes()).is_ok());
+    }
 }

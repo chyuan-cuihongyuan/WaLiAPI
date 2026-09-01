@@ -104,5 +104,6 @@ embed-web = ["dep:rust-embed"]
 # （否则 waliapi_lib::run<Wry> 与路由 handler 共驻同一 CGU，wry/webkit 会被链入 NEEDED）
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# 不要设置 panic = "abort"：release 下它会让 panic 直接终止进程，
+# 代码中依赖 catch_unwind 的护栏（如知识库解析/摄入）与 tokio 任务级 panic 隔离将全部失效（issue #55）
 strip = "debuginfo"
