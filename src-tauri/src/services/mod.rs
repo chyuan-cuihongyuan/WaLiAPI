@@ -69,6 +69,18 @@ impl ServiceRegistry {
         router
     }
 
+    /// 合并指定服务（按 id）的路由。服务端点按鉴权域分组装配：
+    /// knowledge/wiki 挂管理员 token、mcp 挂独立 MCP token，见 router::build_router。
+    pub fn merge_routes_for(&self, ids: &[&str], state: Arc<AppState>) -> Router<SharedState> {
+        let mut router = Router::new();
+        for service in &self.services {
+            if service.enabled() && ids.contains(&service.id()) {
+                router = router.merge(service.routes(state.clone()));
+            }
+        }
+        router
+    }
+
     /// Get all service statuses
     pub async fn list_status(&self, state: &Arc<AppState>) -> Vec<ServiceStatus> {
         let mut result = vec![];

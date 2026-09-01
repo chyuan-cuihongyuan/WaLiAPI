@@ -7,8 +7,9 @@ services:
     restart: unless-stopped
     init: true
     ports:
-      # Loopback by default: put Caddy/Nginx in front for public HTTPS access.
-      - "18888:8777"
+      # 默认只发布到宿主机回环地址（WALIAPI_BIND / WALIAPI_PORT 可覆盖）；
+      # 公网访问请用 Caddy/Nginx 终止 HTTPS 后反代到 127.0.0.1，不要直接暴露端口。
+      - "${WALIAPI_BIND:-127.0.0.1}:${WALIAPI_PORT:-8777}:8777"
     environment:
       WALIAPI_SERVER_HOST: 0.0.0.0
       WALIAPI_SERVER_PORT: "${WALIAPI_PORT:-8777}"
@@ -17,7 +18,6 @@ services:
       WALIAPI_PUBLIC_URL: "${WALIAPI_PUBLIC_URL:-}"
       WALIAPI_ADMIN_TOKEN: "${WALIAPI_ADMIN_TOKEN:?Set WALIAPI_ADMIN_TOKEN to a strong random value}"
       WALIAPI_MCP_TOKEN: "${WALIAPI_MCP_TOKEN:?Set WALIAPI_MCP_TOKEN to a different strong random value}"
-      WALIAPI_WEB_DIR: /app/dist
     volumes:
       - waliapi-data:/data
     healthcheck:

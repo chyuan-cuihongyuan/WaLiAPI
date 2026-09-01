@@ -145,27 +145,34 @@ curl http://127.0.0.1:8777/health
 
 | 环境变量 | 说明 | 默认值 |
 |:---|:---|:---|
-| `WALIAPI_HOST` | 监听地址 | `0.0.0.0`（Docker）/ `127.0.0.1`（桌面） |
-| `WALIAPI_PORT` | 监听端口 | `8777` |
+| `WALIAPI_SERVER_HOST` | 监听地址 | `0.0.0.0`（Docker）/ `127.0.0.1`（桌面） |
+| `WALIAPI_SERVER_PORT` | 监听端口 | `8777` |
 | `WALIAPI_DATA_DIR` | 数据目录（SQLite + 知识库索引） | `/data` |
-| `WALIAPI_ADMIN_TOKEN` | 管理面 + KB/Wiki REST 认证令牌（≥32 字符） | 必填 |
-| `WALIAPI_MCP_TOKEN` | MCP 端点认证令牌（≥32 字符，须与 ADMIN 不同） | 必填 |
+| `WALIAPI_ADMIN_TOKEN` | KB/Wiki REST（`/api/kb`、`/api/wiki`）认证令牌（≥32 字符，Bearer） | 未配置则这些端点关闭（401） |
+| `WALIAPI_MCP_TOKEN` | MCP 端点认证令牌（≥32 字符，Bearer，须与 ADMIN 不同） | 未配置则端点关闭（401） |
 | `WALIAPI_PUBLIC_URL` | 公网访问地址（生成客户端配置时使用） | — |
-| `WALIAPI_WEB_DIR` | 前端静态资源目录 | `/app/dist` |
+
+Web 管理面板的前端静态资源已内嵌进 `waliapi-web` 二进制（rust-embed），无需单独的静态资源目录。
 
 #### 反向代理与 HTTPS
 
-Compose 默认只发布到宿主机 `127.0.0.1`，生产环境不要把端口直接暴露到公网。推荐使用 Caddy 或 Nginx 终止 HTTPS 后反代到 `127.0.0.1:8777`。Caddy 配置域名后会自动申请和续期证书，示例配置见 [`deploy/caddy/Caddyfile.example`](deploy/caddy/Caddyfile.example)。
+Compose 默认只发布到宿主机 `127.0.0.1`（可用 `WALIAPI_BIND` / `WALIAPI_PORT` 变量覆盖），生产环境不要把端口直接暴露到公网。推荐使用 Caddy 或 Nginx 终止 HTTPS 后反代到 `127.0.0.1:8777`。Caddy 配置域名后会自动申请和续期证书，示例配置见 [`deploy/caddy/Caddyfile.example`](deploy/caddy/Caddyfile.example)。
 
 #### 认证体系
 
-Web 管理面、MCP 和 `/v1` 数据面使用三个互不通用的凭证域：
+Web 管理面、服务端点（KB/Wiki/MCP）和 `/v1` 数据面使用互不通用的凭证域：
 
-- **后台管理 + KB/Wiki REST**：`WALIAPI_ADMIN_TOKEN`
-- **外部 Agent MCP**：`WALIAPI_MCP_TOKEN`（权限隔离）
-- **数据面 API**：后台创建的 `sk-waliapi-*` 密钥
+- **Web 管理面板**：管理员用户名/密码登录会话（首次启动自动生成初始密码，存于数据目录 `INITIAL_PASSWORD` 文件）
+- **KB/Wiki REST**（`/api/kb`、`/api/wiki`）：`WALIAPI_ADMIN_TOKEN`（`Authorization: Bearer <token>`；未配置则端点关闭，一律 401）
+- **外部 Agent MCP**（`/mcp`）：`WALIAPI_MCP_TOKEN`（`Authorization: Bearer <token>`，权限隔离；未配置则端点关闭）
+- **数据面 API**（`/v1/*`）：后台创建的 `sk-waliapi-*` 密钥
 
-所有管理/服务路由都不继承数据面的宽松 CORS。反向代理只负责 TLS 和转发，不得移除或绕过认证头。
+```bash
+# KB/Wiki REST 调用示例
+curl -H "Authorization: Bearer $WALIAPI_ADMIN_TOKEN" http://127.0.0.1:8777/api/kb
+```
+
+宽松 CORS 只作用于数据面 `/v1/*` 路由；KB/Wiki/MCP 服务路由与管理面板不附带跨域允许头，任意网页无法跨域读取知识资产。反向代理只负责 TLS 和转发，不得移除或绕过认证头。绑定非回环地址而缺少上述 token 时，启动日志会输出醒目告警。
 
 <details>
 <summary>📦 不使用 Docker：systemd 部署</summary>

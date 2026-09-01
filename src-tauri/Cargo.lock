@@ -7292,6 +7292,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "dirs 5.0.1",
+ "embed-resource",
  "futures-util",
  "hex",
  "image",

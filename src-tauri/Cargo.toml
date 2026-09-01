@@ -12,6 +12,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 仅为 Windows 测试二进制嵌入 Common-Controls v6 清单（见 build.rs），与 tauri-build 同源
+embed-resource = "3"
 
 [dependencies]
 tauri = { version = "2", features = ["test"] }
@@ -29,7 +31,7 @@ tauri-plugin-process = "2"
 # HTTP Server
 axum = "0.8"
 tokio = { version = "1", features = ["full", "test-util"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # HTTP Client

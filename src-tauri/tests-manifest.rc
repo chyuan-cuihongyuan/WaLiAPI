@@ -1,0 +1,4 @@
+// Windows Common-Controls v6 清单资源：经 build.rs 全局嵌入所有产物
+// （应用 bin、测试、示例），内容与 tauri-build 内置 windows-app-manifest.xml
+// 的 Common-Controls 依赖一致（tauri-build 自身的清单已在 build.rs 关闭）。
+1 24 "tests-common-controls.manifest"
