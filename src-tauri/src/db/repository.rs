@@ -12,6 +12,18 @@ fn parse_eps(raw: &Option<String>) -> Option<Vec<String>> {
     }
 }
 
+/// 统计聚合的时间窗下界（ISO 文本，与 created_at 可按字典序比较）；
+/// `None` 表示不限制（全量）。
+fn stats_since(hours: Option<i64>) -> Option<String> {
+    hours.map(|h| {
+        chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(h))
+            .unwrap_or_else(chrono::Utc::now)
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string()
+    })
+}
+
 pub struct Repository {
     pool: SqlitePool,
 }
@@ -1427,6 +1439,24 @@ impl Repository {
         .await
         .unwrap_or(0);
 
+        // 缓存命中（issue #51）：分子 = 命中读取；分母 = 可缓存输入基数。
+        // OpenAI/DeepSeek/Gemini 的 cached 是 prompt 子集（分母 = prompt）；
+        // Anthropic 三字段并列（分母 = prompt + cache_creation）。
+        let today_cache_read_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(cache_read_tokens), 0) FROM request_logs WHERE created_at LIKE ?",
+        )
+        .bind(&today_prefix)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+        let today_cache_eligible_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(prompt_tokens + COALESCE(cache_creation_tokens, 0)), 0) FROM request_logs WHERE created_at LIKE ?",
+        )
+        .bind(&today_prefix)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
         let active_channels: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE status = 1")
                 .fetch_one(&self.pool)
@@ -1491,6 +1521,8 @@ impl Repository {
         Ok(DashboardStats {
             today_requests,
             today_total_tokens,
+            today_cache_read_tokens,
+            today_cache_eligible_tokens,
             active_channels,
             avg_latency_ms: avg_latency,
             total_channels,
@@ -1505,18 +1537,33 @@ impl Repository {
         })
     }
 
-    pub async fn get_channel_stats(&self) -> Result<Vec<ChannelStats>, sqlx::Error> {
+    /// 渠道统计：`upstream_type = 'channel'` 过滤（issue #51 修正——
+    /// auth 账号尝试的 channel_id 存的是账号 id，直接聚合会把两类混算）。
+    /// `hours = None` 全量；`Some(n)` 最近 n 小时。
+    pub async fn get_channel_stats(
+        &self,
+        hours: Option<i64>,
+    ) -> Result<Vec<ChannelStats>, sqlx::Error> {
+        let since = stats_since(hours);
         sqlx::query_as::<_, ChannelStats>(
-            "SELECT\n                r.channel_id as channel_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.channel_id IS NOT NULL\n            GROUP BY r.channel_id"
+            "SELECT\n                r.channel_id as channel_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.channel_id IS NOT NULL AND r.upstream_type = 'channel' AND (? IS NULL OR r.created_at >= ?)\n            GROUP BY r.channel_id"
         )
+        .bind(&since)
+        .bind(&since)
         .fetch_all(&self.pool)
         .await
     }
 
-    pub async fn get_api_key_stats(&self) -> Result<Vec<ApiKeyStats>, sqlx::Error> {
+    pub async fn get_api_key_stats(
+        &self,
+        hours: Option<i64>,
+    ) -> Result<Vec<ApiKeyStats>, sqlx::Error> {
+        let since = stats_since(hours);
         sqlx::query_as::<_, ApiKeyStats>(
-            "SELECT\n                r.api_key_id as api_key_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.api_key_id IS NOT NULL\n            GROUP BY r.api_key_id"
+            "SELECT\n                r.api_key_id as api_key_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.api_key_id IS NOT NULL AND (? IS NULL OR r.created_at >= ?)\n            GROUP BY r.api_key_id"
         )
+        .bind(&since)
+        .bind(&since)
         .fetch_all(&self.pool)
         .await
     }
@@ -1541,7 +1588,12 @@ impl Repository {
     }
 
     /// 按模型分组统计：请求次数、Token 消耗、成功率、平均延迟
-    pub async fn get_model_stats(&self) -> Result<Vec<ModelStats>, sqlx::Error> {
+    /// 按模型分组统计：请求次数、Token 消耗、成功率、平均延迟。
+    /// `hours = None` 表示全量；`Some(n)` 仅统计最近 n 小时（issue #51 时间过滤）。
+    pub async fn get_model_stats(
+        &self,
+        hours: Option<i64>,
+    ) -> Result<Vec<ModelStats>, sqlx::Error> {
         let sql = r#"
             SELECT
                 model,
@@ -1552,15 +1604,20 @@ impl Repository {
                 ROUND(CAST(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1.0 ELSE 0.0 END) AS REAL) / COUNT(*), 4) as success_rate,
                 COALESCE(AVG(duration_ms), 0) as avg_latency_ms
             FROM request_logs
+            WHERE (? IS NULL OR created_at >= ?)
             GROUP BY model
             ORDER BY total_tokens DESC
         "#;
+        let since = stats_since(hours);
         sqlx::query_as::<_, ModelStats>(sql)
+            .bind(&since)
+            .bind(&since)
             .fetch_all(&self.pool)
             .await
     }
 
-    /// 按小时粒度统计各模型 Token 趋势
+    /// 按小时粒度统计各模型 Token/请求/成功率/延迟/TTFT/缓存趋势
+    /// （issue #51：小时桶点扩展字段，支撑多指标折线）。
     pub async fn get_token_trend(&self, hours: i64) -> Result<Vec<TokenTrendPoint>, sqlx::Error> {
         let since = chrono::Utc::now()
             .checked_sub_signed(chrono::Duration::hours(hours))
@@ -1574,7 +1631,11 @@ impl Repository {
                 COALESCE(SUM(prompt_tokens), 0) as input_tokens,
                 COALESCE(SUM(completion_tokens), 0) as output_tokens,
                 COALESCE(SUM(total_tokens), 0) as total_tokens,
-                COUNT(*) as request_count
+                COUNT(*) as request_count,
+                SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) as success_count,
+                COALESCE(AVG(duration_ms), 0) as avg_duration_ms,
+                AVG(ttft_ms) as avg_ttft_ms,
+                COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens
             FROM request_logs
             WHERE created_at >= ?
             GROUP BY hour, model

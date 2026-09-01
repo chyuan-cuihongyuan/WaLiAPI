@@ -448,6 +448,10 @@ impl Default for RequestLog {
 pub struct DashboardStats {
     pub today_requests: i64,
     pub today_total_tokens: i64,
+    /// 今日缓存命中读取的输入 token（issue #51）。
+    pub today_cache_read_tokens: i64,
+    /// 今日可缓存输入基数（OpenAI 系 = prompt；Anthropic = prompt+cache_creation）。
+    pub today_cache_eligible_tokens: i64,
     pub active_channels: i64,
     pub avg_latency_ms: f64,
     pub total_channels: i64,
@@ -517,6 +521,12 @@ pub struct TokenTrendPoint {
     pub output_tokens: i64,
     pub total_tokens: i64,
     pub request_count: i64,
+    /// issue #51：小时桶扩展指标（多指标折线与统计页）。
+    pub success_count: i64,
+    pub avg_duration_ms: f64,
+    /// 平均首字延迟；该桶内全是非流式请求时为 NULL。
+    pub avg_ttft_ms: Option<f64>,
+    pub cache_read_tokens: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

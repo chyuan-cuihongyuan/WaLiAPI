@@ -6,6 +6,7 @@ import { isTauriRuntime } from "./lib/runtime";
 import { WebAdminGate } from "./components/WebAdminGate";
 
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then(module => ({ default: module.DashboardPage })));
+const StatsPage = lazy(() => import("./pages/StatsPage").then(module => ({ default: module.StatsPage })));
 const ChannelsPage = lazy(() => import("./pages/ChannelsPage").then(module => ({ default: module.ChannelsPage })));
 const AuthChannelsPage = lazy(() => import("./pages/AuthChannelsPage").then(module => ({ default: module.AuthChannelsPage })));
 const ApiKeysPage = lazy(() => import("./pages/ApiKeysPage").then(module => ({ default: module.ApiKeysPage })));
@@ -50,6 +51,7 @@ function App() {
           <Suspense fallback={<div className="page-shell text-sm text-muted-foreground">加载中...</div>}>
           <Routes>
             <Route path="/" element={<DashboardPage />} />
+            <Route path="/stats" element={<StatsPage />} />
             <Route path="/usage" element={<UsagePage />} />
             <Route path="/channels" element={<ChannelsPage />} />
             <Route path="/channels/auth" element={<AuthChannelsPage />} />

@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Layout } from "@app/components/layout/Layout";
 import { DashboardPage } from "@app/pages/DashboardPage";
+import { StatsPage } from "@app/pages/StatsPage";
 import { ChannelsPage } from "@app/pages/ChannelsPage";
 import { AuthChannelsPage } from "@app/pages/AuthChannelsPage";
 import { ApiKeysPage } from "@app/pages/ApiKeysPage";
@@ -77,6 +78,7 @@ function App() {
               <Layout hasUpdate={false} onCheckUpdate={() => {}}>
                 <Routes>
                   <Route path="/" element={<DashboardPage />} />
+                  <Route path="/stats" element={<StatsPage />} />
                   <Route path="/usage" element={<UsagePage />} />
                   <Route path="/channels" element={<ChannelsPage />} />
                   <Route path="/channels/auth" element={<AuthChannelsPage />} />

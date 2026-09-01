@@ -463,16 +463,20 @@ pub async fn delete_channel_impl(id: &str, state: &std::sync::Arc<AppState>) -> 
 
 #[tauri::command]
 pub async fn get_channel_stats(
+    hours: Option<i64>,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<Vec<ChannelStats>, String> {
-    get_channel_stats_impl(&*state).await
+    get_channel_stats_impl(hours, &*state).await
 }
 
 pub async fn get_channel_stats_impl(
+    hours: Option<i64>,
     state: &std::sync::Arc<AppState>,
 ) -> Result<Vec<ChannelStats>, String> {
     let repo = Repository::new(state.db.pool.clone());
-    repo.get_channel_stats().await.map_err(|e| e.to_string())
+    repo.get_channel_stats(hours)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

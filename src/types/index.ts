@@ -151,6 +151,18 @@ export interface ApiKeyStats {
   last_call_at: string | null;
 }
 
+export interface ChannelStats {
+  channel_id: string;
+  total_calls: number;
+  success_calls: number;
+  failed_calls: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  avg_latency_ms: number;
+  last_call_at: string | null;
+}
+
 // Log types
 export interface RequestLog {
   id: string;
@@ -360,6 +372,10 @@ export interface LogStats {
 export interface DashboardStats {
   today_requests: number;
   today_total_tokens: number;
+  /** 今日缓存命中读取的输入 token。 */
+  today_cache_read_tokens: number;
+  /** 今日可缓存输入基数（分母；0 = 无 usage 数据）。 */
+  today_cache_eligible_tokens: number;
   active_channels: number;
   avg_latency_ms: number;
   total_channels: number;
@@ -390,6 +406,12 @@ export interface TokenTrendPoint {
   output_tokens: number;
   total_tokens: number;
   request_count: number;
+  /** issue #51：小时桶扩展指标。 */
+  success_count: number;
+  avg_duration_ms: number;
+  /** 平均首字延迟；桶内全是非流式请求时为 null。 */
+  avg_ttft_ms: number | null;
+  cache_read_tokens: number;
 }
 
 // Settings types

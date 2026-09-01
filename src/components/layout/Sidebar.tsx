@@ -3,6 +3,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   LayoutDashboard,
+  BarChart3,
   BookOpen,
   Radio,
   Key,
@@ -23,6 +24,7 @@ import packageJson from "../../../package.json";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "仪表盘" },
+  { to: "/stats", icon: BarChart3, label: "统计", subLabel: "用量、延迟、缓存" },
   { to: "/usage", icon: BookOpen, label: "使用", subLabel: "API、Codex ... 配置" },
   { to: "/channels", icon: Radio, label: "渠道" },
   { to: "/api-keys", icon: Key, label: "密钥" },

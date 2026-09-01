@@ -160,7 +160,7 @@ async fn request_log_migration_016_adds_nullable_columns_and_old_queries_still_w
 
     // Aggregate queries still work (channel stats / dashboard / log stats).
     let _ = repo.get_dashboard_stats().await.expect("dashboard stats");
-    let _ = repo.get_channel_stats().await.expect("channel stats");
+    let _ = repo.get_channel_stats(None).await.expect("channel stats");
     let _ = repo.get_log_stats(7).await.expect("log stats");
 }
 

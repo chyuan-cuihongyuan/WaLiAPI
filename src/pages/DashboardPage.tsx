@@ -73,10 +73,15 @@ export function DashboardPage() {
 
   const availability = stats.total_channels > 0 ? Math.round((stats.active_channels / stats.total_channels) * 100) : 0;
 
-  // 上 5：请求与渠道 | 下 5：知识服务
+  // 上 6：请求、缓存与渠道 | 下 5：知识服务
+  const cacheHitRate =
+    stats.today_cache_eligible_tokens > 0
+      ? `${((stats.today_cache_read_tokens / stats.today_cache_eligible_tokens) * 100).toFixed(1)}%`
+      : "—";
   const topMetrics = [
     { label: "今日请求", value: formatNumber(stats.today_requests), icon: Activity, color: "text-blue-600", tone: "bg-blue-50" },
     { label: "今日 Token", value: formatNumber(stats.today_total_tokens), icon: Zap, color: "text-amber-600", tone: "bg-amber-50" },
+    { label: "今日缓存命中率", value: cacheHitRate, icon: Database, color: "text-emerald-600", tone: "bg-emerald-50" },
     { label: "累计请求", value: formatNumber(stats.total_requests), icon: TrendingUp, color: "text-indigo-600", tone: "bg-indigo-50" },
     { label: "累计 Token", value: formatNumber(stats.total_tokens), icon: Zap, color: "text-orange-600", tone: "bg-orange-50" },
     { label: "活跃渠道", value: `${stats.active_channels}/${stats.total_channels}`, icon: Radio, color: "text-emerald-600", tone: "bg-emerald-50" },
@@ -154,7 +159,7 @@ export function DashboardPage() {
       </section>
 
       {/* 指标卡片 — 上排：请求与渠道 */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         {topMetrics.map(({ label, value, icon: Icon, color, tone }) => (
           <div key={label} className="surface data-card">
             <div className="flex items-center justify-between">

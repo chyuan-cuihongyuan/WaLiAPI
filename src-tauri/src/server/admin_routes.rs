@@ -127,7 +127,8 @@ async fn require_auth(
         .admin_sessions
         .get(&token)
         .ok_or_else(unauthorized)?;
-    req.extensions_mut().insert(AdminIdentity { token, session });
+    req.extensions_mut()
+        .insert(AdminIdentity { token, session });
     Ok(next.run(req).await)
 }
 
@@ -283,9 +284,13 @@ async fn change_username(
     {
         return Err(bad_request("用户名已被占用".to_string()));
     }
-    admin_auth::update_username(&shared.state.db.pool, &identity.session.user_id, &new_username)
-        .await
-        .map_err(internal_error)?;
+    admin_auth::update_username(
+        &shared.state.db.pool,
+        &identity.session.user_id,
+        &new_username,
+    )
+    .await
+    .map_err(internal_error)?;
 
     // 同步更新当前会话中的用户名
     let session = AdminSession {
@@ -381,12 +386,10 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "update_channel" => {
             to_json(commands::channel::update_channel(arg(&args, "input")?, state).await)
         }
-        "toggle_channel" => {
-            to_json(
-                commands::channel::toggle_channel(arg(&args, "id")?, arg(&args, "status")?, state)
-                    .await,
-            )
-        }
+        "toggle_channel" => to_json(
+            commands::channel::toggle_channel(arg(&args, "id")?, arg(&args, "status")?, state)
+                .await,
+        ),
         "delete_channel" => {
             to_json(commands::channel::delete_channel(arg(&args, "id")?, state).await)
         }
@@ -397,28 +400,26 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "sync_upstream_models" => {
             to_json(commands::channel::sync_upstream_models(arg(&args, "input")?, state).await)
         }
-        "get_channel_stats" => to_json(commands::channel::get_channel_stats(state).await),
+        "get_channel_stats" => {
+            to_json(commands::channel::get_channel_stats(arg(&args, "hours")?, state).await)
+        }
         "reorder_channels" => {
             to_json(commands::channel::reorder_channels(arg(&args, "orderedIds")?, state).await)
         }
         "get_channel_extra_keys" => {
             to_json(commands::channel::get_channel_extra_keys(arg(&args, "id")?, state).await)
         }
-        "get_channel_extra_key_value" => {
-            to_json(
-                commands::channel::get_channel_extra_key_value(arg(&args, "keyId")?, state).await,
+        "get_channel_extra_key_value" => to_json(
+            commands::channel::get_channel_extra_key_value(arg(&args, "keyId")?, state).await,
+        ),
+        "toggle_channel_extra_key" => to_json(
+            commands::channel::toggle_channel_extra_key(
+                arg(&args, "keyId")?,
+                arg(&args, "status")?,
+                state,
             )
-        }
-        "toggle_channel_extra_key" => {
-            to_json(
-                commands::channel::toggle_channel_extra_key(
-                    arg(&args, "keyId")?,
-                    arg(&args, "status")?,
-                    state,
-                )
-                .await,
-            )
-        }
+            .await,
+        ),
         "delete_channel_extra_key" => {
             to_json(commands::channel::delete_channel_extra_key(arg(&args, "keyId")?, state).await)
         }
@@ -434,7 +435,9 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "delete_api_key" => {
             to_json(commands::api_key::delete_api_key(arg(&args, "id")?, state).await)
         }
-        "get_api_key_stats" => to_json(commands::api_key::get_api_key_stats(state).await),
+        "get_api_key_stats" => {
+            to_json(commands::api_key::get_api_key_stats(arg(&args, "hours")?, state).await)
+        }
 
         // ── 日志 ──
         "get_logs" => to_json(commands::log::get_logs(arg(&args, "input")?, state).await),
@@ -482,28 +485,24 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "auth_login_cancel" => {
             to_json(commands::auth::auth_login_cancel(arg(&args, "sessionId")?, state).await)
         }
-        "auth_login_import" => {
-            to_json(
-                commands::auth::auth_login_import(
-                    arg(&args, "provider")?,
-                    arg(&args, "path")?,
-                    arg(&args, "format")?,
-                    state,
-                )
-                .await,
+        "auth_login_import" => to_json(
+            commands::auth::auth_login_import(
+                arg(&args, "provider")?,
+                arg(&args, "path")?,
+                arg(&args, "format")?,
+                state,
             )
-        }
-        "auth_login_import_content" => {
-            to_json(
-                commands::auth::auth_login_import_content(
-                    arg(&args, "provider")?,
-                    arg(&args, "content")?,
-                    arg(&args, "format")?,
-                    state,
-                )
-                .await,
+            .await,
+        ),
+        "auth_login_import_content" => to_json(
+            commands::auth::auth_login_import_content(
+                arg(&args, "provider")?,
+                arg(&args, "content")?,
+                arg(&args, "format")?,
+                state,
             )
-        }
+            .await,
+        ),
         "auth_default_import_path" => to_json(commands::auth::auth_default_import_path().await),
         "auth_logout" => to_json(commands::auth::auth_logout(arg(&args, "id")?, state).await),
         "auth_refresh_token" => {
@@ -512,21 +511,15 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "auth_sync_models" => {
             to_json(commands::auth::auth_sync_models(arg(&args, "id")?, state).await)
         }
-        "auth_export_json" => {
-            to_json(
-                commands::auth::auth_export_json(arg(&args, "id")?, arg(&args, "path")?, state)
-                    .await,
-            )
-        }
+        "auth_export_json" => to_json(
+            commands::auth::auth_export_json(arg(&args, "id")?, arg(&args, "path")?, state).await,
+        ),
         "auth_export_json_content" => {
             to_json(commands::auth::auth_export_json_content(arg(&args, "id")?, state).await)
         }
-        "auth_toggle" => {
-            to_json(
-                commands::auth::auth_toggle(arg(&args, "id")?, arg(&args, "disabled")?, state)
-                    .await,
-            )
-        }
+        "auth_toggle" => to_json(
+            commands::auth::auth_toggle(arg(&args, "id")?, arg(&args, "disabled")?, state).await,
+        ),
         "auth_quota_status" => {
             to_json(commands::auth::auth_quota_status(arg(&args, "id")?, state).await)
         }
@@ -534,8 +527,12 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
 
         // ── 仪表盘 / 设置 / 服务状态 ──
         "get_dashboard_stats" => to_json(commands::stats::get_dashboard_stats(state).await),
-        "get_model_stats" => to_json(commands::stats::get_model_stats(state).await),
-        "get_token_trend" => to_json(commands::stats::get_token_trend(arg(&args, "hours")?, state).await),
+        "get_model_stats" => {
+            to_json(commands::stats::get_model_stats(arg(&args, "hours")?, state).await)
+        }
+        "get_token_trend" => {
+            to_json(commands::stats::get_token_trend(arg(&args, "hours")?, state).await)
+        }
         "get_settings" => to_json(commands::settings::get_settings(state).await),
         "save_settings" => {
             to_json(commands::settings::save_settings(arg(&args, "settings")?, state).await)
@@ -565,64 +562,50 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "get_builtin_security_rules" => {
             to_json(commands::security::get_builtin_security_rules(state).await)
         }
-        "update_builtin_security_rule" => {
-            to_json(
-                commands::security::update_builtin_security_rule(
-                    arg(&args, "id")?,
-                    arg(&args, "input")?,
-                    state,
-                )
-                .await,
+        "update_builtin_security_rule" => to_json(
+            commands::security::update_builtin_security_rule(
+                arg(&args, "id")?,
+                arg(&args, "input")?,
+                state,
             )
-        }
-        "delete_builtin_security_rule" => {
-            to_json(commands::security::delete_builtin_security_rule(arg(&args, "id")?, state).await)
-        }
+            .await,
+        ),
+        "delete_builtin_security_rule" => to_json(
+            commands::security::delete_builtin_security_rule(arg(&args, "id")?, state).await,
+        ),
         "reset_builtin_security_rules" => {
             to_json(commands::security::reset_builtin_security_rules(state).await)
         }
         "get_custom_security_rules" => {
             to_json(commands::security::get_custom_security_rules(state).await)
         }
-        "create_custom_security_rule" => {
-            to_json(
-                commands::security::create_custom_security_rule(arg(&args, "input")?, state).await,
+        "create_custom_security_rule" => to_json(
+            commands::security::create_custom_security_rule(arg(&args, "input")?, state).await,
+        ),
+        "toggle_custom_security_rule" => to_json(
+            commands::security::toggle_custom_security_rule(
+                arg(&args, "id")?,
+                arg(&args, "enabled")?,
+                state,
             )
-        }
-        "toggle_custom_security_rule" => {
-            to_json(
-                commands::security::toggle_custom_security_rule(
-                    arg(&args, "id")?,
-                    arg(&args, "enabled")?,
-                    state,
-                )
-                .await,
-            )
-        }
+            .await,
+        ),
         "delete_custom_security_rule" => {
             to_json(commands::security::delete_custom_security_rule(arg(&args, "id")?, state).await)
         }
 
         // ── 导入 / 导出 ──
         "export_channels" => to_json(commands::import_export::export_channels(state).await),
-        "import_walicode_backup" => {
-            to_json(
-                commands::import_export::import_walicode_backup(arg(&args, "content")?, state)
-                    .await,
-            )
-        }
-        "import_waliapi_export" => {
-            to_json(
-                commands::import_export::import_waliapi_export(arg(&args, "content")?, state).await,
-            )
-        }
+        "import_walicode_backup" => to_json(
+            commands::import_export::import_walicode_backup(arg(&args, "content")?, state).await,
+        ),
+        "import_waliapi_export" => to_json(
+            commands::import_export::import_waliapi_export(arg(&args, "content")?, state).await,
+        ),
         "scan_local_ai_configs" => to_json(commands::import_export::scan_local_ai_configs().await),
-        "import_scanned_sources" => {
-            to_json(
-                commands::import_export::import_scanned_sources(arg(&args, "sources")?, state)
-                    .await,
-            )
-        }
+        "import_scanned_sources" => to_json(
+            commands::import_export::import_scanned_sources(arg(&args, "sources")?, state).await,
+        ),
         #[cfg(feature = "desktop-ui")]
         "pick_import_file" => {
             let app = desktop_app("文件选择对话框")?;
@@ -649,107 +632,77 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "get_knowledge_bases" => {
             to_json(commands::knowledge_base::get_knowledge_bases(state).await)
         }
-        "create_knowledge_base" => {
-            to_json(
-                commands::knowledge_base::create_knowledge_base(state, arg(&args, "input")?).await,
+        "create_knowledge_base" => to_json(
+            commands::knowledge_base::create_knowledge_base(state, arg(&args, "input")?).await,
+        ),
+        "update_knowledge_base" => to_json(
+            commands::knowledge_base::update_knowledge_base(
+                state,
+                arg(&args, "id")?,
+                arg(&args, "input")?,
             )
-        }
-        "update_knowledge_base" => {
-            to_json(
-                commands::knowledge_base::update_knowledge_base(
-                    state,
-                    arg(&args, "id")?,
-                    arg(&args, "input")?,
-                )
-                .await,
-            )
-        }
+            .await,
+        ),
         "delete_knowledge_base" => {
             to_json(commands::knowledge_base::delete_knowledge_base(state, arg(&args, "id")?).await)
         }
         "get_kb_documents" => {
             to_json(commands::knowledge_base::get_kb_documents(state, arg(&args, "kbId")?).await)
         }
-        "delete_kb_document" => {
-            to_json(
-                commands::knowledge_base::delete_kb_document(
-                    state,
-                    arg(&args, "docId")?,
-                    arg(&args, "kbId")?,
-                )
+        "delete_kb_document" => to_json(
+            commands::knowledge_base::delete_kb_document(
+                state,
+                arg(&args, "docId")?,
+                arg(&args, "kbId")?,
+            )
+            .await,
+        ),
+        "reindex_kb_document" => to_json(
+            commands::knowledge_base::reindex_kb_document(state, arg(&args, "docId")?).await,
+        ),
+        "get_kb_tags" => to_json(
+            commands::knowledge_base::get_kb_tags(state, arg(&args, "kbId")?, arg(&args, "limit")?)
                 .await,
-            )
-        }
-        "reindex_kb_document" => {
-            to_json(
-                commands::knowledge_base::reindex_kb_document(state, arg(&args, "docId")?).await,
-            )
-        }
-        "get_kb_tags" => {
-            to_json(
-                commands::knowledge_base::get_kb_tags(
-                    state,
-                    arg(&args, "kbId")?,
-                    arg(&args, "limit")?,
-                )
-                .await,
-            )
-        }
-        "search_knowledge_base" => {
-            to_json(
-                commands::knowledge_base::search_knowledge_base(state, arg(&args, "input")?).await,
-            )
-        }
+        ),
+        "search_knowledge_base" => to_json(
+            commands::knowledge_base::search_knowledge_base(state, arg(&args, "input")?).await,
+        ),
         "ask_knowledge_base" => {
-            to_json(
-                commands::knowledge_base::ask_knowledge_base(state, arg(&args, "input")?).await,
-            )
+            to_json(commands::knowledge_base::ask_knowledge_base(state, arg(&args, "input")?).await)
         }
         "get_kb_stats" => {
             to_json(commands::knowledge_base::get_kb_stats(state, arg(&args, "kbId")?).await)
         }
         "upload_kb_document" => {
-            to_json(
-                commands::knowledge_base::upload_kb_document(state, arg(&args, "input")?).await,
-            )
+            to_json(commands::knowledge_base::upload_kb_document(state, arg(&args, "input")?).await)
         }
-        "get_kb_conversations" => {
-            to_json(
-                commands::knowledge_base::get_kb_conversations(state, arg(&args, "kbId")?).await,
-            )
-        }
-        "clear_kb_conversations" => {
-            to_json(
-                commands::knowledge_base::clear_kb_conversations(state, arg(&args, "kbId")?).await,
-            )
-        }
+        "get_kb_conversations" => to_json(
+            commands::knowledge_base::get_kb_conversations(state, arg(&args, "kbId")?).await,
+        ),
+        "clear_kb_conversations" => to_json(
+            commands::knowledge_base::clear_kb_conversations(state, arg(&args, "kbId")?).await,
+        ),
         "get_kb_sources" => {
             to_json(commands::knowledge_base::get_kb_sources(state, arg(&args, "kbId")?).await)
         }
-        "delete_kb_source" => {
-            to_json(
-                commands::knowledge_base::delete_kb_source(
-                    state,
-                    arg(&args, "sourceId")?,
-                    arg(&args, "kbId")?,
-                )
-                .await,
+        "delete_kb_source" => to_json(
+            commands::knowledge_base::delete_kb_source(
+                state,
+                arg(&args, "sourceId")?,
+                arg(&args, "kbId")?,
             )
-        }
-        "import_kb_source" => {
-            to_json(
-                commands::knowledge_base::import_kb_source(
-                    state,
-                    arg(&args, "kbId")?,
-                    arg(&args, "input")?,
-                )
-                .await,
+            .await,
+        ),
+        "import_kb_source" => to_json(
+            commands::knowledge_base::import_kb_source(
+                state,
+                arg(&args, "kbId")?,
+                arg(&args, "input")?,
             )
-        }
+            .await,
+        ),
         "get_kb_index_status" => {
-            to_json(
-                commands::knowledge_base::get_kb_index_status(state, arg(&args, "kbId")?).await,
-            )
+            to_json(commands::knowledge_base::get_kb_index_status(state, arg(&args, "kbId")?).await)
         }
         "build_kb_index" => {
             to_json(commands::knowledge_base::build_kb_index(state, arg(&args, "kbId")?).await)
@@ -768,101 +721,81 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "get_wiki_project" => {
             to_json(commands::wiki::get_wiki_project(state, arg(&args, "id")?).await)
         }
-        "update_wiki_project" => {
-            to_json(
-                commands::wiki::update_wiki_project(state, arg(&args, "id")?, arg(&args, "input")?)
-                    .await,
-            )
-        }
+        "update_wiki_project" => to_json(
+            commands::wiki::update_wiki_project(state, arg(&args, "id")?, arg(&args, "input")?)
+                .await,
+        ),
         "delete_wiki_project" => {
             to_json(commands::wiki::delete_wiki_project(state, arg(&args, "id")?).await)
         }
         "get_wiki_pages" => {
             to_json(commands::wiki::get_wiki_pages(state, arg(&args, "projectId")?).await)
         }
-        "get_wiki_page" => {
-            to_json(
-                commands::wiki::get_wiki_page(state, arg(&args, "projectId")?, arg(&args, "path")?)
-                    .await,
-            )
-        }
-        "save_wiki_page" => {
-            to_json(
-                commands::wiki::save_wiki_page(
-                    state,
-                    arg(&args, "projectId")?,
-                    arg(&args, "path")?,
-                    arg(&args, "content")?,
-                )
+        "get_wiki_page" => to_json(
+            commands::wiki::get_wiki_page(state, arg(&args, "projectId")?, arg(&args, "path")?)
                 .await,
+        ),
+        "save_wiki_page" => to_json(
+            commands::wiki::save_wiki_page(
+                state,
+                arg(&args, "projectId")?,
+                arg(&args, "path")?,
+                arg(&args, "content")?,
             )
-        }
+            .await,
+        ),
         "get_wiki_sources" => {
             to_json(commands::wiki::get_wiki_sources(state, arg(&args, "projectId")?).await)
         }
-        "add_wiki_source" => {
-            to_json(
-                commands::wiki::add_wiki_source(
-                    state,
-                    arg(&args, "projectId")?,
-                    arg(&args, "input")?,
-                )
+        "add_wiki_source" => to_json(
+            commands::wiki::add_wiki_source(state, arg(&args, "projectId")?, arg(&args, "input")?)
                 .await,
-            )
-        }
+        ),
         "delete_wiki_source" => {
             to_json(commands::wiki::delete_wiki_source(state, arg(&args, "sourceId")?).await)
         }
-        "search_wiki" => {
-            to_json(
-                commands::wiki::search_wiki(
-                    state,
-                    arg(&args, "projectId")?,
-                    arg(&args, "query")?,
-                    arg(&args, "topK")?,
-                )
-                .await,
+        "search_wiki" => to_json(
+            commands::wiki::search_wiki(
+                state,
+                arg(&args, "projectId")?,
+                arg(&args, "query")?,
+                arg(&args, "topK")?,
             )
-        }
+            .await,
+        ),
         "get_wiki_graph" => {
             to_json(commands::wiki::get_wiki_graph(state, arg(&args, "projectId")?).await)
         }
-        "get_wiki_tags" => {
-            to_json(
-                commands::wiki::get_wiki_tags(state, arg(&args, "projectId")?, arg(&args, "limit")?)
-                    .await,
-            )
-        }
+        "get_wiki_tags" => to_json(
+            commands::wiki::get_wiki_tags(state, arg(&args, "projectId")?, arg(&args, "limit")?)
+                .await,
+        ),
         "get_wiki_stats" => {
             to_json(commands::wiki::get_wiki_stats(state, arg(&args, "projectId")?).await)
         }
-        "ingest_wiki_source" => {
-            to_json(
-                commands::wiki::ingest_wiki_source(
-                    state,
-                    arg(&args, "projectId")?,
-                    arg(&args, "sourceId")?,
-                )
-                .await,
+        "ingest_wiki_source" => to_json(
+            commands::wiki::ingest_wiki_source(
+                state,
+                arg(&args, "projectId")?,
+                arg(&args, "sourceId")?,
             )
-        }
+            .await,
+        ),
         "rescan_wiki_sources" => {
             to_json(commands::wiki::rescan_wiki_sources(state, arg(&args, "projectId")?).await)
         }
 
         // ── 应用配置（容器内通常全部不可用，由前端置灰）──
         "get_app_configs" => to_json(commands::app_config::get_app_configs(state).await),
-        "apply_app_config" => {
-            to_json(
-                commands::app_config::apply_app_config(
-                    arg(&args, "appName")?,
-                    arg(&args, "apiKey")?,
-                    arg(&args, "model")?,
-                    state,
-                )
-                .await,
+        "apply_app_config" => to_json(
+            commands::app_config::apply_app_config(
+                arg(&args, "appName")?,
+                arg(&args, "apiKey")?,
+                arg(&args, "model")?,
+                state,
             )
-        }
+            .await,
+        ),
         "clear_app_config" => {
             to_json(commands::app_config::clear_app_config(arg(&args, "appName")?).await)
         }

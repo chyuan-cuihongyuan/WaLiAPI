@@ -142,8 +142,10 @@ export const authApi = {
 // Stats commands
 export const statsApi = {
   getDashboard: () => invoke<DashboardStats>("get_dashboard_stats"),
-  getModelStats: () => invoke<ModelStats[]>("get_model_stats"),
+  getModelStats: (hours?: number) => invoke<ModelStats[]>("get_model_stats", { hours: hours ?? null }),
   getTokenTrend: (hours?: number) => invoke<TokenTrendPoint[]>("get_token_trend", { hours: hours ?? 24 }),
+  getChannelStats: (hours?: number) => invoke<ChannelStats[]>("get_channel_stats", { hours: hours ?? null }),
+  getApiKeyStats: (hours?: number) => invoke<ApiKeyStats[]>("get_api_key_stats", { hours: hours ?? null }),
 };
 
 // Settings commands
