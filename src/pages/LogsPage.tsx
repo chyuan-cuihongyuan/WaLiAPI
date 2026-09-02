@@ -263,7 +263,7 @@ export function LogsPage() {
           <h1 className="text-[28px] font-bold leading-tight tracking-tight">审计日志</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">查看请求结果、Token 消耗、工具调用与网关路由详情</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <button
             onClick={() => setShowSearch(!showSearch)}
             className={`action-secondary ${hasActiveFilters ? "text-blue-600 bg-blue-50" : ""}`}
@@ -593,8 +593,10 @@ function LogRow({
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={13} className="px-4 py-4 bg-slate-50/80 border-b border-border">
-            <LogDetail log={log} />
+          <td colSpan={13} className="px-4 py-4 bg-slate-50/80 border-b border-border align-top">
+            <div className="min-w-0 max-w-full overflow-hidden">
+              <LogDetail log={log} />
+            </div>
           </td>
         </tr>
       )}
@@ -744,7 +746,7 @@ function LogDetail({ log }: { log: RequestLog }) {
   const [activeTab, setActiveTab] = useState<"request" | "response">("request");
 
   return (
-    <div className="space-y-4">
+    <div className="w-full min-w-0 space-y-4">
       {/* ── Gateway Metadata Cards ── */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-7">
         {/* Token detail */}
@@ -890,7 +892,7 @@ function LogDetail({ log }: { log: RequestLog }) {
         <div className="flex items-center gap-2">
           <Wrench size={14} className="text-amber-500" />
           <span className="text-xs text-slate-500 shrink-0">涉及工具:</span>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex min-w-0 flex-wrap gap-1.5">
             {allToolNames.map(name => (
               <span
                 key={name}
@@ -906,10 +908,10 @@ function LogDetail({ log }: { log: RequestLog }) {
 
       {/* ── Conversation composition summary ── */}
       {convStats.msgCount > 0 && (
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <Eye size={14} className="text-blue-500" />
           <span className="text-xs text-slate-500 shrink-0">对话构成:</span>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex min-w-0 flex-wrap gap-1.5">
             {Array.from(convStats.roles.entries()).map(([role, count]) => {
               const meta = getRoleMeta(role);
               const Icon = meta.icon;
@@ -933,7 +935,7 @@ function LogDetail({ log }: { log: RequestLog }) {
       )}
 
       {/* ── Request params tags ── */}
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex min-w-0 flex-wrap gap-1.5">
         <span className="inline-flex items-center rounded-md bg-blue-50 border border-blue-200 px-2 py-0.5 text-[11px] font-mono font-medium text-blue-700">
           model: {modelRequested}
         </span>
@@ -966,9 +968,9 @@ function LogDetail({ log }: { log: RequestLog }) {
 
       {/* ── Error ── */}
       {log.error_message && (
-        <div className="flex items-start gap-2 rounded-xl bg-red-50 border border-red-200 p-3 text-xs text-red-600">
+        <div className="flex min-w-0 items-start gap-2 rounded-xl bg-red-50 border border-red-200 p-3 text-xs text-red-600">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
-          <span className="break-all">{log.error_message}</span>
+          <span className="min-w-0 break-words [overflow-wrap:anywhere]">{log.error_message}</span>
         </div>
       )}
 
@@ -1040,7 +1042,7 @@ function LogDetail({ log }: { log: RequestLog }) {
 
           {jsonExpanded ? (
             <div className="relative">
-              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
                 {pretty}
               </pre>
               <button
@@ -1147,8 +1149,8 @@ function LogDetail({ log }: { log: RequestLog }) {
                         </div>
 
                         {/* Content section */}
-                        <div className="px-3 py-2">
-                          <div className="text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words">
+                        <div className="px-3 py-2 min-w-0">
+                          <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                             {!isExpanded
                               ? preview
                               : fullContent
@@ -1235,7 +1237,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                         </div>
                                       </div>
                                       <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
-                                        <pre className="text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] overflow-auto">
+                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] [overflow-wrap:anywhere]">
                                           {isToolExpanded ? fullJson : formattedArgs}
                                         </pre>
                                       </div>
@@ -1274,7 +1276,7 @@ function LogDetail({ log }: { log: RequestLog }) {
           </div>
           {jsonExpanded ? (
             <div className="relative">
-              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
                 {pretty}
               </pre>
               <button
@@ -1320,7 +1322,7 @@ function LogDetail({ log }: { log: RequestLog }) {
 
           {responseJsonExpanded ? (
             <div className="relative">
-              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
                 {prettyChoices}
               </pre>
               <button
@@ -1450,7 +1452,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                 )}
                               </div>
                             </div>
-                            <div className="text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words">
+                            <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                               {reasoningContent.length > 200 ? (
                                 reasoningExpanded ? (
                                   (() => {
@@ -1526,7 +1528,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                               )}
                             </div>
                           </div>
-                          <div className="text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words">
+                          <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                             {content.length > 300 ? (
                               contentExpanded ? (
                                 (() => {
@@ -1610,7 +1612,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                         </div>
                                       </div>
                                       <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
-                                        <pre className="text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] overflow-auto">
+                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] [overflow-wrap:anywhere]">
                                           {isToolExpanded ? fullJson : formattedArgs}
                                         </pre>
                                       </div>
@@ -1648,7 +1650,7 @@ function LogDetail({ log }: { log: RequestLog }) {
           </div>
           {responseJsonExpanded ? (
             <div className="relative">
-              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
                 {prettyChoices}
               </pre>
               <button
