@@ -535,11 +535,15 @@ function SkillsSection() {
 
 function KnowledgeBaseSection() {
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
-  const [selectedKb, setSelectedKb] = useState<KnowledgeBase | null>(null);
+  const [selectedKbId, setSelectedKbId] = useState<string | null>(null);
   const [kbTab, setKbTab] = useState<KbTab>("documents");
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const selectedKb = useMemo(
+    () => selectedKbId ? kbs.find((kb) => kb.id === selectedKbId) ?? null : null,
+    [kbs, selectedKbId],
+  );
 
   const fetchKbs = useCallback(async () => {
     setLoading(true);
@@ -558,26 +562,20 @@ function KnowledgeBaseSection() {
   }, [fetchKbs]);
 
   const handleSelectKb = (kb: KnowledgeBase) => {
-    setSelectedKb(kb);
+    setSelectedKbId(kb.id);
     setKbTab("documents");
   };
 
-  // Keep selectedKb in sync with kbs list (so counts refresh after upload/etc)
-  useEffect(() => {
-    if (selectedKb) {
-      const updated = kbs.find((k) => k.id === selectedKb.id);
-      if (updated && (updated.doc_count !== selectedKb.doc_count || updated.chunk_count !== selectedKb.chunk_count || updated.total_tokens !== selectedKb.total_tokens || updated.status !== selectedKb.status || updated.mcp_enabled !== selectedKb.mcp_enabled)) {
-        setSelectedKb(updated);
-      }
-    }
-  }, [kbs, selectedKb]);
+  const handleKbUpdated = useCallback((updated: KnowledgeBase) => {
+    setKbs((current) => current.map((kb) => kb.id === updated.id ? updated : kb));
+  }, []);
 
   const handleDelete = async (id: string) => {
     if (!confirm("确定删除此 RAG 知识库？所有文档和切片将一并删除。")) return;
     try {
       await kbApi.delete(id);
       await fetchKbs();
-      if (selectedKb?.id === id) setSelectedKb(null);
+      if (selectedKbId === id) setSelectedKbId(null);
     } catch (e) {
       setError(String(e));
     }
@@ -617,8 +615,9 @@ function KnowledgeBaseSection() {
           kb={selectedKb}
           tab={kbTab}
           setTab={setKbTab}
-          onBack={() => { setSelectedKb(null); setKbTab("documents"); }}
+          onBack={() => { setSelectedKbId(null); setKbTab("documents"); }}
           onRefresh={fetchKbs}
+          onUpdated={handleKbUpdated}
         />
       ) : (
         <KbList
@@ -858,12 +857,14 @@ function KbDetail({
   setTab,
   onBack,
   onRefresh,
+  onUpdated,
 }: {
   kb: KnowledgeBase;
   tab: KbTab;
   setTab: (t: KbTab) => void;
   onBack: () => void;
   onRefresh: () => void;
+  onUpdated: (kb: KnowledgeBase) => void;
 }) {
   const tabs: { key: KbTab; label: string; icon: typeof FileText }[] = [
     { key: "documents", label: "文档", icon: FileText },
@@ -914,7 +915,7 @@ function KbDetail({
       {tab === "search" && <SearchTab kb={kb} />}
       {tab === "ask" && <AskTab kb={kb} />}
       {tab === "index" && <IndexTab kb={kb} />}
-      {tab === "settings" && <SettingsTab kb={kb} onRefresh={onRefresh} />}
+      {tab === "settings" && <SettingsTab kb={kb} onUpdated={onUpdated} />}
       {tab === "mcp" && <McpTab kb={kb} />}
     </div>
   );
@@ -2471,7 +2472,7 @@ function mergeEmbeddingOptions(channelModels: string[], current: string): string
 
 // ─── Settings Tab ───────────────────────────────────────────────────────
 
-function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => void }) {
+function SettingsTab({ kb, onUpdated }: { kb: KnowledgeBase; onUpdated: (kb: KnowledgeBase) => void }) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [name, setName] = useState(kb.name);
   const [description, setDescription] = useState(kb.description || "");
@@ -2510,7 +2511,7 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
     setSaving(true);
     setSaved(false);
     try {
-      await kbApi.update(kb.id, {
+      const updated = await kbApi.update(kb.id, {
         name: name.trim(),
         description: description.trim() || undefined,
         embedding_model: embeddingModel.trim() || undefined,
@@ -2526,8 +2527,8 @@ function SettingsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => vo
         excluded_files: excludedFiles,
         included_files: includedFiles,
       });
+      onUpdated(updated);
       setSaved(true);
-      onRefresh();
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       alert(`保存失败: ${e}`);
@@ -3259,11 +3260,15 @@ function WikiMarkdown({ content }: { content: string }) {
 
 function WikiSection() {
   const [projects, setProjects] = useState<WikiProject[]>([]);
-  const [selectedProject, setSelectedProject] = useState<WikiProject | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [wikiTab, setWikiTab] = useState<"overview" | "pages" | "sources" | "search" | "graph" | "settings">("overview");
+  const selectedProject = useMemo(
+    () => selectedProjectId ? projects.find((project) => project.id === selectedProjectId) ?? null : null,
+    [projects, selectedProjectId],
+  );
 
   const fetchProjects = useCallback(async () => {
     setLoading(true);
@@ -3279,21 +3284,16 @@ function WikiSection() {
 
   useEffect(() => { fetchProjects(); }, [fetchProjects]);
 
-  useEffect(() => {
-    if (selectedProject) {
-      const updated = projects.find(p => p.id === selectedProject.id);
-      if (updated && (updated.page_count !== selectedProject.page_count || updated.source_count !== selectedProject.source_count)) {
-        setSelectedProject(updated);
-      }
-    }
-  }, [projects, selectedProject]);
+  const handleProjectUpdated = useCallback((updated: WikiProject) => {
+    setProjects((current) => current.map((project) => project.id === updated.id ? updated : project));
+  }, []);
 
   const handleDelete = async (id: string) => {
     if (!confirm("确定删除此 Wiki 项目？所有页面和源数据将一并删除。")) return;
     try {
       await wikiApi.deleteProject(id);
       await fetchProjects();
-      if (selectedProject?.id === id) setSelectedProject(null);
+      if (selectedProjectId === id) setSelectedProjectId(null);
     } catch (e) { setError(String(e)); }
   };
 
@@ -3326,8 +3326,9 @@ function WikiSection() {
         project={selectedProject}
         tab={wikiTab}
         setTab={setWikiTab}
-        onBack={() => { setSelectedProject(null); setWikiTab("overview"); }}
+        onBack={() => { setSelectedProjectId(null); setWikiTab("overview"); }}
         onRefresh={fetchProjects}
+        onUpdated={handleProjectUpdated}
       />
     );
   }
@@ -3375,7 +3376,7 @@ function WikiSection() {
               <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${p.status === 1 ? "bg-violet-50" : "bg-slate-100"}`}>
                 <Network className={`h-5 w-5 ${p.status === 1 ? "text-violet-600" : "text-slate-400"}`} />
               </div>
-              <div className="min-w-0 flex-1 cursor-pointer" onClick={() => setSelectedProject(p)}>
+              <div className="min-w-0 flex-1 cursor-pointer" onClick={() => setSelectedProjectId(p.id)}>
                 <div className="flex items-center gap-2">
                   <h3 className="text-base font-semibold text-slate-900">{p.name}</h3>
                   {p.status === 1 ? (
@@ -3569,12 +3570,14 @@ function WikiProjectDetail({
   setTab,
   onBack,
   onRefresh,
+  onUpdated,
 }: {
   project: WikiProject;
   tab: "overview" | "pages" | "sources" | "search" | "graph" | "settings";
   setTab: (t: "overview" | "pages" | "sources" | "search" | "graph" | "settings") => void;
   onBack: () => void;
   onRefresh: () => void;
+  onUpdated: (project: WikiProject) => void;
 }) {
   const [initialSearchQuery, setInitialSearchQuery] = useState<string | null>(null);
   const tabs = [
@@ -3620,7 +3623,7 @@ function WikiProjectDetail({
       {tab === "sources" && <WikiSourcesTab project={project} onRefresh={onRefresh} onNavigateSettings={() => setTab("settings")} />}
       {tab === "search" && <WikiSearchTab project={project} initialQuery={initialSearchQuery} onInitialQueryConsumed={() => setInitialSearchQuery(null)} />}
       {tab === "graph" && <WikiGraphTab project={project} />}
-      {tab === "settings" && <WikiSettingsTab project={project} onRefresh={onRefresh} />}
+      {tab === "settings" && <WikiSettingsTab project={project} onUpdated={onUpdated} />}
     </div>
   );
 }
@@ -4816,7 +4819,7 @@ function ChannelModelPicker({
   );
 }
 
-function WikiSettingsTab({ project, onRefresh }: { project: WikiProject; onRefresh: () => void }) {
+function WikiSettingsTab({ project, onUpdated }: { project: WikiProject; onUpdated: (project: WikiProject) => void }) {
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description || "");
   const [ingestModel, setIngestModel] = useState(project.ingest_model || "");
@@ -4835,14 +4838,14 @@ function WikiSettingsTab({ project, onRefresh }: { project: WikiProject; onRefre
   const handleSave = async () => {
     setSaving(true);
     try {
-      await wikiApi.updateProject(project.id, {
+      const updated = await wikiApi.updateProject(project.id, {
         name, description, ingest_model: ingestModel || undefined,
         chat_model: chatModel || undefined, schema_text: schemaText || undefined,
         ingest_channel_id: ingestChannelId || undefined,
         chat_channel_id: chatChannelId || undefined,
       });
+      onUpdated(updated);
       setSaved(true);
-      onRefresh();
       setTimeout(() => setSaved(false), 2000);
     } catch { /* ignore */ } finally { setSaving(false); }
   };
