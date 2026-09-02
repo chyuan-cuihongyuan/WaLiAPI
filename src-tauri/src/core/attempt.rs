@@ -1270,6 +1270,36 @@ mod tests {
     }
 
     #[test]
+    fn auth_channel_auth_terminal_halt_honors_real_401() {
+        // Auth accounts own their OAuth credentials: halt must surface the real
+        // upstream 401 (carried in status_code) so the caller can re-login.
+        // Channel failures carry no explicit status and stay masked at 502.
+        let native = channel("n1", "openai", "https://api.openai.com/v1", &["m"], 1, 1);
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut flow = AttemptFlow::new(chat_plan(vec![native], &mut rng));
+        let _ = flow.next_step();
+        let mut f = failure(FailureClass::ChannelAuthTerminal);
+        f.status_code = Some(401);
+        flow.record_failure(&f);
+        let step = flow.next_step();
+        let FlowStep::Halt { status, .. } = step else {
+            panic!("single exhausted candidate must halt")
+        };
+        assert_eq!(status, 401);
+
+        let native = channel("n1", "openai", "https://api.openai.com/v1", &["m"], 1, 1);
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut flow = AttemptFlow::new(chat_plan(vec![native], &mut rng));
+        let _ = flow.next_step();
+        flow.record_failure(&failure(FailureClass::ChannelAuthTerminal));
+        let step = flow.next_step();
+        let FlowStep::Halt { status, .. } = step else {
+            panic!("single exhausted candidate must halt")
+        };
+        assert_eq!(status, 502, "channels keep the canonical 502 mask");
+    }
+
+    #[test]
     fn caller_terminal_halts_immediately() {
         let native = channel("n1", "openai", "https://api.openai.com/v1", &["m"], 1, 1);
         let conv = channel("c1", "claude", "https://api.anthropic.com/v1", &["m"], 1, 1);

@@ -173,7 +173,7 @@ where
                     let status = result.status_code.unwrap_or(terminal_status_of(&result));
                     return PlanExecution {
                         status,
-                        body: serde_json::json!({ "error": { "message": result.message } }),
+                        body: serde_json::json!({ "error": { "message": result.message, "failure_class": result.failure_class.as_str() } }),
                         usage: None,
                         channel_id: Some(meta.channel_id),
                         channel_name: Some(meta.channel_name),
@@ -195,9 +195,14 @@ where
             }
             FlowStep::Halt { status, message } => {
                 let meta = last_attempt_meta;
+                let last_failure = flow.last_failure().cloned();
+                let body = match &last_failure {
+                    Some(f) => serde_json::json!({ "error": { "message": message, "failure_class": f.failure_class.as_str() } }),
+                    None => serde_json::json!({ "error": { "message": message } }),
+                };
                 return PlanExecution {
                     status,
-                    body: serde_json::json!({ "error": { "message": message } }),
+                    body,
                     usage: None,
                     channel_id: meta.as_ref().map(|meta| meta.channel_id.clone()),
                     channel_name: meta.as_ref().map(|meta| meta.channel_name.clone()),
@@ -212,7 +217,7 @@ where
                     response_headers: vec![],
                     attempts: flow.attempts_used(),
                     duration_ms: started.elapsed().as_millis() as u64,
-                    last_failure: flow.last_failure().cloned(),
+                    last_failure,
                 };
             }
         }

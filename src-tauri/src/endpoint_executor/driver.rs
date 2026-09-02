@@ -195,15 +195,19 @@ async fn record_channel_mode_outcome(
     }
 }
 
-fn plan_error_response(status: u16, message: impl Into<String>) -> Response {
+fn plan_error_response(
+    status: u16,
+    message: impl Into<String>,
+    failure_class: Option<&'static str>,
+) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    (
-        code,
-        axum::Json(json!({
-            "error": { "message": message.into(), "type": "route_plan_error", "code": code.as_u16() }
-        })),
-    )
-        .into_response()
+    let mut error = json!({
+        "message": message.into(), "type": "route_plan_error", "code": code.as_u16()
+    });
+    if let Some(class) = failure_class {
+        error["failure_class"] = json!(class);
+    }
+    (code, axum::Json(json!({ "error": error }))).into_response()
 }
 
 /// Count Tokens is a planning probe rather than a billable/request-history
@@ -745,6 +749,7 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                         {
                             // I-3: terminal pre-commit outcome must be logged.
                             let status = f.status_code.unwrap_or(400);
+                            let failure_class = f.failure_class;
                             write_stream_precommit_failure_log_with_meta(
                                 repo,
                                 key,
@@ -758,7 +763,11 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                                 last_attempt_meta.as_ref(),
                             )
                             .await;
-                            return plan_error_response(status, f.message);
+                            return plan_error_response(
+                                status,
+                                f.message,
+                                Some(failure_class.as_str()),
+                            );
                         }
                         continue;
                     }
@@ -815,6 +824,7 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                         {
                             // I-3: terminal pre-commit outcome must be logged.
                             let status = f.status_code.unwrap_or(400);
+                            let failure_class = f.failure_class;
                             write_stream_precommit_failure_log_with_meta(
                                 repo,
                                 key,
@@ -828,7 +838,11 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                                 last_attempt_meta.as_ref(),
                             )
                             .await;
-                            return plan_error_response(status, f.message);
+                            return plan_error_response(
+                                status,
+                                f.message,
+                                Some(failure_class.as_str()),
+                            );
                         }
                         continue;
                     }
@@ -1033,6 +1047,7 @@ pub(crate) async fn route_stream_plan_with_auth_service(
             }
             FlowStep::Halt { status, message } => {
                 // I-3: streaming pre-commit terminal outcome must be logged.
+                let failure_class = flow.last_failure().map(|f| f.failure_class.as_str());
                 write_stream_precommit_failure_log_with_meta(
                     repo,
                     key,
@@ -1046,7 +1061,7 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                     last_attempt_meta.as_ref(),
                 )
                 .await;
-                return plan_error_response(status, message);
+                return plan_error_response(status, message, failure_class);
             }
         }
     }

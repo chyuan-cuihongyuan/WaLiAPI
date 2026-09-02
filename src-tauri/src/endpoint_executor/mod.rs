@@ -1208,6 +1208,31 @@ mod tests {
     }
 
     #[test]
+    fn auth_upstream_keeps_real_401_status() {
+        // Auth accounts own their OAuth credentials: the caller must see the
+        // real 401 to know re-login fixes it (failover class unchanged).
+        let f = failure_from_auth_upstream(401, r#"{"error":{"message":"invalid token"}}"#);
+        assert_eq!(f.failure_class, FailureClass::ChannelAuthTerminal);
+        assert_eq!(f.status_code, Some(401));
+        let f = failure_from_auth_upstream(403, "forbidden");
+        assert_eq!(f.failure_class, FailureClass::ChannelAuthTerminal);
+        assert_eq!(f.status_code, Some(403));
+        // Non-auth failures behave exactly like the channel variant.
+        let f = failure_from_auth_upstream(500, "boom");
+        assert_eq!(f.failure_class, FailureClass::Retryable);
+        assert_eq!(f.status_code, Some(500));
+    }
+
+    #[test]
+    fn provider_unauthorized_maps_to_401() {
+        let f = provider_failure(crate::auth_provider::ProviderError::Unauthorized);
+        assert_eq!(f.failure_class, FailureClass::ChannelAuthTerminal);
+        assert_eq!(f.status_code, Some(401));
+        let f = provider_failure(crate::auth_provider::ProviderError::Retryable);
+        assert_eq!(f.status_code, Some(502));
+    }
+
+    #[test]
     fn gemini_override_url_and_body() {
         let url = gemini_url(
             "https://generativelanguage.googleapis.com",
