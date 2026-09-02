@@ -450,6 +450,8 @@ pub struct DashboardStats {
     pub active_channels: i64,
     pub avg_latency_ms: f64,
     pub total_channels: i64,
+    pub active_auth_accounts: i64,
+    pub total_auth_accounts: i64,
     pub total_api_keys: i64,
     pub total_requests: i64,
     pub total_tokens: i64,

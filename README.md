@@ -4,7 +4,7 @@
 
 ### 本地 LLM API 网关 · 多协议接入 · 知识库 RAG · MCP 工具服务
 
-[![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.2.7-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-使用方式)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -40,14 +40,14 @@
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 284 | `+78,700 / -16,125` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 287 | `+78,744 / -16,146` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
 | ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
 | 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
 | 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 4 | `+3,086 / -120` | 知识库扫描版 PDF VLM OCR（方案A）· OCR 页级混合识别 · 修复 Claude 渠道协议适配 · OCR/Embedding 模型下拉按用途过滤 · pdfium macOS 打包路径修复 |
 | 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 5 | `+524 / -103` | 统一上游重试判定决策函数与真值表测试 · 401/403 下游脱敏 · 上游终态错误短路 · 数据库故障误报修复 · Anthropic 内置工具 400 修复 |
 | 🐞 | **xerina** | [@jiangnuonnuo](https://github.com/jiangnuonnuo) | 3 | `+221 / -49` | Wiki Unicode 文本切片 panic 进程崩溃修复 · 新增字符边界安全切片工具（utils/text.rs）|
 | 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 10 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
-| 🐛 | **cyd** | [@cydmacro](https://github.com/cydmacro) | 1 | `+71 / -8` | Codex 工具调用参数一次性下发，修复部分客户端截断 |
+| 🐛 | **cyd** | [@cydmacro](https://github.com/cydmacro) | 2 | `+105 / -9` | Codex 工具调用参数一次性下发，修复部分客户端截断 · Codex Responses 请求 strip `prompt_cache_options` 兼容修复（PR #59）|
 | 🐛 | **breezewonders** | [@breezewonders-dev](https://github.com/breezewonders-dev) | 1 | `+14 / -0` | Chat-to-Responses 转换 store 字段归一化修复 |
 | 🐛 | **lianggq** | [@GQingL](https://github.com/GQingL) | 1 | `+91 / -9` | 日志日期筛选修复 · macOS 渠道删除按钮修复 |
 
@@ -619,6 +619,21 @@ WaLiAPI/
 ---
 
 ## 📌 版本历史
+
+### v0.2.7 (2026-09-02)
+
+#### 仪表盘
+
+- ✨ **服务可用率纳入 Auth 账号**：仪表盘「服务可用率」统计口径由「活跃渠道 / 总渠道」扩展为「活跃上游 / 全部上游」——上游包含 API 渠道与 Auth 账号（未禁用且凭证有效）两类，仅接入 Auth 账号时可用率不再虚低；「活跃渠道」卡片升级为「活跃上游」，主值显示合计，副文案拆分展示渠道与账号明细；桌面端与 Web 管理端同步生效
+
+#### 修复
+
+- 🐛 **Codex Responses 请求 strip `prompt_cache_options`**：Codex 后端请求白名单有 `prompt_cache_key` 却缺配套的 `prompt_cache_options`，WaLiCode 走 Responses 协议必带该字段，导致整条 Responses 路径被 `HTTP 400` 拒绝、只能退回 Chat 协议；该字段仅作缓存提示，归入 STRIPPED 静默丢弃，与 Chat 路径行为对齐（PR #59）
+
+#### 其他
+
+- 📝 **README 贡献者数据同步**：按最新提交记录更新贡献者提交数与代码变更统计
+- 🔧 **版本号统一升级至 0.2.7**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
 ### v0.2.6 (2026-09-02)
 

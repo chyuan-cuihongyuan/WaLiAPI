@@ -364,6 +364,8 @@ export interface DashboardStats {
   active_channels: number;
   avg_latency_ms: number;
   total_channels: number;
+  active_auth_accounts: number;
+  total_auth_accounts: number;
   total_api_keys: number;
   total_requests: number;
   total_tokens: number;

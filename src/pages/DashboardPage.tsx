@@ -73,7 +73,10 @@ export function DashboardPage() {
     return <div className="page-shell text-sm text-slate-500">加载中...</div>;
   }
 
-  const availability = stats.total_channels > 0 ? Math.round((stats.active_channels / stats.total_channels) * 100) : 0;
+  // 服务可用率 = 可用上游 / 全部上游，上游包含 API 渠道与 Auth 账号两类。
+  const activeUpstreams = stats.active_channels + stats.active_auth_accounts;
+  const totalUpstreams = stats.total_channels + stats.total_auth_accounts;
+  const availability = totalUpstreams > 0 ? Math.round((activeUpstreams / totalUpstreams) * 100) : 0;
 
   // 上 5：请求与渠道 | 下 5：知识服务
   const cacheRate = (cached: number, prompt: number) =>
@@ -85,7 +88,7 @@ export function DashboardPage() {
     { label: "今日缓存命中", value: cacheRate(stats.today_cached_tokens, stats.today_prompt_tokens), sub: `节省 ${formatNumber(stats.today_cached_tokens)} tokens`, icon: DatabaseZap, color: "text-emerald-600", tone: "bg-emerald-50" },
     { label: "累计请求", value: formatNumber(stats.total_requests), icon: TrendingUp, color: "text-indigo-600", tone: "bg-indigo-50" },
     { label: "累计 Token", value: formatNumber(stats.total_tokens), icon: Zap, color: "text-orange-600", tone: "bg-orange-50" },
-    { label: "活跃渠道", value: `${stats.active_channels}/${stats.total_channels}`, icon: Radio, color: "text-teal-600", tone: "bg-teal-50" },
+    { label: "活跃上游", value: `${activeUpstreams}/${totalUpstreams}`, sub: `渠道 ${stats.active_channels}/${stats.total_channels} · 账号 ${stats.active_auth_accounts}/${stats.total_auth_accounts}`, icon: Radio, color: "text-teal-600", tone: "bg-teal-50" },
   ];
   const bottomMetrics = [
     { label: "平均延迟", value: formatDuration(Math.round(stats.avg_latency_ms)), icon: Workflow, color: "text-violet-600", tone: "bg-violet-50" },
@@ -227,10 +230,10 @@ export function DashboardPage() {
             </div>
             <p className="mt-1.5 text-sm text-slate-500">
               {availability >= 80
-                ? "当前渠道运行正常，各线路可用。"
+                ? "当前上游运行正常，渠道与账号线路可用。"
                 : availability >= 50
-                  ? "部分渠道不可用，建议检查并启用备用线路。"
-                  : "活跃渠道较少，请前往渠道页测试并启用。"}
+                  ? "部分上游不可用，建议检查渠道与 Auth 账号并启用备用线路。"
+                  : "活跃上游较少，请前往渠道/Auth 账号页测试并启用。"}
             </p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">

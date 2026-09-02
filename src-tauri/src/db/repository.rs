@@ -1470,6 +1470,20 @@ impl Repository {
             .await
             .unwrap_or(0);
 
+        // Auth 账号同样承担上游能力，可用率统计必须纳入：
+        // 可用 = 未禁用且凭证状态有效。
+        let active_auth_accounts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auth_accounts WHERE disabled = 0 AND status = 'active'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        let total_auth_accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_accounts")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+
         let total_api_keys: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_keys")
             .fetch_one(&self.pool)
             .await
@@ -1530,6 +1544,8 @@ impl Repository {
             active_channels,
             avg_latency_ms: avg_latency,
             total_channels,
+            active_auth_accounts,
+            total_auth_accounts,
             total_api_keys,
             total_requests,
             total_tokens,

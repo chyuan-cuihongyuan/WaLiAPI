@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.7 (2026-09-02)
+
+### 仪表盘
+
+- ✨ **服务可用率纳入 Auth 账号**：仪表盘「服务可用率」统计口径由「活跃渠道 / 总渠道」扩展为「活跃上游 / 全部上游」——上游包含 API 渠道（`status = 1`）与 Auth 账号（未禁用且凭证有效）两类，仅接入 Auth 账号时可用率不再虚低；「活跃渠道」卡片升级为「活跃上游」，主值显示合计，副文案拆分展示渠道与账号明细；Tauri 桌面端与 waliapi-web 管理端共用同一统计 DTO，同步生效
+
+### 修复
+
+- 🐛 **Codex Responses 请求 strip `prompt_cache_options`**：Codex 后端 `validate_backend_request` 白名单有 `prompt_cache_key` 却缺配套的 `prompt_cache_options`，WaLiCode 走 Responses 协议必带该字段（值为 `{"mode":"implicit"}`），导致整条 Responses 路径被 `HTTP 400` 拒绝、只能退回 Chat 协议；该字段仅作缓存提示、不携带后端请求语义，归入 STRIPPED 静默丢弃，与 Chat 路径行为对齐（PR #59）
+
+### 其他
+
+- 📝 **README 贡献者数据同步**：按最新提交记录更新贡献者提交数与代码变更统计
+- 🔧 **版本号统一升级至 0.2.7**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ## v0.2.6 (2026-09-02)
 
 ### 缓存命中 Token 统计
