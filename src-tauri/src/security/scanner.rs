@@ -1,4 +1,5 @@
 use super::{RiskLevel, SecurityFinding, SecurityScanResult, SecuritySettings};
+use crate::utils::text::truncate_utf8;
 use std::time::{Duration, Instant};
 
 const MAX_FINDINGS: usize = 80;
@@ -255,20 +256,6 @@ fn scan_text(text: &str, phase: &str, location: &str, ctx: &mut ScanContext) {
     }
     scan_tracking_pixel(scan_text, phase, location, ctx);
     scan_fingerprint_terms(scan_text, phase, location, ctx);
-}
-
-/// Truncate to `max` bytes at a UTF-8 char boundary (never panics).
-fn truncate_utf8(text: &str, max: usize) -> &str {
-    if text.len() <= max {
-        text
-    } else {
-        // Find the largest char boundary <= max.
-        let mut end = max;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        &text[..end]
-    }
 }
 
 fn scan_credentials(text: &str, phase: &str, location: &str, ctx: &mut ScanContext) {
