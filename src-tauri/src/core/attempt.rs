@@ -495,7 +495,18 @@ impl AttemptFlow {
 
     fn halt(&self) -> FlowStep {
         let (status, message) = match &self.last_failure {
-            Some(f) => (terminal_status(f.failure_class), f.message.clone()),
+            Some(f) => {
+                // ChannelAuthTerminal is normally masked to a canonical 502
+                // (a channel's key problem must never look like the caller's).
+                // Auth accounts own their credentials, so an explicit
+                // status_code (401/403) is honored to let the caller
+                // re-authenticate instead of seeing a misleading 502.
+                let status = match f.failure_class {
+                    FailureClass::ChannelAuthTerminal => f.status_code.unwrap_or(502),
+                    _ => terminal_status(f.failure_class),
+                };
+                (status, f.message.clone())
+            }
             None => (503, "No available upstream candidate".to_string()),
         };
         FlowStep::Halt { status, message }

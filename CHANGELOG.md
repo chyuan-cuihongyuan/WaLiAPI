@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.6 (2026-09-02)
+
+### 缓存命中 Token 统计
+
+- ✨ **缓存命中 Token 全链路记录**：请求日志新增 `cached_tokens` 字段（migration 026），适配器层（OpenAI / Claude / DeepSeek / Gemini / Custom）统一提取上游缓存命中用量，兼容 `cached_tokens`、`cache_read_input_tokens`、`prompt_cache_hit_tokens` 等多种上游字段格式
+- ✨ **仪表盘缓存统计**：新增今日/累计缓存 Token、Prompt Token 指标，模型统计与 Token 趋势图增加缓存维度，API 密钥统计同步支持缓存 Token
+- ✨ **日志页缓存与推理强度展示**：日志列表与详情展示缓存命中 Token 及 `reasoning_effort` 字段（migration 027），流式 SSE 同步累积缓存用量
+
+### 修复
+
+- 🐛 **Responses API 流式内容累积修复**：Anthropic 事件分支的无条件 `continue` 导致 Responses 流式事件累积代码不可达，流式 Responses 请求的响应内容从未被记录；重构为 Anthropic / Responses 统一 match 分发，并补上 `response.function_call_arguments.delta` 工具调用参数累积
+- 🐛 **pdfium macOS 打包路径修复**：`bundle.resources` 的 glob 前缀使 pdfium 被打入 `Contents/Resources/resources/pdfium/`，运行时仅搜索 `Contents/Resources/pdfium/` 导致 `OCR_RENDER_FAILED`，补上该落点，不改打包与签名（PR #56）
+
+### 其他
+
+- 🔧 **默认窗口尺寸调整**：1280×860 → 1440×900，适配仪表盘新增指标
+- 🔧 **版本号统一升级至 0.2.6**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ## v0.2.5 (2026-09-01)
 
 ### Docker Web 部署

@@ -4,7 +4,7 @@
 
 ### 本地 LLM API 网关 · 多协议接入 · 知识库 RAG · MCP 工具服务
 
-[![Version](https://img.shields.io/badge/version-0.2.5-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-使用方式)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -40,10 +40,10 @@
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 271 | `+77,753 / -15,889` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
-| ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,194 / -24,475` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
-| 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,997 / -1,124` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
-| 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 3 | `+3,008 / -112` | 知识库扫描版 PDF VLM OCR（方案A）· OCR 页级混合识别 · 修复 Claude 渠道协议适配 · OCR/Embedding 模型下拉按用途过滤 |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 281 | `+78,533 / -16,097` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
+| ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
+| 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
+| 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 4 | `+3,086 / -120` | 知识库扫描版 PDF VLM OCR（方案A）· OCR 页级混合识别 · 修复 Claude 渠道协议适配 · OCR/Embedding 模型下拉按用途过滤 · pdfium macOS 打包路径修复 |
 | 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 5 | `+524 / -103` | 统一上游重试判定决策函数与真值表测试 · 401/403 下游脱敏 · 上游终态错误短路 · 数据库故障误报修复 · Anthropic 内置工具 400 修复 |
 | 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 10 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
 | 🐛 | **cyd** | [@cydmacro](https://github.com/cydmacro) | 1 | `+71 / -8` | Codex 工具调用参数一次性下发，修复部分客户端截断 |
@@ -618,6 +618,24 @@ WaLiAPI/
 ---
 
 ## 📌 版本历史
+
+### v0.2.6 (2026-09-02)
+
+#### 缓存命中 Token 统计
+
+- ✨ **缓存命中 Token 全链路记录**：请求日志新增 `cached_tokens` 字段（migration 026），适配器层（OpenAI / Claude / DeepSeek / Gemini / Custom）统一提取上游缓存命中用量，兼容 `cached_tokens`、`cache_read_input_tokens`、`prompt_cache_hit_tokens` 等多种上游字段格式
+- ✨ **仪表盘缓存统计**：新增今日/累计缓存 Token、Prompt Token 指标，模型统计与 Token 趋势图增加缓存维度，API 密钥统计同步支持缓存 Token
+- ✨ **日志页缓存与推理强度展示**：日志列表与详情展示缓存命中 Token 及 `reasoning_effort` 字段（migration 027），流式 SSE 同步累积缓存用量
+
+#### 修复
+
+- 🐛 **Responses API 流式内容累积修复**：Anthropic 事件分支的无条件 `continue` 导致 Responses 流式事件累积代码不可达，流式 Responses 请求的响应内容从未被记录；重构为 Anthropic / Responses 统一 match 分发，并补上 `response.function_call_arguments.delta` 工具调用参数累积
+- 🐛 **pdfium macOS 打包路径修复**：`bundle.resources` 的 glob 前缀使 pdfium 被打入 `Contents/Resources/resources/pdfium/`，运行时仅搜索 `Contents/Resources/pdfium/` 导致 `OCR_RENDER_FAILED`，补上该落点，不改打包与签名（PR #56）
+
+#### 其他
+
+- 🔧 **默认窗口尺寸调整**：1280×860 → 1440×900，适配仪表盘新增指标
+- 🔧 **版本号统一升级至 0.2.6**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
 ### v0.2.5 (2026-09-01)
 

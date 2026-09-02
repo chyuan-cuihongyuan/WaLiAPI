@@ -113,7 +113,7 @@ pub async fn dispatch_auth_account_executor(
         let status = response.status().as_u16();
         if status >= 400 {
             let text = response.text().await.unwrap_or_default();
-            return AttemptResult::Failure(failure_from_upstream(status, &text));
+            return AttemptResult::Failure(failure_from_auth_upstream(status, &text));
         }
         let response_headers = safe_response_headers(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
@@ -159,7 +159,7 @@ pub async fn dispatch_auth_account_executor(
     let status = response.status().as_u16();
     if status >= 400 {
         let text = response.text().await.unwrap_or_default();
-        return AttemptResult::Failure(failure_from_upstream(status, &text));
+        return AttemptResult::Failure(failure_from_auth_upstream(status, &text));
     }
     let response_headers = safe_response_headers(response.headers());
     let bytes = response.bytes().await.unwrap_or_default();
@@ -224,7 +224,7 @@ pub async fn dispatch_auth_account_stream_executor(
     let status = response.status().as_u16();
     if status >= 400 {
         let text = response.text().await.unwrap_or_default();
-        return StreamAttemptResult::Failure(failure_from_upstream(status, &text));
+        return StreamAttemptResult::Failure(failure_from_auth_upstream(status, &text));
     }
     let content_type = response
         .headers()
@@ -324,12 +324,17 @@ fn header_map(headers: &[(String, String)]) -> reqwest::header::HeaderMap {
     map
 }
 
+/// Map an Auth Account provider error into an [`AttemptFailure`].
+///
+/// Unlike channels, an auth account's credentials belong to the USER (their
+/// OAuth login), so a terminal auth failure keeps the real 401 status instead
+/// of the channel-style 502 mask: the caller needs to know re-login fixes it.
 fn provider_failure(error: crate::auth_provider::ProviderError) -> AttemptFailure {
     let failure_class = error.failure_class();
     AttemptFailure {
         status_code: Some(match failure_class {
             FailureClass::CallerTerminal => 400,
-            FailureClass::ChannelAuthTerminal => 502,
+            FailureClass::ChannelAuthTerminal => 401,
             _ => 502,
         }),
         failure_class,
@@ -516,6 +521,18 @@ pub fn failure_from_upstream(status: u16, body: &str) -> AttemptFailure {
         status_code,
         retry_after: None,
     }
+}
+
+/// Auth Account variant of [`failure_from_upstream`]: the account belongs to
+/// the user (OAuth login), so a terminal 401/403 keeps its real status instead
+/// of the channel mask.  The failure CLASS is unchanged, so failover semantics
+/// (in-group only, never cross-group) are identical to channels.
+pub fn failure_from_auth_upstream(status: u16, body: &str) -> AttemptFailure {
+    let mut failure = failure_from_upstream(status, body);
+    if failure.failure_class == FailureClass::ChannelAuthTerminal {
+        failure.status_code = Some(status);
+    }
+    failure
 }
 
 fn error_message_from_body(body: &str) -> Option<String> {
