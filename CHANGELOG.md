@@ -8,10 +8,18 @@
 - ✨ **仪表盘缓存统计**：新增今日/累计缓存 Token、Prompt Token 指标，模型统计与 Token 趋势图增加缓存维度，API 密钥统计同步支持缓存 Token
 - ✨ **日志页缓存与推理强度展示**：日志列表与详情展示缓存命中 Token 及 `reasoning_effort` 字段（migration 027），流式 SSE 同步累积缓存用量
 
+### Auth 账号错误透传（Kimi 渠道场景）
+
+- ✨ **Auth 账号终态错误透传真实状态码**：Auth 账号（OAuth 登录，如 Kimi Code）的凭证属于用户本人，上游 401/403 不再统一脱敏为 502，保留真实状态码，让调用方知道重新登录即可恢复；渠道 Key 的终态失败仍保持 502 脱敏（渠道凭证问题不暴露给调用方）
+- 🔧 **故障转移语义不变**：新增 `failure_from_auth_upstream`，仅调整 Auth 账号的状态码透传，FailureClass 分类不变，组内转移、不跨组的语义与渠道一致
+- 🔧 **错误响应增加 `failure_class` 字段**：错误响应 body 新增 `failure_class`，便于客户端区分失败类型并做针对性处理
+- ✅ 配套 AttemptFlow 真值测试：Auth 账号 401 透传 / 渠道 502 脱敏两条路径
+
 ### 修复
 
 - 🐛 **Responses API 流式内容累积修复**：Anthropic 事件分支的无条件 `continue` 导致 Responses 流式事件累积代码不可达，流式 Responses 请求的响应内容从未被记录；重构为 Anthropic / Responses 统一 match 分发，并补上 `response.function_call_arguments.delta` 工具调用参数累积
 - 🐛 **pdfium macOS 打包路径修复**：`bundle.resources` 的 glob 前缀使 pdfium 被打入 `Contents/Resources/resources/pdfium/`，运行时仅搜索 `Contents/Resources/pdfium/` 导致 `OCR_RENDER_FAILED`，补上该落点，不改打包与签名（PR #56）
+- 🐛 **Wiki Unicode 文本进程崩溃修复**：`ingest_wiki_source` / `search_wiki` 在 Unicode 文本上按字节下标切片触发 `core::str::slice_error_fail` panic，release `panic=abort` 配置下导致整个 WaLiAPI 进程退出；新增 `utils/text.rs` 字符边界安全切片工具，覆盖 wiki ingest / repository / security scanner 路径（PR #58）
 
 ### 其他
 
