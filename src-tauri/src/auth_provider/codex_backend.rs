@@ -341,7 +341,12 @@ pub fn validate_backend_request(body: &Value) -> Result<Value, ProviderError> {
         "stream",
         "store",
     ];
-    const STRIPPED: &[&str] = &["max_output_tokens", "metadata"];
+    // `prompt_cache_options` is a caching hint that accompanies
+    // `prompt_cache_key`; it carries no request semantics the backend needs and
+    // the Chat path already discards it (see `responses_codec::encode_messages`
+    // DROPPED). Stripping keeps both downstream protocols behaving the same
+    // instead of rejecting Responses clients that send it (e.g. WaLiCode).
+    const STRIPPED: &[&str] = &["max_output_tokens", "metadata", "prompt_cache_options"];
     for (key, value) in object {
         if !ALLOWED.contains(&key.as_str()) && !STRIPPED.contains(&key.as_str()) && !value.is_null()
         {
@@ -906,6 +911,34 @@ mod tests {
             error,
             ProviderError::UnsupportedFeatures { ref pointer } if pointer == "/unknown_field"
         ));
+    }
+
+    /// Regression: a real WaLiCode `/v1/responses` body (captured from
+    /// `request_logs`) was rejected with 400 at `/prompt_cache_options` before
+    /// any network call. Every other field it sends is allowed or stripped.
+    #[test]
+    fn backend_request_strips_prompt_cache_options() {
+        let body = validate_backend_request(&json!({
+            "model": "gpt-5.4",
+            "input": "hi",
+            "instructions": "you are a coding agent",
+            "max_output_tokens": 32768,
+            "prompt_cache_key": "walicode-responses-v2:1dgr77u:91n97n",
+            "prompt_cache_options": {"mode": "implicit"},
+            "reasoning": {"effort": "medium"},
+            "stream": true,
+            "tools": []
+        }))
+        .unwrap();
+        assert!(body.get("prompt_cache_options").is_none());
+        // The companion key is still forwarded; only the hint is dropped.
+        assert_eq!(
+            body["prompt_cache_key"],
+            "walicode-responses-v2:1dgr77u:91n97n"
+        );
+        assert_eq!(body["reasoning"], json!({"effort": "medium"}));
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
     }
 
     #[test]
