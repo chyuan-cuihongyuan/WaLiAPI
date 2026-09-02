@@ -8,6 +8,7 @@
 
 ### 修复
 
+- 🐛 **RAG/Wiki 设置保存后状态未即时更新**：知识库设置页保存后仍展示旧状态（原实现保存后整表刷新但未同步选中项）；重构为选中态仅存 `selectedKbId`、由列表数据派生选中对象，保存成功后用接口返回值精准更新列表对应项，设置页即时展示最新配置（PR #60）
 - 🐛 **Codex Responses 请求 strip `prompt_cache_options`**：Codex 后端 `validate_backend_request` 白名单有 `prompt_cache_key` 却缺配套的 `prompt_cache_options`，WaLiCode 走 Responses 协议必带该字段（值为 `{"mode":"implicit"}`），导致整条 Responses 路径被 `HTTP 400` 拒绝、只能退回 Chat 协议；该字段仅作缓存提示、不携带后端请求语义，归入 STRIPPED 静默丢弃，与 Chat 路径行为对齐（PR #59）
 
 ### 其他
