@@ -277,7 +277,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
               <h2 className="text-base font-bold tracking-tight text-slate-900">{appInfo.label}</h2>
               {appInfo.applied && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-600">
-                  <Check size={11} /> 已配置
+                  <Check size={11} /> {appName === "codex" ? "已切换到网关" : "已配置"}
                 </span>
               )}
               {appInfo.available ? (
@@ -414,8 +414,9 @@ export function AppConfigPanel({ appName }: { appName: string }) {
               onClick={handleClear}
               disabled={applying}
               className="action-secondary"
+              title={appName === "codex" ? "恢复 ~/.codex/config.toml 原始配置，auth.json 中的账号不会被改动" : undefined}
             >
-              恢复原始配置
+              {appName === "codex" ? "切回原账号" : "恢复原始配置"}
             </button>
           )}
         </div>

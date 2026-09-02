@@ -303,7 +303,27 @@ fn backup_config(config_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// 标记文件：记录写入前配置不存在，恢复时应删除写入的配置
+fn absent_marker_path(config_path: &PathBuf) -> PathBuf {
+    let mut name = config_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    name.push_str(".waliapi-absent");
+    config_path.with_file_name(name)
+}
+
 fn restore_config(config_path: &PathBuf) -> Result<(), String> {
+    let absent_marker = absent_marker_path(config_path);
+    if absent_marker.exists() {
+        // 写入前配置本就不存在：恢复 = 删除写入的配置
+        if config_path.exists() {
+            fs::remove_file(config_path).map_err(|e| format!("删除配置失败: {e}"))?;
+        }
+        let _ = fs::remove_file(&absent_marker);
+        return Ok(());
+    }
     let backup = backup_path(config_path);
     if backup.exists() {
         let content = fs::read(&backup).map_err(|e| format!("读取备份失败: {e}"))?;
@@ -865,7 +885,18 @@ pub async fn apply_app_config_impl(
     let config_dir = (app_def.config_dir_fn)();
     let config_path = config_dir.join(app_def.config_file);
 
-    let _ = backup_config(&config_path);
+    // 仅在「未应用」状态下备份：避免重复写入时把已被修改的配置当成原始配置覆盖备份，
+    // 否则「恢复原配置」会恢复成 waliapi 配置，永远切不回去。
+    if detect_applied(&config_path, app_name) {
+        // 已处于网关配置状态，保留最初的备份，直接重写即可
+    } else if config_path.exists() {
+        let _ = backup_config(&config_path);
+        let _ = fs::remove_file(absent_marker_path(&config_path));
+    } else {
+        // 原配置不存在：打标记，恢复时删除写入的配置
+        let _ = atomic_write(&absent_marker_path(&config_path), b"");
+        let _ = fs::remove_file(backup_path(&config_path));
+    }
 
     let result = match app_name {
         "claude-code" => write_claude_code(&config_dir, &waliapi_url, &api_key, &model),
@@ -918,10 +949,20 @@ pub async fn clear_app_config_impl(app_name: &str) -> Result<ApplyResult, String
     let config_path = config_dir.join(app_def.config_file);
 
     match restore_config(&config_path) {
-        Ok(()) => Ok(ApplyResult {
-            success: true,
-            message: format!("已恢复 {} 的原始配置", app_def.label),
-        }),
+        Ok(()) => {
+            let message = if app_name == "codex" {
+                format!(
+                    "已恢复 {} 的原始配置，重启 Codex 后将使用原账号（auth.json 未被改动）",
+                    app_def.label
+                )
+            } else {
+                format!("已恢复 {} 的原始配置", app_def.label)
+            };
+            Ok(ApplyResult {
+                success: true,
+                message,
+            })
+        }
         Err(e) => Ok(ApplyResult {
             success: false,
             message: format!("恢复失败: {e}"),
@@ -1032,4 +1073,57 @@ pub async fn prepare_app_config_path_impl(app_name: &str) -> Result<String, Stri
     }
 
     Ok(config_dir.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "waliapi-appcfg-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn restore_with_backup_recovers_original_and_removes_backup() {
+        let dir = temp_dir("backup");
+        let config = dir.join("config.toml");
+        fs::write(&config, b"original").unwrap();
+        backup_config(&config).unwrap();
+        // 模拟网关写入覆盖
+        fs::write(&config, b"model_provider = \"waliapi\"").unwrap();
+
+        restore_config(&config).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), b"original");
+        assert!(!backup_path(&config).exists());
+    }
+
+    #[test]
+    fn restore_with_absent_marker_deletes_written_config() {
+        let dir = temp_dir("absent");
+        let config = dir.join("config.toml");
+        // 写入前配置不存在：打 absent 标记
+        atomic_write(&absent_marker_path(&config), b"").unwrap();
+        // 模拟网关写入
+        fs::write(&config, b"model_provider = \"waliapi\"").unwrap();
+
+        restore_config(&config).unwrap();
+        assert!(!config.exists());
+        assert!(!absent_marker_path(&config).exists());
+    }
+
+    #[test]
+    fn restore_without_backup_or_marker_errors() {
+        let dir = temp_dir("none");
+        let config = dir.join("config.toml");
+        assert!(restore_config(&config).is_err());
+    }
 }
