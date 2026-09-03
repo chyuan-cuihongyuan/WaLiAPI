@@ -177,7 +177,7 @@ curl -H "Authorization: Bearer $WALIAPI_ADMIN_TOKEN" http://127.0.0.1:8777/api/k
 <details>
 <summary>📦 不使用 Docker：systemd 部署</summary>
 
-先执行 `pnpm build` 和 `cargo build --release --manifest-path src-tauri/Cargo.toml --bin waliapi-server`。将 release 二进制和前端 `dist/` 放到 `/opt/waliapi/`，创建 `waliapi` 系统用户。systemd 沙箱通过 `StateDirectory=waliapi` 创建并授权固定的数据目录 `/var/lib/waliapi`；若确需改到其他目录，必须同步修改 unit 的可写路径。
+先执行 `pnpm build` 和 `cargo build --release --manifest-path src-tauri/Cargo.toml --bin waliapi-web --no-default-features --features embed-web`。将 release 二进制和前端 `dist/` 放到 `/opt/waliapi/`，创建 `waliapi` 系统用户。systemd 沙箱通过 `StateDirectory=waliapi` 创建并授权固定的数据目录 `/var/lib/waliapi`；若确需改到其他目录，必须同步修改 unit 的可写路径。
 
 用仅 root 可读的权限安装环境文件，再填写管理员 token：
 
