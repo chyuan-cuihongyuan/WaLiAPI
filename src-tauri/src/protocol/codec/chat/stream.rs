@@ -477,4 +477,7 @@ impl StreamDecoder for ChatStreamDecoder {
     fn usage(&self) -> Option<Usage> {
         Some(self.state.usage)
     }
+    fn saw_terminal(&self) -> bool {
+        self.state.saw_done
+    }
 }

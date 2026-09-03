@@ -1099,6 +1099,37 @@ async fn buffer_first_record(upstream: &mut UpstreamStream) -> Option<(Vec<u8>, 
 /// client disconnects mid-stream the async-stream is dropped, this guard's
 /// `Drop` runs, and a spawned task records a `client_cancelled` log.  The
 /// `client_cancelled` marker is therefore written exactly once per request.
+/// 流式落账快照：生成器在每帧后更新，客户端中途取消（Drop 路径）时
+/// finalizer 读取——取消行记录已产生的真实用量与响应内容，而不是硬编码
+/// 零值（issue #57：取消/断开导致已产生的计费数据整体丢失）。
+#[derive(Default, Clone)]
+struct StreamSnapshot {
+    /// (prompt, completion, total, cached)，每帧更新。
+    usage: (i64, i64, i64, i64),
+    /// 已累积的响应文本（终止时或内容显著增长时重建，控制 O(n) 复制成本）。
+    content: String,
+    /// 终止后构建的完整 response_choices JSON。
+    response_choices: Option<String>,
+    terminal: bool,
+}
+
+/// 每帧后同步落账快照：用量恒新；响应内容/choices 仅在协议终止或内容
+/// 较上次快照增长 ≥16KB 时重建——每帧重建会把流式复制放大成 O(n²)。
+fn update_stream_snapshot(snapshot: &std::sync::Arc<std::sync::Mutex<StreamSnapshot>>, pump: &StreamPumpCore) {
+    let mut s = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+    s.usage = pump.usage();
+    let content = pump.accumulated_content();
+    let grew = content.len().saturating_sub(s.content.len());
+    if pump.terminated() {
+        s.terminal = true;
+        s.content = content.to_string();
+        s.response_choices = pump.build_response_choices();
+    } else if grew >= 16 * 1024 {
+        s.content = content.to_string();
+        s.response_choices = pump.build_response_choices();
+    }
+}
+
 #[derive(Clone)]
 struct StreamLogFinalizer {
     repo: Arc<Repository>,
@@ -1121,6 +1152,8 @@ struct StreamLogFinalizer {
     upstream_type: String,
     started: Instant,
     completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 与流泵共享的落账快照（issue #57）：取消路径读取，见 [`StreamSnapshot`]。
+    snapshot: std::sync::Arc<std::sync::Mutex<StreamSnapshot>>,
 }
 
 impl StreamLogFinalizer {
@@ -1229,12 +1262,34 @@ impl Drop for StreamLogFinalizer {
         // `completed == false` and spawns ANOTHER task, recursively — an
         // unbounded chain of duplicate 499 rows (and eventual stack overflow /
         // process abort).  Setting the flag first makes the write exactly-once.
+        //
+        // #57: the cancelled row keeps what the stream already produced —
+        // the pump snapshot's real usage (fallback: local estimate) and the
+        // accumulated response so far — instead of hardcoded zeros.
         if !self.completed.load(std::sync::atomic::Ordering::SeqCst) {
             self.completed
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let f = self.clone();
             tokio::spawn(async move {
-                f.write(true, false, Some("client_cancelled"), 0, 0, 0, 0, None)
+                let snap = f
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let (mut p, mut c, mut t, cached) = snap.usage;
+                let choices = snap.response_choices;
+                // 兜底：上游未回报 usage 时按请求体 + 已收到内容本地估算，
+                // 取消行的计费统计不再恒为 0。
+                if t == 0 && p == 0 && c == 0 {
+                    let req_body: serde_json::Value = serde_json::from_str(&f.sanitized_log_body)
+                        .unwrap_or(serde_json::Value::Null);
+                    let (ep, ec, et) =
+                        super::estimate_usage::estimate_usage(&req_body, Some(snap.content.as_str()), &f.model);
+                    p = ep;
+                    c = ec;
+                    t = et;
+                }
+                f.write(true, false, Some("client_cancelled"), p, c, t, cached, choices)
                     .await;
             });
         }
@@ -1266,6 +1321,7 @@ fn stream_response_body(
     upstream_type: String,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
     let mode_for_error = mode.clone();
+    let snapshot = std::sync::Arc::new(std::sync::Mutex::new(StreamSnapshot::default()));
     let finalizer = StreamLogFinalizer {
         repo,
         key,
@@ -1287,6 +1343,7 @@ fn stream_response_body(
         upstream_type,
         started: Instant::now(),
         completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        snapshot: snapshot.clone(),
     };
     let completed = finalizer.completed.clone();
 
@@ -1313,10 +1370,16 @@ fn stream_response_body(
             }
         }
 
-        while !had_error {
+        // 协议终止事件已到即视为流完成（#57）：不等上游 TCP EOF——部分上游
+        // （如 ModelScope）发完数据后延迟关连接，期间客户端断开会把本已
+        // 成功的调用记成 499 零用量行。终止后跳出循环走正常落账路径。
+        // 首帧/伴随帧就含终止标记（极短响应）的情形由 pump 内部登记覆盖。
+        while !had_error && !pump.terminated() {
             match upstream_bytes.next().await {
                 Some(Ok(bytes)) => match pump.push(&bytes) {
                     Ok(out) => {
+                        // 每帧后同步取消路径要用的落账快照（#57）。
+                        update_stream_snapshot(&snapshot, &pump);
                         if !out.is_empty() {
                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(out));
                         }
@@ -1859,6 +1922,229 @@ mod tests {
         assert!(
             text.contains("\"content\":\"carried\""),
             "the carry record must be decoded and emitted by stream_response_body: {text}"
+        );
+    }
+
+    // ─── #57：流式落账语义（终止早退 / 取消保留用量） ─────────────────────
+
+    /// 构造「首记录 + 内容/用量块 + 终止标记，随后挂死」的上游体：
+    /// 协议终止事件之后上游流永远不结束（模拟 ModelScope 发完数据延迟关
+    /// 连接甚至不关连接的行为），用于验证终止早退。
+    fn hanging_after_terminal_upstream(
+        with_stop: bool,
+        with_usage: bool,
+    ) -> UpstreamStream {
+        let mut chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![Ok(bytes::Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"model\":\"up-model\",\"content\":[]}}\n\n",
+        ))];
+        let mut second = String::new();
+        second.push_str("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n");
+        if with_usage {
+            second.push_str("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n");
+        }
+        if with_stop {
+            second.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        }
+        chunks.push(Ok(bytes::Bytes::from(second)));
+        let body = futures_util::stream::iter(chunks)
+            .chain(futures_util::stream::pending::<Result<bytes::Bytes, std::io::Error>>())
+            .boxed();
+        UpstreamStream {
+            content_type: "text/event-stream".to_string(),
+            headers: vec![],
+            body,
+        }
+    }
+
+    async fn pump_for(upstream: &mut UpstreamStream) -> StreamPumpCore {
+        let (first_frame, carry) = buffer_first_record(upstream).await.unwrap();
+        let mut sup = crate::core::stream_supervisor::StreamSupervisor::new();
+        sup.begin_connect().unwrap();
+        sup.on_upstream_headers().unwrap();
+        sup.on_first_frame_validated().unwrap();
+        let prepared = crate::protocol::codec::CodecRegistry::prepare_pair(
+            crate::protocol::codec::Protocol::Chat,
+            crate::protocol::codec::Protocol::Messages,
+            "up-model",
+            &json!({"model":"up-model", "messages":[{"role":"user","content":"hi"}]}),
+        )
+        .unwrap();
+        StreamPumpCore::new(sup, prepared.codec.new_stream_decoder(), first_frame, carry).unwrap()
+    }
+
+    fn full_request_body() -> String {
+        serde_json::json!({
+            "model": "m",
+            "messages": [{"role":"user","content":"请帮我总结这段足够长的提示词内容，确保本地 token 估算明显大于零，用于验证取消路径的兜底估算逻辑。"}]
+        })
+        .to_string()
+    }
+
+    /// #57 主场景：协议终止事件已到、上游不关连接（EOF 永远不来）时，
+    /// 流必须正常完成并落 200 行（带真实 usage 与响应内容），而不是挂到
+    /// 客户端超时取消再落 499 零用量行。
+    #[tokio::test]
+    async fn stream_completes_on_protocol_terminal_without_upstream_eof() {
+        let repo = Arc::new(Repository::new(fresh_db().await));
+        let mut upstream = hanging_after_terminal_upstream(true, true);
+        let pump = pump_for(&mut upstream).await;
+
+        let stream = stream_response_body(
+            pump,
+            upstream,
+            repo.clone(),
+            api_key(),
+            audited_request(),
+            "m".to_string(),
+            "up-model".to_string(),
+            "chat".to_string(),
+            false,
+            full_request_body(),
+            None,
+            "ch-1".to_string(),
+            "ch".to_string(),
+            "anthropic".to_string(),
+            1,
+            "messages_g1_native".to_string(),
+            None,
+            "anthropic".to_string(),
+            "messages".to_string(),
+            "channel".to_string(),
+        );
+
+        // 上游挂死时若实现退化回「等 EOF」，这里 10s 超时直接失败。
+        let mut bytes = Vec::new();
+        tokio::pin!(stream);
+        let consumed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async {
+                while let Some(item) = stream.next().await {
+                    bytes.extend_from_slice(&item.unwrap());
+                }
+            },
+        )
+        .await;
+        assert!(consumed.is_ok(), "stream must complete on protocol terminal without upstream EOF");
+
+        let logs = repo.get_logs(10, 0).await.unwrap();
+        assert_eq!(logs.len(), 1, "exactly one row after terminal completion");
+        let row = &logs[0];
+        assert_eq!(row.status_code, 200, "protocol-complete stream is a success, not 499: {row:?}");
+        assert_eq!(row.completion_tokens, 5, "upstream-reported usage must be recorded");
+        assert!(row.client_cancelled.unwrap_or(0) == 0);
+        let choices = row.response_choices.as_deref().unwrap_or_default();
+        assert!(choices.contains("hi"), "accumulated content must be recorded: {choices}");
+    }
+
+    /// #57 取消路径：客户端中途断开（流被 drop）时，499 行记录流泵快照里
+    /// 已解析的真实 usage，而不是硬编码 0。
+    #[tokio::test]
+    async fn client_cancel_records_pump_usage_snapshot() {
+        let repo = Arc::new(Repository::new(fresh_db().await));
+        // 无 message_stop：流未终止，客户端在收到第二帧输出后断开。
+        let mut upstream = hanging_after_terminal_upstream(false, true);
+        let pump = pump_for(&mut upstream).await;
+
+        let mut stream = Box::pin(stream_response_body(
+            pump,
+            upstream,
+            repo.clone(),
+            api_key(),
+            audited_request(),
+            "m".to_string(),
+            "up-model".to_string(),
+            "chat".to_string(),
+            false,
+            full_request_body(),
+            None,
+            "ch-1".to_string(),
+            "ch".to_string(),
+            "anthropic".to_string(),
+            1,
+            "messages_g1_native".to_string(),
+            None,
+            "anthropic".to_string(),
+            "messages".to_string(),
+            "channel".to_string(),
+        ));
+
+        // 消费两帧输出（首帧 + 含 usage 的第二帧），确保快照已更新。
+        stream.next().await.unwrap().unwrap();
+        let second = stream.next().await.unwrap().unwrap();
+        assert!(!second.is_empty());
+
+        // 客户端断开：drop 生成器 → finalizer Drop → 后台写 499 行。
+        drop(stream);
+
+        // Drop 的 spawn 是异步任务，轮询等待 499 行出现（上限 5s）。
+        let mut row = None;
+        for _ in 0..100 {
+            let logs = repo.get_logs(10, 0).await.unwrap();
+            if let Some(first) = logs.first() {
+                row = Some(first.clone());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let row = row.expect("499 row must be written after client cancel");
+        assert_eq!(row.status_code, 499);
+        assert_eq!(row.client_cancelled.unwrap_or(0), 1);
+        assert_eq!(
+            row.completion_tokens, 5,
+            "cancelled row must keep the pump snapshot usage, not zeros"
+        );
+    }
+
+    /// #57 兜底：上游从未回报 usage 且客户端取消时，499 行走本地估算
+    /// （请求体 + 已收内容），计费统计不恒为 0。
+    #[tokio::test]
+    async fn client_cancel_estimates_usage_when_upstream_silent() {
+        let repo = Arc::new(Repository::new(fresh_db().await));
+        let mut upstream = hanging_after_terminal_upstream(false, false);
+        let pump = pump_for(&mut upstream).await;
+
+        let mut stream = Box::pin(stream_response_body(
+            pump,
+            upstream,
+            repo.clone(),
+            api_key(),
+            audited_request(),
+            "m".to_string(),
+            "up-model".to_string(),
+            "chat".to_string(),
+            false,
+            full_request_body(),
+            None,
+            "ch-1".to_string(),
+            "ch".to_string(),
+            "anthropic".to_string(),
+            1,
+            "messages_g1_native".to_string(),
+            None,
+            "anthropic".to_string(),
+            "messages".to_string(),
+            "channel".to_string(),
+        ));
+
+        stream.next().await.unwrap().unwrap();
+        let second = stream.next().await.unwrap().unwrap();
+        assert!(!second.is_empty());
+        drop(stream);
+
+        let mut row = None;
+        for _ in 0..100 {
+            let logs = repo.get_logs(10, 0).await.unwrap();
+            if let Some(first) = logs.first() {
+                row = Some(first.clone());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let row = row.expect("499 row must be written after client cancel");
+        assert_eq!(row.status_code, 499);
+        assert!(
+            row.total_tokens > 0,
+            "cancelled row must fall back to a local usage estimate: {row:?}"
         );
     }
 }

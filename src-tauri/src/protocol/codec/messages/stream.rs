@@ -29,6 +29,8 @@ pub struct MessagesSseState {
     usage: Usage,
     message_id: String,
     current_block: Option<String>,
+    /// 上游 message_stop/[DONE] 已消费（#57：终止早退判断，见 StreamDecoder::saw_terminal）。
+    saw_upstream_terminal: bool,
     /// The mapped upstream model to emit in the synthesized Chat `role` frame.
     pub model: String,
 }
@@ -48,7 +50,11 @@ impl MessagesSseState {
         while let Some(end) = sse::record_end(&self.pending) {
             let record: Vec<u8> = self.pending.drain(..end).collect();
             let payload = sse::parse_data_payload(&record)?;
-            if payload.is_empty() || payload == "[DONE]" {
+            if payload.is_empty() {
+                continue;
+            }
+            if payload == "[DONE]" {
+                self.saw_upstream_terminal = true;
                 continue;
             }
             let json: Value = serde_json::from_str(&payload).map_err(|e| {
@@ -276,6 +282,7 @@ impl MessagesSseState {
             }
             "message_stop" => {
                 // exactly-once termination handled by emit_final
+                self.saw_upstream_terminal = true;
             }
             "ping" => {}
             "error" => {
@@ -412,5 +419,8 @@ impl StreamDecoder for MessagesStreamDecoder {
     }
     fn usage(&self) -> Option<Usage> {
         Some(self.state.usage)
+    }
+    fn saw_terminal(&self) -> bool {
+        self.state.saw_upstream_terminal
     }
 }

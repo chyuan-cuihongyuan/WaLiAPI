@@ -15,7 +15,8 @@ pub(super) struct ResponsesChatState {
     tool_calls: BTreeMap<u64, ToolCallState>,
     reasoning: String,
     pub(super) usage: Usage,
-    terminal: bool,
+    /// 上游 response.completed 已消费（StreamDecoder::saw_terminal 暴露给泵，#57）。
+    pub(super) terminal: bool,
 }
 
 #[derive(Default)]

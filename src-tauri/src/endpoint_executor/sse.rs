@@ -54,6 +54,34 @@ pub fn validate_native_first_record(record: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("first SSE data frame is not valid JSON: {error}"))
 }
 
+/// 下行 SSE 事件是否为协议终止标记：Chat 的 `data: [DONE]`、Anthropic 的
+/// `message_stop`、Responses 的 `response.completed`/`response.done`。
+///
+/// 终止事件到达即视为流在协议层完成——下游已拿到完整响应，不必再等上游
+/// TCP EOF（部分上游发完数据后延迟关连接，EOF 可能迟迟不来，issue #57）。
+/// 只识别成功终止：错误型事件（`error`/`response.failed`）仍交给 EOF/
+/// 超时路径处理，避免把「上游报错后挂死」记成成功流。
+pub(crate) fn sse_event_is_terminal(event: &str) -> bool {
+    for line in event.lines() {
+        let line = line.trim();
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            return true;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(payload) {
+            if let Some(t) = v.get("type").and_then(Value::as_str) {
+                if matches!(t, "message_stop" | "response.completed" | "response.done") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// A protocol-agnostic pump. The decoder is mandatory: identity directions use
 /// the same path as conversions, which prevents an executor-side "native"
 /// branch from bypassing validation or usage collection.
@@ -80,7 +108,7 @@ impl StreamPumpCore {
     /// response (including an identity response) retryable without leaking raw
     /// bytes to the client.
     pub fn new(
-        supervisor: StreamSupervisor,
+        mut supervisor: StreamSupervisor,
         mut decoder: Box<dyn StreamDecoder + Send + Sync>,
         first_frame: Vec<u8>,
         carry: Vec<u8>,
@@ -91,6 +119,7 @@ impl StreamPumpCore {
         let mut response_role: Option<String> = None;
         let mut finish_reason: Option<String> = None;
         let mut tool_calls_map = std::collections::BTreeMap::<i64, serde_json::Value>::new();
+        let mut terminal_registered = false;
         for bytes in [&first_frame[..], &carry[..]] {
             if bytes.is_empty() {
                 continue;
@@ -101,14 +130,21 @@ impl StreamPumpCore {
             for event in &events {
                 output.extend_from_slice(event.as_bytes());
                 accumulate_from_sse_event(event, &mut accumulated_content, &mut accumulated_reasoning, &mut response_role, &mut finish_reason, &mut tool_calls_map);
+                terminal_registered |= sse_event_is_terminal(event);
             }
+        }
+        // 首帧/伴随帧里就可能含终止标记（极短响应），提前登记——输出扫描
+        // 与解码器的上游终止状态双通道。
+        terminal_registered |= decoder.saw_terminal();
+        if terminal_registered {
+            supervisor.register_terminal();
         }
         Ok(Self {
             supervisor,
             decoder,
             first_frame: output,
             first_done: false,
-            terminal_registered: false,
+            terminal_registered,
             finished: false,
             accumulated_content,
             accumulated_reasoning,
@@ -136,8 +172,23 @@ impl StreamPumpCore {
         for event in &events {
             output.extend_from_slice(event.as_bytes());
             self.accumulate_from_sse(event);
+            if sse_event_is_terminal(event) {
+                self.register_terminal_once();
+            }
+        }
+        // 转换方向把终止事件推迟到 finish() 合成（输出里看不到），以解码器
+        // 的上游终止状态为准（#57）。
+        if self.decoder.saw_terminal() {
+            self.register_terminal_once();
         }
         Ok(output)
+    }
+
+    /// Exactly-once 终止登记（push 检测与 finish 共用）。
+    fn register_terminal_once(&mut self) {
+        if !self.terminal_registered {
+            self.terminal_registered = self.supervisor.register_terminal();
+        }
     }
 
     pub fn finish(&mut self) -> Result<Vec<u8>, PumpError> {
@@ -157,9 +208,7 @@ impl StreamPumpCore {
         }
         // Decoder correctness includes protocol terminal validation. The pump
         // owns only the supervisor's exactly-once terminal transition.
-        if !self.terminal_registered {
-            self.terminal_registered = self.supervisor.register_terminal();
-        }
+        self.register_terminal_once();
         Ok(output)
     }
 
@@ -549,6 +598,73 @@ mod tests {
         pump.push(b"usage").unwrap();
         assert_eq!(pump.usage(), (2, 3, 5, 0));
         assert_eq!(pump.finish().unwrap(), b"done");
+        assert!(pump.terminated());
+    }
+
+    /// #57：终止标记识别——三种下游协议的成功终止事件都算，错误事件不算。
+    #[test]
+    fn terminal_event_detection_covers_three_protocols() {
+        // Chat
+        assert!(sse_event_is_terminal("data: [DONE]\n\n"));
+        // Anthropic（含 event: 行与 data JSON 两种形态）
+        assert!(sse_event_is_terminal(
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        ));
+        // Responses
+        assert!(sse_event_is_terminal(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\"}}\n\n"
+        ));
+        assert!(sse_event_is_terminal(
+            "data: {\"type\":\"response.done\"}\n\n"
+        ));
+        // 非终止：普通 delta / 错误事件（错误仍走 EOF/超时路径，不视为成功完成）
+        assert!(!sse_event_is_terminal(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+        ));
+        assert!(!sse_event_is_terminal(
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\"}}\n\n"
+        ));
+        // JSON 带空格的宽松形态
+        assert!(sse_event_is_terminal(
+            "data: {\"type\": \"message_stop\"}\n\n"
+        ));
+    }
+
+    /// #57：push 阶段检测到终止即登记 terminated()——不需要等 finish()。
+    /// 用透传解码器（把输入原样作为事件输出）验证真实事件流。
+    struct PassthroughDecoder;
+
+    impl StreamDecoder for PassthroughDecoder {
+        fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>, DecodeError> {
+            Ok(vec![String::from_utf8_lossy(bytes).to_string()])
+        }
+        fn finish(&mut self) -> Result<Vec<String>, DecodeError> {
+            Ok(vec![])
+        }
+        fn usage(&self) -> Option<Usage> {
+            None
+        }
+    }
+
+    #[test]
+    fn push_registers_terminal_without_finish() {
+        let mut pump = StreamPumpCore::new(
+            supervisor(),
+            Box::new(PassthroughDecoder),
+            b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n".to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        pump.start().unwrap();
+        assert!(!pump.terminated(), "message_start is not terminal");
+        pump.push(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+            .unwrap();
+        assert!(
+            pump.terminated(),
+            "message_stop during push must register terminal without finish()"
+        );
+        // finish 之后重复登记仍恰好一次（幂等）。
+        pump.finish().unwrap();
         assert!(pump.terminated());
     }
 

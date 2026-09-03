@@ -181,4 +181,7 @@ impl StreamDecoder for ResponsesMessagesStream {
     fn usage(&self) -> Option<Usage> {
         Some(self.usage)
     }
+    fn saw_terminal(&self) -> bool {
+        self.terminal
+    }
 }

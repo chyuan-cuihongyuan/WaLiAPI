@@ -26,6 +26,9 @@ impl StreamDecoder for ResponsesStreamDecoder {
     fn usage(&self) -> Option<Usage> {
         Some(self.state.usage)
     }
+    fn saw_terminal(&self) -> bool {
+        self.state.terminal
+    }
 }
 
 /// Composition-only streaming decoder: Responses → Chat SSE then the existing
@@ -94,6 +97,8 @@ pub struct ChatToResponsesStreamDecoder {
     usage: Usage,
     started: bool,
     terminal_seen: bool,
+    /// 上游 [DONE] 已消费（#57 终止早退；finish_reason 不算——其后可能还有 usage 帧）。
+    saw_done: bool,
     done: bool,
 }
 
@@ -111,6 +116,7 @@ impl ChatToResponsesStreamDecoder {
             },
             started: false,
             terminal_seen: false,
+            saw_done: false,
             done: false,
         }
     }
@@ -130,7 +136,11 @@ impl ChatToResponsesStreamDecoder {
     /// Convert one complete Chat SSE record into Responses SSE events.
     fn record(&mut self, record: &[u8]) -> Result<Vec<String>, UnsupportedFeatures> {
         let payload = sse::parse_data_payload(record)?;
-        if payload.is_empty() || payload == "[DONE]" {
+        if payload.is_empty() {
+            return Ok(Vec::new());
+        }
+        if payload == "[DONE]" {
+            self.saw_done = true;
             return Ok(Vec::new());
         }
         let json: Value = serde_json::from_str(&payload).map_err(|_| {
@@ -193,6 +203,9 @@ impl StreamDecoder for ChatToResponsesStreamDecoder {
             output.extend(self.record(&record).map_err(DecodeError::from)?);
         }
         Ok(output)
+    }
+    fn saw_terminal(&self) -> bool {
+        self.saw_done
     }
     fn finish(&mut self) -> Result<Vec<String>, DecodeError> {
         let mut output = Vec::new();

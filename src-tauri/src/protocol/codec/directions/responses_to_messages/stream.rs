@@ -93,6 +93,9 @@ impl StreamDecoder for MessagesResponsesStream {
     fn usage(&self) -> Option<Usage> {
         Some(self.usage)
     }
+    fn saw_terminal(&self) -> bool {
+        self.terminal
+    }
 }
 impl MessagesResponsesStream {
     fn record(&mut self, record: &[u8]) -> Result<Vec<String>, UnsupportedFeatures> {
