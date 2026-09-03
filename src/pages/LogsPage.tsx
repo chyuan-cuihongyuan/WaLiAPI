@@ -205,8 +205,13 @@ export function LogsPage() {
 
   const hasActiveFilters = keyword || filterApiKey || filterChannel || filterModel || filterDateFrom || filterDateTo || filterTraceId || filterUpstreamType;
 
+  // 请求序号：过滤条件快速变化时只接受最新一次请求的响应，
+  // 乱序返回的陈旧数据不得覆盖新数据（FIX-15/NEW-2 统一模式）。
+  const loadSeq = useRef(0);
+
   const load = useCallback((p: number = 0, silent: boolean = false) => {
     if (!silent) setLoading(true);
+    const seq = ++loadSeq.current;
     logApi.getAll({
       limit: PAGE_SIZE,
       offset: p * PAGE_SIZE,
@@ -222,27 +227,43 @@ export function LogsPage() {
       trace_id: filterTraceId || undefined,
       upstream_type: filterUpstreamType || undefined,
     })
-      .then(setLogs)
-      .catch(() => setLoadError(true))
-      .finally(() => { if (!silent) setLoading(false); });
+      .then(items => { if (seq === loadSeq.current) setLogs(items); })
+      .catch(() => { if (seq === loadSeq.current) setLoadError(true); })
+      .finally(() => { if (!silent && seq === loadSeq.current) setLoading(false); });
   }, [keyword, filterApiKey, filterChannel, filterModel, filterDateFrom, filterDateTo, filterTraceId, filterUpstreamType]);
 
-  useEffect(() => { load(0); }, [load]);
+  // 过滤条件变化防抖 300ms 再重载（FIX-15：此前每个按键直接触发请求）。
+  useEffect(() => {
+    const timer = setTimeout(() => load(0), 300);
+    return () => clearTimeout(timer);
+  }, [load]);
 
   // ─── Auto-refresh: poll every 5s when page is visible ───────────────────
-  // Silently refreshes the current page so new logs appear without
-  // triggering the loading spinner or disrupting the user's view.
+  // 默认开启保持既有语义，可关闭（偏好持久化，GAP-06，上游 #28 的跟进）。
+  // 有日志行展开时不做静默轮询——新日志会把旧行顶出当前页导致详情
+  // 悄然收起；正在阅读的详情优先（GAP-06）。
+  const [autoRefresh, setAutoRefresh] = useState(() => localStorage.getItem("waliapi:logs-auto-refresh") !== "off");
   const pageRef = useRef(page);
   pageRef.current = page;
+  const expandedIdRef = useRef(expandedId);
+  expandedIdRef.current = expandedId;
+
+  const toggleAutoRefresh = () => {
+    setAutoRefresh(prev => {
+      localStorage.setItem("waliapi:logs-auto-refresh", prev ? "off" : "on");
+      return !prev;
+    });
+  };
 
   useEffect(() => {
+    if (!autoRefresh) return;
     const interval = setInterval(() => {
-      if (document.visibilityState === "visible") {
+      if (document.visibilityState === "visible" && expandedIdRef.current === null) {
         load(pageRef.current, true);
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [autoRefresh, load]);
 
   const clearFilters = () => {
     setKeyword("");
@@ -301,6 +322,13 @@ export function LogsPage() {
           </button>
           <button onClick={() => setShowCleanModal(true)} className="action-secondary text-red-500">
             <Trash2 size={16} /> 清理
+          </button>
+          <button
+            onClick={toggleAutoRefresh}
+            className={`action-secondary ${autoRefresh ? "text-blue-600 bg-blue-50" : ""}`}
+            title={autoRefresh ? "自动刷新开启中（每 5 秒；展开详情或离开页面时暂停），点击关闭" : "自动刷新已关闭，点击开启"}
+          >
+            <Timer size={16} /> 自动刷新{autoRefresh ? "·开" : "·关"}
           </button>
           <button onClick={() => load(page)} disabled={loading} className="action-secondary">
             <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> 刷新

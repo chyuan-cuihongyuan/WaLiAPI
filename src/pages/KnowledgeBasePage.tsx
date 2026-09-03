@@ -546,11 +546,18 @@ function KnowledgeBaseSection() {
     [kbs, selectedKbId],
   );
 
+  // 本地变更计数（NEW-2 竞态守卫）：在途的列表请求返回后若期间发生过本地
+  // 原地更新（保存设置等），旧的服务器快照不得整体覆盖新状态；跳过本次
+  // 设置，下次 fetch 自愈。与 LogsPage 的请求序号守卫同族但语义不同：
+  // 这里防的是「旧响应覆盖本地新写入」，不是「旧响应覆盖新响应」。
+  const kbMutations = useRef(0);
+
   const fetchKbs = useCallback(async () => {
     setLoading(true);
+    const mutationsAtStart = kbMutations.current;
     try {
       const data = await kbApi.getAll();
-      setKbs(data);
+      if (kbMutations.current === mutationsAtStart) setKbs(data);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -568,6 +575,7 @@ function KnowledgeBaseSection() {
   };
 
   const handleKbUpdated = useCallback((updated: KnowledgeBase) => {
+    kbMutations.current += 1;
     setKbs((current) => current.map((kb) => kb.id === updated.id ? updated : kb));
   }, []);
 
@@ -3276,11 +3284,15 @@ function WikiSection() {
     [projects, selectedProjectId],
   );
 
+  // 同 KB 列表的 NEW-2 竞态守卫（见上方 kbMutations 注释）。
+  const projectMutations = useRef(0);
+
   const fetchProjects = useCallback(async () => {
     setLoading(true);
+    const mutationsAtStart = projectMutations.current;
     try {
       const data = await wikiApi.getProjects();
-      setProjects(data);
+      if (projectMutations.current === mutationsAtStart) setProjects(data);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -3291,6 +3303,7 @@ function WikiSection() {
   useEffect(() => { fetchProjects(); }, [fetchProjects]);
 
   const handleProjectUpdated = useCallback((updated: WikiProject) => {
+    projectMutations.current += 1;
     setProjects((current) => current.map((project) => project.id === updated.id ? updated : project));
   }, []);
 
