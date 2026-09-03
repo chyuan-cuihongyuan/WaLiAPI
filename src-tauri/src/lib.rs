@@ -352,6 +352,7 @@ pub fn run() {
             commands::app_config::get_app_configs,
             commands::app_config::apply_app_config,
             commands::app_config::clear_app_config,
+            commands::app_config::reset_codex_auth,
             commands::app_config::get_app_config_content,
             commands::app_config::open_config_folder,
         ])

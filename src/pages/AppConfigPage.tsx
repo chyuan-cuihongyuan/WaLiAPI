@@ -62,7 +62,8 @@ export function AppConfigPanel({ appName }: { appName: string }) {
   const modelStorageKey = `waliapi:codex-model:${appName}`;
   const keyStorageKey = `waliapi:codex-key:${appName}`;
   const [applying, setApplying] = useState(false);
-  const [appliedResult, setAppliedResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [appliedResult, setAppliedResult] = useState<{ success: boolean; message: string; authWarning?: string | null } | null>(null);
+  const [resultKind, setResultKind] = useState<"apply" | "clear" | "reset">("apply");
   const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
@@ -202,6 +203,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
     if (!selKey || !selModel) return;
     setApplying(true);
     setAppliedResult(null);
+    setResultKind("apply");
     try {
       const result = await appConfigApi.apply(appName, selKey, selModel);
       setAppliedResult(result);
@@ -221,6 +223,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
   const handleClear = async () => {
     setApplying(true);
     setAppliedResult(null);
+    setResultKind("clear");
     try {
       const result = await appConfigApi.clear(appName);
       setAppliedResult(result);
@@ -242,6 +245,20 @@ export function AppConfigPanel({ appName }: { appName: string }) {
       await appConfigApi.openFolder(appName);
     } catch (e) {
       console.error("Failed to open folder:", e);
+    }
+  };
+
+  // Codex 专用：auth.json 卡在 API Key 模式时，重置为 ChatGPT 登录模式
+  const handleResetAuth = async () => {
+    setApplying(true);
+    setResultKind("reset");
+    try {
+      const result = await appConfigApi.resetCodexAuth();
+      setAppliedResult(result);
+    } catch (e: any) {
+      setAppliedResult({ success: false, message: String(e) });
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -437,13 +454,42 @@ export function AppConfigPanel({ appName }: { appName: string }) {
             )}
             <div className="flex-1">
               <div className="font-medium">
-                {appliedResult.success ? "配置已写入" : "写入失败"}
+                {appliedResult.success
+                  ? resultKind === "apply"
+                    ? "配置已写入"
+                    : resultKind === "clear"
+                      ? "已恢复原始配置"
+                      : "已重置登录方式"
+                  : resultKind === "apply"
+                    ? "写入失败"
+                    : resultKind === "clear"
+                      ? "恢复失败"
+                      : "重置失败"}
               </div>
               <div className="mt-0.5 text-xs opacity-80">{appliedResult.message}</div>
-              {appliedResult.success && (
+              {resultKind === "apply" && appliedResult.success && (
                 <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-blue-50 px-2.5 py-1.5 text-xs text-blue-600">
                   <Lightbulb size={13} className="mt-0.5 shrink-0" />
                   <span>建议重启 {appInfo.label} 以避免缓存导致仍使用旧模型。重启后可在「日志」页面查看实际调用的模型。</span>
+                </div>
+              )}
+              {appliedResult.success && appliedResult.authWarning && appName === "codex" && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-700">
+                  <AlertCircle size={13} className="mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <div className="font-medium">auth.json 仍处于 API Key 模式，无法回到 ChatGPT 账号</div>
+                    <div className="mt-0.5 opacity-80">
+                      {appliedResult.authWarning}（通常由其他切换工具写入）。可重置登录方式后重新 codex login，或手动删除 ~/.codex/auth.json。
+                    </div>
+                    <button
+                      onClick={handleResetAuth}
+                      disabled={applying}
+                      className="mt-1.5 rounded-md border border-amber-300 bg-white px-2 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
+                    >
+                      {applying ? <Loader2 size={12} className="inline animate-spin" /> : null}
+                      {applying ? " 重置中..." : "重置为 ChatGPT 登录"}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

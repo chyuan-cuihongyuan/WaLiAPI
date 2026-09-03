@@ -549,6 +549,8 @@ export interface AppInfo {
 export interface ApplyResult {
   success: boolean;
   message: string;
+  /** Codex 专用：切回后检测到 auth.json 处于 API Key 模式 */
+  authWarning?: string | null;
 }
 
 export interface ConfigContent {
@@ -561,6 +563,7 @@ export const appConfigApi = {
   getApps: () => invoke<AppInfo[]>("get_app_configs"),
   apply: (appName: string, apiKey: string, model: string) => invoke<ApplyResult>("apply_app_config", { appName, apiKey, model }),
   clear: (appName: string) => invoke<ApplyResult>("clear_app_config", { appName }),
+  resetCodexAuth: () => invoke<ApplyResult>("reset_codex_auth"),
   getContent: (appName: string) => invoke<ConfigContent>("get_app_config_content", { appName }),
   openFolder: (appName: string) => invoke<void>("open_config_folder", { appName }),
 };

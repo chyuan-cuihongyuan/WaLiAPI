@@ -24,21 +24,21 @@ use crate::db::repository::Repository;
 use crate::endpoint_executor::sse::StreamPumpCore;
 use crate::endpoint_executor::{
     dispatch_auth_account_executor, dispatch_auth_account_stream_executor, dispatch_executor,
-    dispatch_stream_executor, StreamAttemptResult, UpstreamStream,
+    dispatch_stream_executor, next_upstream_item, StreamAttemptResult, UpstreamItem, UpstreamStream,
 };
 use crate::security::gate::AuditedRequest;
 use crate::utils;
 use axum::body::Body;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use chrono::{Duration, SecondsFormat, Utc};
+use chrono::{self, DateTime, SecondsFormat, Utc};
 use futures_util::StreamExt;
 use rand::Rng;
 use rand::SeedableRng;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Extract the client-requested reasoning effort from the ORIGINAL downstream
 /// request body, per downstream protocol:
@@ -176,7 +176,7 @@ async fn record_channel_mode_outcome(
         }
         crate::core::attempt::AttemptResult::Failure(failure) if affects_mode_health(failure) => {
             let now = crate::utils::time::now_iso();
-            let cooldown_until = (Utc::now() + Duration::minutes(MODE_FAILURE_COOLDOWN_MINUTES))
+            let cooldown_until = (Utc::now() + chrono::Duration::minutes(MODE_FAILURE_COOLDOWN_MINUTES))
                 .to_rfc3339_opts(SecondsFormat::Millis, true);
             repo.record_channel_mode_failure(
                 channel_id,
@@ -844,19 +844,27 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                                 Some(failure_class.as_str()),
                             );
                         }
+                        // Honor upstream Retry-After before the next attempt.
+                        if let Some(secs) = f.retry_after {
+                            tokio::time::sleep(Duration::from_secs(secs)).await;
+                        }
                         continue;
                     }
                     StreamAttemptResult::Connected(mut upstream) => {
                         // --- first-frame validation (commit barrier) ---
                         let (first_frame, carry) = match buffer_first_record(&mut upstream).await {
-                            Some(x) => x,
-                            None => {
+                            Ok(x) => x,
+                            Err(diagnostic) => {
                                 // Empty / undecodable upstream: pre-commit failover.
+                                // The diagnostic suffix (bytes received + sanitized
+                                // preview) keeps the stable message prefix intact for
+                                // `affects_mode_health` while making the audit log
+                                // reveal WHAT the upstream actually sent.
                                 let failure = AttemptFailure {
                                     failure_class: FailureClass::UpstreamProtocolError,
-                                    message:
-                                        "upstream stream ended before a valid first SSE record"
-                                            .to_string(),
+                                    message: format!(
+                                        "upstream stream ended before a valid first SSE record ({diagnostic})"
+                                    ),
                                     status_code: Some(502),
                                     retry_after: None,
                                 };
@@ -1018,6 +1026,7 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                             upstream_protocol,
                             upstream_endpoint,
                             upstream_type,
+                            super::STREAM_IDLE_TIMEOUT,
                         );
                         let mut builder = Response::builder()
                             .status(StatusCode::OK)
@@ -1067,28 +1076,93 @@ pub(crate) async fn route_stream_plan_with_auth_service(
     }
 }
 
+/// Bounded, single-line preview of raw upstream bytes for diagnostics.
+const FIRST_RECORD_SNIPPET_BYTES: usize = 240;
+
+fn upstream_snippet(bytes: &[u8], max_bytes: usize) -> String {
+    let truncated = if bytes.len() > max_bytes {
+        &bytes[..max_bytes]
+    } else {
+        bytes
+    };
+    let text = String::from_utf8_lossy(truncated);
+    // Collapse to a single line and drop control characters for log readability.
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\r' | '\n' | '\t' => out.push(' '),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {}
+            c => out.push(c),
+        }
+    }
+    if bytes.len() > max_bytes {
+        out.push_str("…");
+    }
+    out
+}
+
 /// Read + validate the first complete SSE record.  Returns `(first_frame,
 /// carry)` where `carry` are the bytes read beyond the first record.
-async fn buffer_first_record(upstream: &mut UpstreamStream) -> Option<(Vec<u8>, Vec<u8>)> {
+///
+/// On failure the `Err` carries a bounded diagnostic suffix — bytes received,
+/// upstream content-type (when not SSE), and a sanitized preview of what was
+/// actually read — that the driver appends to the stable
+/// "upstream stream ended before a valid first SSE record" message prefix.
+async fn buffer_first_record(
+    upstream: &mut UpstreamStream,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     let mut buffer = Vec::new();
+    let ct_note = if upstream
+        .content_type
+        .to_ascii_lowercase()
+        .contains("event-stream")
+    {
+        String::new()
+    } else {
+        format!("; upstream content-type: {}", upstream.content_type)
+    };
     loop {
         // Bound the first-frame buffer (a malicious upstream must not OOM us).
         if buffer.len() > 256 * 1024 {
-            return None;
+            return Err(format!(
+                "received {} bytes with no SSE record terminator{ct_note}; preview: \"{}\"",
+                buffer.len(),
+                upstream_snippet(&buffer, FIRST_RECORD_SNIPPET_BYTES),
+            ));
         }
         if let Some(end) = crate::endpoint_executor::sse::record_end(&buffer) {
             let record = buffer[..end].to_vec();
             if crate::endpoint_executor::sse::validate_native_first_record(&record).is_ok() {
                 let carry = buffer[end..].to_vec();
-                return Some((record, carry));
+                return Ok((record, carry));
             }
             // A full record failed validation → pre-commit failover.
-            return None;
+            return Err(format!(
+                "first SSE record failed validation{ct_note}; preview: \"{}\"",
+                upstream_snippet(&record, FIRST_RECORD_SNIPPET_BYTES),
+            ));
         }
         match upstream.body.next().await {
             Some(Ok(bytes)) => buffer.extend_from_slice(&bytes),
-            Some(Err(_)) => return None,
-            None => return None,
+            Some(Err(error)) => {
+                return Err(format!(
+                    "stream error after {} bytes ({error}){ct_note}; preview: \"{}\"",
+                    buffer.len(),
+                    upstream_snippet(&buffer, FIRST_RECORD_SNIPPET_BYTES),
+                ));
+            }
+            None => {
+                if buffer.is_empty() {
+                    return Err(format!(
+                        "received 0 bytes; upstream closed the response without sending a body{ct_note}"
+                    ));
+                }
+                return Err(format!(
+                    "received {} bytes before the stream closed with no complete SSE record{ct_note}; preview: \"{}\"",
+                    buffer.len(),
+                    upstream_snippet(&buffer, FIRST_RECORD_SNIPPET_BYTES),
+                ));
+            }
         }
     }
 }
@@ -1264,6 +1338,7 @@ fn stream_response_body(
     upstream_protocol: String,
     upstream_endpoint: String,
     upstream_type: String,
+    idle_timeout: Duration,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
     let mode_for_error = mode.clone();
     let finalizer = StreamLogFinalizer {
@@ -1314,8 +1389,8 @@ fn stream_response_body(
         }
 
         while !had_error {
-            match upstream_bytes.next().await {
-                Some(Ok(bytes)) => match pump.push(&bytes) {
+            match next_upstream_item(&mut upstream_bytes, idle_timeout).await {
+                UpstreamItem::Chunk(Some(Ok(bytes))) => match pump.push(&bytes) {
                     Ok(out) => {
                         if !out.is_empty() {
                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(out));
@@ -1327,7 +1402,7 @@ fn stream_response_body(
                         break;
                     }
                 },
-                Some(Err(e)) => {
+                UpstreamItem::Chunk(Some(Err(e))) => {
                     had_error = true;
                     // The upstream body failed mid-stream.  `error decoding
                     // response body` (reqwest Kind::Decode) hides the real cause
@@ -1341,7 +1416,15 @@ fn stream_response_body(
                     ));
                     break;
                 }
-                None => break,
+                UpstreamItem::Chunk(None) => break,
+                UpstreamItem::IdleTimeout => {
+                    had_error = true;
+                    error_message = Some(format!(
+                        "stream idle timeout: no upstream data for {}s (mid-stream stall)",
+                        idle_timeout.as_secs()
+                    ));
+                    break;
+                }
             }
         }
 
@@ -1455,6 +1538,145 @@ pub fn supports_count_tokens(channel: &Channel) -> bool {
 mod tests {
     use super::*;
     use crate::db::models::Channel;
+
+    fn upstream_from_chunks(chunks: Vec<&[u8]>) -> UpstreamStream {
+        let body = futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok::<_, std::io::Error>(bytes::Bytes::from(c.to_vec())))
+                .collect::<Vec<_>>(),
+        )
+        .boxed();
+        UpstreamStream {
+            content_type: "text/event-stream".to_string(),
+            headers: vec![],
+            body,
+        }
+    }
+
+    /// First-frame barrier diagnostics: empty upstream body must surface
+    /// "0 bytes" so audit logs distinguish silent drops from content errors.
+    #[tokio::test]
+    async fn buffer_first_record_empty_stream_reports_zero_bytes() {
+        let mut upstream = upstream_from_chunks(vec![]);
+        let diagnostic = buffer_first_record(&mut upstream).await.unwrap_err();
+        assert!(diagnostic.contains("received 0 bytes"), "{diagnostic}");
+    }
+
+    /// Codex/OpenAI-style failure: HTTP 200 + JSON error body with no SSE
+    /// framing at all. The diagnostic must carry the body preview so the
+    /// audit log reveals the actual upstream error.
+    #[tokio::test]
+    async fn buffer_first_record_non_sse_json_body_is_surfaced() {
+        let mut upstream = upstream_from_chunks(vec![
+            b"{\"error\":{\"message\":\"quota exceeded for account\"}}".as_slice(),
+        ]);
+        let diagnostic = buffer_first_record(&mut upstream).await.unwrap_err();
+        assert!(diagnostic.contains("quota exceeded"), "{diagnostic}");
+    }
+
+    /// A complete SSE-shaped record that fails first-record validation (no
+    /// `event:` line, `data:` payload is not valid JSON) must surface its
+    /// content.  Note: records with no `data:` line at all are valid SSE
+    /// keep-alives and pass validation by design.
+    #[tokio::test]
+    async fn buffer_first_record_invalid_record_is_surfaced() {
+        let mut upstream = upstream_from_chunks(vec![b"data: not valid json\n\n"]);
+        let diagnostic = buffer_first_record(&mut upstream).await.unwrap_err();
+        assert!(diagnostic.contains("failed validation"), "{diagnostic}");
+        assert!(diagnostic.contains("not valid json"), "{diagnostic}");
+    }
+
+    /// Non-SSE content-type must be called out in the diagnostic.
+    #[tokio::test]
+    async fn buffer_first_record_surfaces_content_type() {
+        let mut upstream = upstream_from_chunks(vec![b"<html>blocked</html>"]);
+        upstream.content_type = "text/html".to_string();
+        let diagnostic = buffer_first_record(&mut upstream).await.unwrap_err();
+        assert!(diagnostic.contains("text/html"), "{diagnostic}");
+    }
+
+    /// Mid-stream idle timeout: after the first frame is committed, if the
+    /// upstream stalls (no more data), the pump must emit a protocol error
+    /// event containing "idle timeout" instead of hanging forever.
+    #[tokio::test]
+    async fn stream_response_body_idle_timeout_emits_error_event() {
+        let pool = fresh_db().await;
+        let repo = Arc::new(Repository::new(pool));
+
+        // First chunk: one valid Anthropic record (gets through the barrier).
+        let first_chunk = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"model\":\"up-model\",\"content\":[]}}\n\n";
+        // Second chunk: NEVER ARRIVES — the stream ends after the first record
+        // but we simulate a stall by providing only the first chunk and then
+        // ending the stream.  To test idle timeout specifically, we use a
+        // stream that yields one chunk then hangs (pending forever).
+        let first_chunk = first_chunk.to_vec();
+        let body = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::from(first_chunk),
+        )])
+        .chain(futures_util::stream::pending())
+        .boxed();
+
+        let mut upstream = UpstreamStream {
+            content_type: "text/event-stream".to_string(),
+            headers: vec![],
+            body,
+        };
+        let (first_frame, carry) =
+            buffer_first_record(&mut upstream).await.unwrap();
+        assert!(carry.is_empty(), "single record, no carry");
+
+        let mut sup = crate::core::stream_supervisor::StreamSupervisor::new();
+        sup.begin_connect().unwrap();
+        sup.on_upstream_headers().unwrap();
+        sup.on_first_frame_validated().unwrap();
+        let prepared = crate::protocol::codec::CodecRegistry::prepare_pair(
+            crate::protocol::codec::Protocol::Chat,
+            crate::protocol::codec::Protocol::Messages,
+            "up-model",
+            &json!({"model":"up-model", "messages":[{"role":"user","content":"hi"}]}),
+        )
+        .unwrap();
+        let pump =
+            StreamPumpCore::new(sup, prepared.codec.new_stream_decoder(), first_frame, carry)
+                .unwrap();
+
+        let stream = stream_response_body(
+            pump,
+            upstream,
+            repo,
+            api_key(),
+            audited_request(),
+            "m".to_string(),
+            "up-model".to_string(),
+            "chat".to_string(),
+            false,
+            "{}".to_string(),
+            None,
+            "ch-1".to_string(),
+            "ch".to_string(),
+            "anthropic".to_string(),
+            1,
+            "messages_g1_native".to_string(),
+            None,
+            "anthropic".to_string(),
+            "messages".to_string(),
+            "channel".to_string(),
+            // Very short idle timeout for testing.
+            Duration::from_millis(50),
+        );
+
+        let mut bytes = Vec::new();
+        tokio::pin!(stream);
+        while let Some(item) = stream.next().await {
+            bytes.extend_from_slice(&item.unwrap());
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("idle timeout"),
+            "downstream must receive idle timeout error event: {text}"
+        );
+    }
 
     fn channel(protocol: Option<&str>, endpoints: &[&str]) -> Channel {
         Channel {
@@ -1844,6 +2066,7 @@ mod tests {
             "anthropic".to_string(),
             "messages".to_string(),
             "channel".to_string(),
+            crate::endpoint_executor::STREAM_IDLE_TIMEOUT,
         );
 
         let mut bytes = Vec::new();
