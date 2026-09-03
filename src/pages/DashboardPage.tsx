@@ -74,8 +74,9 @@ export function DashboardPage() {
   }
 
   // 服务可用率 = 可用上游 / 全部上游，上游包含 API 渠道与 Auth 账号两类。
-  const activeUpstreams = stats.active_channels + stats.active_auth_accounts;
-  const totalUpstreams = stats.total_channels + stats.total_auth_accounts;
+  // 字段缺失（旧后端 + 新前端的版本错位）按 0 优雅降级，避免 NaN（NEW-4）。
+  const activeUpstreams = (stats.active_channels ?? 0) + (stats.active_auth_accounts ?? 0);
+  const totalUpstreams = (stats.total_channels ?? 0) + (stats.total_auth_accounts ?? 0);
   const availability = totalUpstreams > 0 ? Math.round((activeUpstreams / totalUpstreams) * 100) : 0;
 
   // 上 5：请求与渠道 | 下 5：知识服务

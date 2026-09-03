@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Layout } from "@app/components/layout/Layout";
 import { DashboardPage } from "@app/pages/DashboardPage";
 import { ChannelsPage } from "@app/pages/ChannelsPage";
@@ -10,10 +10,32 @@ import { SettingsPage } from "@app/pages/SettingsPage";
 import { UsagePage } from "@app/pages/UsagePage";
 import { KnowledgeBasePage } from "@app/pages/KnowledgeBasePage";
 import { settingsApi } from "@app/lib/api";
+import { WEB_UNAUTHORIZED_EVENT } from "@app/lib/runtime";
 import { ErrorBoundary } from "@app/components/ErrorBoundary";
-import { checkAuth, getToken } from "./lib/auth";
+import { checkAuth, getToken, clearToken } from "./lib/auth";
 import { LoginPage } from "./pages/LoginPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
+
+/**
+ * 会话过期统一处理（FIX-14）：任何管理 API 返回 401 时 runtime 层广播
+ * 未授权事件，这里统一清除本地凭证并跳转登录页——此前事件无人监听，
+ * 会话过期后每个操作各自报错，用户要手动刷新才发现需要重新登录。
+ * 已在登录/改密页时跳过，避免登录失败误触发跳转。
+ */
+function UnauthorizedWatcher() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  useEffect(() => {
+    const onUnauthorized = () => {
+      if (location.pathname === "/login" || location.pathname === "/change-password") return;
+      clearToken();
+      navigate("/login", { replace: true });
+    };
+    window.addEventListener(WEB_UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(WEB_UNAUTHORIZED_EVENT, onUnauthorized);
+  }, [navigate, location.pathname]);
+  return null;
+}
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const location = useLocation();
@@ -69,6 +91,7 @@ function App() {
   return (
     <ErrorBoundary>
       <BrowserRouter>
+      <UnauthorizedWatcher />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/change-password" element={<ChangePasswordPage />} />

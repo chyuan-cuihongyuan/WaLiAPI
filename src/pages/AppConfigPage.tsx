@@ -267,7 +267,8 @@ export function AppConfigPanel({ appName }: { appName: string }) {
                   未检测到
                 </span>
               )}
-              {appInfo.download_url && (
+              {/* 下载链接协议白名单（FIX-24）：配置来源不可信，只渲染 http(s)，防 javascript: 等协议注入 */}
+              {appInfo.download_url && /^https?:\/\//i.test(appInfo.download_url) && (
                 <a
                   href={appInfo.download_url}
                   target="_blank"

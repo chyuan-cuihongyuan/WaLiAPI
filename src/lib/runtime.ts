@@ -1,7 +1,16 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
-const ADMIN_TOKEN_KEY = "waliapi.web.admin-token";
 export const WEB_UNAUTHORIZED_EVENT = "waliapi:web-unauthorized";
+
+/**
+ * Web 管理面板的 Bearer token 读取（FIX-14 token 源收敛）：
+ * 主源是登录页写入的 localStorage `waliapi_admin_token`（web/src/lib/auth.ts），
+ * 兼容读旧的 sessionStorage 键（WebAdminGate 直连模式写入）。
+ * 此前 invoke/listen 只读 sessionStorage——登录页从不写那个键，
+ * Web 面板的命令调用实际全靠会话 Cookie 兜底，Bearer 形同虚设。
+ */
+const WEB_ADMIN_TOKEN_STORAGE_KEY = "waliapi_admin_token";
+const WEB_ADMIN_TOKEN_LEGACY_SESSION_KEY = "waliapi.web.admin-token";
 
 export interface RuntimeEvent<T> {
   payload: T;
@@ -13,14 +22,18 @@ export function isTauriRuntime(): boolean {
 
 export function getWebAdminToken(): string {
   if (typeof window === "undefined") return "";
-  return window.sessionStorage.getItem(ADMIN_TOKEN_KEY) || "";
+  return (
+    window.localStorage.getItem(WEB_ADMIN_TOKEN_STORAGE_KEY) ||
+    window.sessionStorage.getItem(WEB_ADMIN_TOKEN_LEGACY_SESSION_KEY) ||
+    ""
+  );
 }
 
 export function setWebAdminToken(token: string): void {
   if (typeof window === "undefined") return;
   const normalized = token.trim();
-  if (normalized) window.sessionStorage.setItem(ADMIN_TOKEN_KEY, normalized);
-  else window.sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+  if (normalized) window.sessionStorage.setItem(WEB_ADMIN_TOKEN_LEGACY_SESSION_KEY, normalized);
+  else window.sessionStorage.removeItem(WEB_ADMIN_TOKEN_LEGACY_SESSION_KEY);
 }
 
 /**
@@ -64,31 +77,6 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   return data as T;
 }
 
-export async function webFetch<T>(
-  path: string,
-  init: RequestInit & { json?: unknown } = {},
-): Promise<T> {
-  const token = getWebAdminToken();
-  const headers = new Headers(init.headers);
-  if (token) headers.set("authorization", `Bearer ${token}`);
-  if (init.json !== undefined) headers.set("content-type", "application/json");
-  const response = await fetch(path, {
-    ...init,
-    credentials: "same-origin",
-    headers,
-    body: init.json === undefined ? init.body : JSON.stringify(init.json),
-  });
-  if (response.status === 401) {
-    window.dispatchEvent(new CustomEvent(WEB_UNAUTHORIZED_EVENT));
-  }
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(detail || `管理 API 请求失败（HTTP ${response.status}）`);
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
-}
-
 /** Subscribe to native Tauri events or the authenticated headless SSE bridge. */
 export async function listen<T>(
   eventName: string,
@@ -102,48 +90,66 @@ export async function listen<T>(
   const controller = new AbortController();
   const token = getWebAdminToken();
   void (async () => {
-    try {
-      const response = await fetch("/admin/api/events", {
-        headers: token ? { authorization: `Bearer ${token}` } : {},
-        credentials: "same-origin",
-        signal: controller.signal,
-      });
-      if (response.status === 401) {
-        window.dispatchEvent(new CustomEvent(WEB_UNAUTHORIZED_EVENT));
-      }
-      if (!response.ok || !response.body) {
-        throw new Error(`事件连接失败（HTTP ${response.status}）`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (!controller.signal.aborted) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary >= 0) {
-          const frame = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          let name = "message";
-          const data: string[] = [];
-          for (const line of frame.split("\n")) {
-            if (line.startsWith("event:")) name = line.slice(6).trim();
-            else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
-          }
-          if (name === eventName && data.length) {
-            try {
-              handler({ payload: JSON.parse(data.join("\n")) as T });
-            } catch (error) {
-              console.warn(`忽略无法解析的事件 ${eventName}`, error);
-            }
-          }
-          boundary = buffer.indexOf("\n\n");
+    // 断线指数退避重连（FIX-24）：服务重启 / 网络抖动后事件流自动恢复，
+    // 渠道测试进度等事件不再静默丢失。连接成功后退避复位，上限 30s。
+    let backoffMs = 1_000;
+    while (!controller.signal.aborted) {
+      let connected = false;
+      try {
+        const response = await fetch("/admin/api/events", {
+          headers: token ? { authorization: `Bearer ${token}` } : {},
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
+        if (response.status === 401) {
+          window.dispatchEvent(new CustomEvent(WEB_UNAUTHORIZED_EVENT));
         }
+        if (!response.ok || !response.body) {
+          throw new Error(`事件连接失败（HTTP ${response.status}）`);
+        }
+        connected = true;
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!controller.signal.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary >= 0) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            let name = "message";
+            const data: string[] = [];
+            for (const line of frame.split("\n")) {
+              if (line.startsWith("event:")) name = line.slice(6).trim();
+              else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+            }
+            if (name === eventName && data.length) {
+              try {
+                handler({ payload: JSON.parse(data.join("\n")) as T });
+              } catch (error) {
+                console.warn(`忽略无法解析的事件 ${eventName}`, error);
+              }
+            }
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn("Web 事件连接已断开", error);
       }
-    } catch (error) {
-      if (!controller.signal.aborted) console.warn("Web 事件连接已断开", error);
+      if (controller.signal.aborted) return;
+      if (connected) backoffMs = 1_000;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, backoffMs);
+        controller.signal.addEventListener(
+          "abort",
+          () => { clearTimeout(timer); resolve(); },
+          { once: true },
+        );
+      });
+      backoffMs = Math.min(backoffMs * 2, 30_000);
     }
   })();
   return () => controller.abort();

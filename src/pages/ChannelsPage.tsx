@@ -162,13 +162,20 @@ export function ChannelsPage() {
   };
 
   const handleCopyKey = async (ch: Channel) => {
-    const keyToCopy = fullKeyMap[ch.id] || ch.api_key;
     try {
+      // 列表里的 api_key 是掩码（****/前4后4），直接复制没有意义；
+      // 未加载过全量时按需取一次再复制（FIX-24），缓存供后续显隐复用。
+      let keyToCopy = fullKeyMap[ch.id];
+      if (!keyToCopy) {
+        keyToCopy = await channelApi.getApiKey(ch.id);
+        setFullKeyMap(prev => ({ ...prev, [ch.id]: keyToCopy }));
+      }
       await writeClipboard(keyToCopy);
       setCopiedKey(ch.id);
       setTimeout(() => setCopiedKey(null), 2000);
     } catch (e) {
       console.error("Failed to copy:", e);
+      setActionError("复制失败：无法获取完整密钥");
     }
   };
 
