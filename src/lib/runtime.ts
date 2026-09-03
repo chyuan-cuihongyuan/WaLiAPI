@@ -178,29 +178,3 @@ export async function writeClipboard(text: string): Promise<void> {
   textarea.remove();
   if (!copied) throw new Error("浏览器未授予剪贴板权限");
 }
-
-export function pickTextFile(accept = ".json"): Promise<{ name: string; content: string } | null> {
-  return new Promise((resolve) => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = accept;
-    input.style.display = "none";
-    input.addEventListener("change", async () => {
-      const file = input.files?.[0];
-      input.remove();
-      resolve(file ? { name: file.name, content: await file.text() } : null);
-    }, { once: true });
-    input.addEventListener("cancel", () => { input.remove(); resolve(null); }, { once: true });
-    document.body.appendChild(input);
-    input.click();
-  });
-}
-
-export function downloadText(filename: string, content: string, type = "application/json"): void {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}

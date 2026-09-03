@@ -4,6 +4,7 @@ import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import { writeClipboard } from "../lib/runtime";
 import { safeJsonParse } from "../lib/json";
+import { unescapeText } from "../lib/text";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
   Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, ArrowDownLeft, ArrowUpRight, Shield, Timer, Coins,
@@ -1102,17 +1103,12 @@ function LogDetail({ log }: { log: RequestLog }) {
                     const fullContent = (() => {
                       const content = msg.content;
                       if (typeof content === "string") {
-                        // Convert escaped newline characters to actual newlines
-                        let processed = content
-                          .replace(/\\n/g, '\n')
-                          .replace(/\\r/g, '\r')
-                          .replace(/\\t/g, '\t');
-                        // Normalize line endings
-                        return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                        // 还原入库时转义的换行/制表符并统一行尾
+                        return unescapeText(content);
                       }
                       // 非字符串（undefined/数组/对象）统一转可展示字符串，undefined 时为 ""
                       return contentToString(content);
-                      })();
+                    })();
                     const isLongContent = fullContent.length > 140;
                     const messageKey = `msg-${i}`;
 
@@ -1440,12 +1436,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                    onClick={async () => {
                                      const thinkingKey = `thinking-${i}`;
                                      try {
-                                       let processed = reasoningContent
-                                         .replace(/\\n/g, '\n')
-                                         .replace(/\\r/g, '\r')
-                                         .replace(/\\t/g, '\t');
-                                       processed = processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                                       await writeClipboard(processed);
+                                       await writeClipboard(unescapeText(reasoningContent));
                                        setCopyingThinkingKey(thinkingKey);
                                        setTimeout(() => setCopyingThinkingKey(null), 1000);
                                      } catch {
@@ -1483,22 +1474,10 @@ function LogDetail({ log }: { log: RequestLog }) {
                             <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                               {reasoningContent.length > 200 ? (
                                 reasoningExpanded ? (
-                                  (() => {
-                                    let processed = reasoningContent
-                                      .replace(/\\n/g, '\n')
-                                      .replace(/\\r/g, '\r')
-                                      .replace(/\\t/g, '\t');
-                                    return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                                  })()
+                                  unescapeText(reasoningContent)
                                 ) : reasoningPreviewTruncated
                               ) : (
-                                (() => {
-                                  let processed = reasoningContent
-                                    .replace(/\\n/g, '\n')
-                                    .replace(/\\r/g, '\r')
-                                    .replace(/\\t/g, '\t');
-                                  return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                                })()
+                                unescapeText(reasoningContent)
                               )}
                             </div>
                           </div>
@@ -1516,12 +1495,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                 onClick={async () => {
                                   const contentKey = `content-${i}`;
                                   try {
-                                    let processed = content
-                                      .replace(/\\n/g, '\n')
-                                      .replace(/\\r/g, '\r')
-                                      .replace(/\\t/g, '\t');
-                                    processed = processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                                    await writeClipboard(processed);
+                                    await writeClipboard(unescapeText(content));
                                     setCopyingContentKey(contentKey);
                                     setTimeout(() => setCopyingContentKey(null), 1000);
                                   } catch {
@@ -1559,22 +1533,10 @@ function LogDetail({ log }: { log: RequestLog }) {
                           <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                             {content.length > 300 ? (
                               contentExpanded ? (
-                                (() => {
-                                  let processed = content
-                                    .replace(/\\n/g, '\n')
-                                    .replace(/\\r/g, '\r')
-                                    .replace(/\\t/g, '\t');
-                                  return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                                })()
+                                unescapeText(content)
                               ) : getContentPreview(message, 300)
                             ) : (
-                              (() => {
-                                let processed = content
-                                  .replace(/\\n/g, '\n')
-                                  .replace(/\\r/g, '\r')
-                                  .replace(/\\t/g, '\t');
-                                return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                              })()
+                              unescapeText(content)
                             )}
                           </div>
 

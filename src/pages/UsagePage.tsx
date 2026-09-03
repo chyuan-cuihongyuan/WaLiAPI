@@ -5,6 +5,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { channelApi, apiKeyApi, serverApi, authApi } from "../lib/api";
 import type { Channel, ApiKey, ServerStatus, AuthAccount } from "../types";
 import { isTauriRuntime, writeClipboard } from "../lib/runtime";
+import { makeKeyGuards } from "../lib/keyRules";
 import { AppConfigPanel, getAppIcon } from "./AppConfigPage";
 import {
   BookOpen, Copy, Check, Play, Loader2, Link2, KeyRound, Bot,
@@ -128,21 +129,7 @@ export function UsagePage() {
   // Three categories: API channel models, Auth account models, mapping aliases (unified).
   // Filtered by the selected API key's allowed/denied lists.
   const modelCategories = useMemo(() => {
-    const key = selectedApiKey;
-    // Check if a channel id is allowed by the key's channel rules.
-    const channelAllowed = (chId: string) => {
-      if (!key) return true;
-      if (key.allowed_channels.length > 0 && !key.allowed_channels.includes(chId)) return false;
-      if (key.denied_channels.includes(chId)) return false;
-      return true;
-    };
-    // Check if a model name is allowed by the key's model rules.
-    const modelAllowed = (model: string) => {
-      if (!key) return true;
-      if (key.allowed_models.length > 0 && !key.allowed_models.includes(model)) return false;
-      if (key.denied_models.includes(model)) return false;
-      return true;
-    };
+    const { channelAllowed, modelAllowed } = makeKeyGuards(selectedApiKey);
 
     const channelSet = new Set<string>();
     const authSet = new Set<string>();

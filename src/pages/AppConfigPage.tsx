@@ -5,6 +5,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { appConfigApi, serverApi, apiKeyApi, channelApi, authApi } from "../lib/api";
 import type { AppInfo, ConfigContent } from "../lib/api";
 import type { ServerStatus, Channel, ApiKey, AuthAccount } from "../types";
+import { makeKeyGuards } from "../lib/keyRules";
 import {
   Terminal,
   Code2,
@@ -96,18 +97,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
       // Restore persisted model selection, fallback to first model
       // (filtered by selected key's allowed/denied lists)
       const selectedKeyObj = keyList.find(k => k.key === (savedKeyValid ? savedKey! : keyList[0]?.key));
-      const modelAllowed = (model: string) => {
-        if (!selectedKeyObj) return true;
-        if (selectedKeyObj.allowed_models.length > 0 && !selectedKeyObj.allowed_models.includes(model)) return false;
-        if (selectedKeyObj.denied_models.includes(model)) return false;
-        return true;
-      };
-      const channelAllowed = (chId: string) => {
-        if (!selectedKeyObj) return true;
-        if (selectedKeyObj.allowed_channels.length > 0 && !selectedKeyObj.allowed_channels.includes(chId)) return false;
-        if (selectedKeyObj.denied_channels.includes(chId)) return false;
-        return true;
-      };
+      const { channelAllowed, modelAllowed } = makeKeyGuards(selectedKeyObj);
       const ms: string[] = [];
       chList.forEach(c => {
         if (!channelAllowed(c.id)) return;
@@ -144,19 +134,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
 
   // 模型列表 — filtered by selected API key's allowed/denied lists
   const modelList = useMemo(() => {
-    const key = selectedApiKey;
-    const channelAllowed = (chId: string) => {
-      if (!key) return true;
-      if (key.allowed_channels.length > 0 && !key.allowed_channels.includes(chId)) return false;
-      if (key.denied_channels.includes(chId)) return false;
-      return true;
-    };
-    const modelAllowed = (model: string) => {
-      if (!key) return true;
-      if (key.allowed_models.length > 0 && !key.allowed_models.includes(model)) return false;
-      if (key.denied_models.includes(model)) return false;
-      return true;
-    };
+    const { channelAllowed, modelAllowed } = makeKeyGuards(selectedApiKey);
     const realSeen = new Set<string>();
     const mappedSeen = new Set<string>();
     const real: string[] = [];
