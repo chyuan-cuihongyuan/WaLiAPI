@@ -86,12 +86,16 @@ async fn main() {
 
     // 同时输出到 stdout（docker logs 可见）和日志文件。
     // 文件写入失败不影响 stdout，保证容器日志始终可见。
+    // 日志级别支持 RUST_LOG（缺省 info，与既有行为一致；GAP-04）。
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stdout);
     let file_layer = file_appender.map(|w| {
         tracing_subscriber::fmt::layer().with_writer(w)
     });
     tracing_subscriber::registry()
+        .with(filter)
         .with(stdout_layer)
         .with(file_layer)
         .init();

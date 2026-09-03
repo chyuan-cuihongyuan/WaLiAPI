@@ -3735,6 +3735,9 @@ pub async fn handle_health(State(shared): State<SharedState>) -> Response {
         "running": running,
         "port": port,
         "url": format!("http://127.0.0.1:{}", port),
+        // 运行版本（GAP-03）：排障与 issue 上报时核对部署版本的单一来源，
+        // 与版本号四处同步机制（package.json/Cargo.toml/tauri.conf.json）一致。
+        "version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response()
 }
