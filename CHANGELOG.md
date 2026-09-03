@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.8 (2026-09-03)
+
+### Codex 账号切换能力
+
+- ✨ **应用配置 Codex 切换账号**：应用配置页 Codex 卡片支持「切回原账号」操作，检测 `auth.json` 是否处于 API Key 模式（`auth_mode == "apikey"` 或 `OPENAI_API_KEY` 非空且无 ChatGPT 登录态），若卡在 API Key 模式则提示并提供「重置 auth.json 为 ChatGPT 登录模式」命令——备份原 `auth.json` 为 `auth.json.waliapi-backup`，重置为 `chatgpt` 模式后用户运行 `codex login` 重新授权
+- ✨ **配置恢复 absent 标记**：写入网关配置前检测原配置是否存在，若不存在则打 `.waliapi-absent` 标记文件，恢复时删除写入的配置而非尝试恢复不存在的备份，避免「恢复原配置」变成「恢复成网关配置」死循环
+- 🔧 **Codex 配置状态文案优化**：Codex 卡片已配置状态显示「已切换到网关」，恢复按钮显示「切回原账号」并附 tooltip 说明 `auth.json` 不被改动
+
+### 流式稳定性增强
+
+- 🔧 **流式空闲超时守卫**：SSE 流式转发新增 5 分钟空闲超时（`STREAM_IDLE_TIMEOUT`），上游长时间无数据（半开连接 / 上游静默挂死）时主动断开并向下游发送协议错误事件，不再无限等待
+- 🔧 **首帧诊断信息增强**：`buffer_first_record` 返回诊断信息（收到的字节数 + 内容预览），审计日志可区分「空响应」「非 SSE JSON 错误体」「HTML 拦截页」等场景，而非统一显示「stream ended before a valid first SSE record」
+- 🔧 **上游 Retry-After 遵从**：解析上游响应的 `Retry-After` 头（支持 delta-seconds 和 RFC 7231 IMF-fixdate），在重试前等待指定时间（上限 5 秒 + ±20% jitter），避免密集重试触发上游限流
+
+### 其他
+
+- ✅ 新增 19 个单元测试覆盖配置恢复、Codex auth.json 检测/重置、流式空闲超时、首帧诊断、Retry-After 解析等场景
+- 🔧 **版本号统一升级至 0.2.8**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ## v0.2.7 (2026-09-02)
 
 ### 仪表盘
