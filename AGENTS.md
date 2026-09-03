@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-**WaLiAPI** 是一款本地运行的 LLM API 网关（当前版本 0.2.3，MIT 协议）。核心能力：
+**WaLiAPI** 是一款本地运行的 LLM API 网关（当前版本 0.2.7，MIT 协议）。核心能力：
 
 - **多协议网关**：下游可用 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三种协议接入，出口统一转换后转发到上游供应商（OpenAI / Claude / DeepSeek / Gemini / 智谱 / 通义 / Moonshot / 豆包 / Ollama / 自定义）。
 - **渠道调度**：优先级 + 权重负载均衡、多 API Key 负载、模型映射、自动故障切换。
@@ -22,7 +22,7 @@
 
 | 层 | 技术 |
 |:---|:---|
-| 前端 | React 19 + TypeScript ~5.8 + Vite 7 + Tailwind CSS 4 + React Router 7 + Zustand + TanStack Query |
+| 前端 | React 19 + TypeScript ~5.8 + Vite 7 + Tailwind CSS 4 + React Router 7（无独立状态/服务端数据库，组件内 useState/useEffect + 自封装 runtime 层） |
 | 后端 | Rust (edition 2021) + Tauri 2 + Axum 0.8 + sqlx 0.8 (SQLite) + reqwest 0.12 + tokio |
 | 知识库 | tree-sitter（7 种语言）+ HNSW + FTS5 + bincode + pdf-extract |
 | 包管理 | pnpm（workspace，含 `web/` 子包）+ cargo |
@@ -64,7 +64,7 @@
 │   │   ├── db/               # Database 初始化、models.rs、repository.rs
 │   │   ├── channel_presets.rs # 渠道预设注册表
 │   │   └── settings_store.rs # 设置存储抽象（桌面 tauri-plugin-store / headless JSON 文件）
-│   ├── migrations/           # SQL 迁移 001–025，启动时经 sqlx::migrate! 自动执行，迁移前自动备份 DB
+│   ├── migrations/           # SQL 迁移 001–027，启动时经 sqlx::migrate! 自动执行，迁移前自动备份 DB
 │   ├── resources/pdfium/     # pdfium 动态库打包目录（VLM OCR 用，库文件不入库，见该目录 README）
 │   └── tests/                # 集成测试（见「测试」一节）
 ├── deploy/                   # caddy/Caddyfile.example、systemd/（unit + env 示例）
@@ -167,7 +167,7 @@ Docker 部署：`docker compose up -d --build`（多阶段构建，运行时非 
 
 - **注释与文档使用中文**（部分历史代码注释为英文，新代码跟随所在文件的主流语言）。
 - Rust：`anyhow` / `thiserror` 处理错误，`tracing` 记日志；异步运行时 tokio。
-- 前端：函数组件 + Hooks，状态用 Zustand，服务端数据用 TanStack Query，样式用 Tailwind CSS 4（`@tailwindcss/vite` 插件），图标用 lucide-react。
+- 前端：函数组件 + Hooks，组件内状态用 useState/useEffect（无 Zustand/TanStack——依赖已确认为死依赖并移除），样式用 Tailwind CSS 4（`@tailwindcss/vite` 插件），图标用 lucide-react。
 - 渠道相关改动常涉及多处的模型映射与 Key 选择逻辑（`core/proxy.rs` 与 `endpoint_executor/` 两条转发路径都要覆盖）。
 - 桌面端窗口配置中 `dragDropEnabled: false` 是有意为之（Tauri v2 会吞掉 HTML5 drop 事件），不要改回。
 - 仓库根目录的 `waliapi_build_complete_20260718.md`、`waliapi_usage_guide_20260718.md` 是早期搭建记录，内容可能过时，参考 `README.md` 和 `docs/` 下的设计文档为准。

@@ -50,3 +50,7 @@ dist/
 src-tauri/resources/pdfium/*.dll
 src-tauri/resources/pdfium/*.dylib
 src-tauri/resources/pdfium/*.so
+
+# 测试产物（Playwright 等）
+test-results/
+playwright-report/
