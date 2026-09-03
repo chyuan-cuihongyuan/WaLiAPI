@@ -88,7 +88,8 @@ export function AppConfigPanel({ appName }: { appName: string }) {
       setAuthAccounts(acctList);
 
       // Restore persisted key selection, fallback to first key
-      const savedKey = localStorage.getItem(keyStorageKey);
+      // （FIX-19：密钥改存会话级，不再长期落盘 localStorage）
+      const savedKey = sessionStorage.getItem(keyStorageKey);
       const savedKeyValid = savedKey && keyList.some(k => k.key === savedKey);
       if (keyList.length > 0 && !selKey) {
         setSelKey(savedKeyValid ? savedKey! : keyList[0].key);
@@ -319,7 +320,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
                 value={selKey}
                 onChange={e => {
                   setSelKey(e.target.value);
-                  localStorage.setItem(keyStorageKey, e.target.value);
+                  sessionStorage.setItem(keyStorageKey, e.target.value);
                 }}
                 className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-8 text-sm font-mono text-slate-900 shadow-sm cursor-pointer"
               >

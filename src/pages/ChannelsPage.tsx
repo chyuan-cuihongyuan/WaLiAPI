@@ -64,6 +64,9 @@ export function ChannelsPage() {
   }, []);
 
   const handleExport = async () => {
+    // 导出内容包含全部渠道的明文 API 密钥（GAP-05）：误点即把密钥落盘到
+    // 下载目录，先确认再执行。
+    if (!confirm("导出的 JSON 包含所有渠道的明文 API 密钥，请妥善保管。确定导出？")) return;
     setExporting(true);
     try {
       const content = await importExportApi.exportChannels();

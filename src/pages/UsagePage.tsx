@@ -84,7 +84,8 @@ export function UsagePage() {
       setAuthAccounts(accts as AuthAccount[]);
 
       // Restore persisted key, fallback to first
-      const savedKey = localStorage.getItem(keyStorageKey);
+      // （FIX-19：密钥改存会话级，不再长期落盘 localStorage）
+      const savedKey = sessionStorage.getItem(keyStorageKey);
       const keyList = ks as ApiKey[];
       if (keyList.length > 0) {
         const keyValid = savedKey && keyList.some(k => k.key === savedKey);
@@ -596,7 +597,7 @@ public class AnthropicTest {
                     value={selKey}
                     onChange={e => {
                       setSelKey(e.target.value);
-                      localStorage.setItem(keyStorageKey, e.target.value);
+                      sessionStorage.setItem(keyStorageKey, e.target.value);
                       // selModel validity will be checked by the models useMemo + effect below.
                     }}
                     className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-8 text-sm font-mono text-slate-900 shadow-sm cursor-pointer"
