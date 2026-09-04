@@ -747,6 +747,7 @@ mod auth_account {
                 "{}",
                 None,
                 service.clone(),
+                Default::default(),
             )
             .await;
             if response.status() != axum::http::StatusCode::OK {
@@ -824,6 +825,7 @@ mod auth_account {
             "{}",
             None,
             service,
+            Default::default(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);

@@ -191,6 +191,11 @@ impl StreamPumpCore {
         }
     }
 
+    /// 帧间空闲超时观测（FIX-08）：记录到流监督状态机供诊断，不改变泵状态。
+    pub fn mark_idle_timeout(&mut self) {
+        let _ = self.supervisor.on_timeout(crate::core::stream_supervisor::StreamTimeoutKind::StreamIdle);
+    }
+
     pub fn finish(&mut self) -> Result<Vec<u8>, PumpError> {
         if self.finished {
             return Ok(Vec::new());

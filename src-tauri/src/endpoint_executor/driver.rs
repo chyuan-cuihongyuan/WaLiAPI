@@ -675,6 +675,8 @@ pub async fn route_stream_plan(
         sanitized_log_body,
         trace_id,
         auth_service,
+        // 无设置上下文的入口（测试/嵌入式调用）用缺省超时。
+        StreamTimeouts::default(),
     )
     .await
 }
@@ -690,6 +692,7 @@ pub(crate) async fn route_stream_plan_with_auth_service(
     sanitized_log_body: &str,
     trace_id: Option<String>,
     auth_service: Arc<crate::auth_provider::service::AuthService>,
+    timeouts: StreamTimeouts,
 ) -> Response {
     let lookup = candidate_lookup(&plan);
     let endpoint = plan.endpoint;
@@ -838,15 +841,34 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                     }
                     StreamAttemptResult::Connected(mut upstream) => {
                         // --- first-frame validation (commit barrier) ---
-                        let (first_frame, carry) = match buffer_first_record(&mut upstream).await {
-                            Some(x) => x,
-                            None => {
-                                // Empty / undecodable upstream: pre-commit failover.
+                        // 首帧超时（FIX-08，提交前阶段）：半死连接的首记录
+                        // 等待限时，超时按可重试失败换候选渠道。0 = 禁用。
+                        let first_frame_wait = async {
+                            match buffer_first_record(&mut upstream).await {
+                                Some(x) => Ok(x),
+                                None => Err(
+                                    "upstream stream ended before a valid first SSE record"
+                                        .to_string(),
+                                ),
+                            }
+                        };
+                        let first_frame_result = if timeouts.first_frame.is_zero() {
+                            first_frame_wait.await
+                        } else {
+                            tokio::time::timeout(timeouts.first_frame, first_frame_wait)
+                                .await
+                                .unwrap_or(Err(format!(
+                                    "upstream first frame timed out after {:?}",
+                                    timeouts.first_frame
+                                )))
+                        };
+                        let (first_frame, carry) = match first_frame_result {
+                            Ok(x) => x,
+                            Err(message) => {
+                                // Empty / timed-out upstream: pre-commit failover.
                                 let failure = AttemptFailure {
                                     failure_class: FailureClass::UpstreamProtocolError,
-                                    message:
-                                        "upstream stream ended before a valid first SSE record"
-                                            .to_string(),
+                                    message,
                                     status_code: Some(502),
                                     retry_after: None,
                                 };
@@ -1008,6 +1030,7 @@ pub(crate) async fn route_stream_plan_with_auth_service(
                             upstream_protocol,
                             upstream_endpoint,
                             upstream_type,
+                            timeouts,
                         );
                         let mut builder = Response::builder()
                             .status(StatusCode::OK)
@@ -1260,28 +1283,65 @@ impl Drop for StreamLogFinalizer {
             self.completed
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let f = self.clone();
-            tokio::spawn(async move {
-                let snap = f
-                    .snapshot
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                let (mut p, mut c, mut t, cached) = snap.usage;
-                let choices = snap.response_choices;
-                // 兜底：上游未回报 usage 时按请求体 + 已收到内容本地估算，
-                // 取消行的计费统计不再恒为 0。
-                if t == 0 && p == 0 && c == 0 {
-                    let req_body: serde_json::Value = serde_json::from_str(&f.sanitized_log_body)
-                        .unwrap_or(serde_json::Value::Null);
-                    let (ep, ec, et) =
-                        super::estimate_usage::estimate_usage(&req_body, Some(snap.content.as_str()), &f.model);
-                    p = ep;
-                    c = ec;
-                    t = et;
-                }
-                f.write(true, false, Some("client_cancelled"), p, c, t, cached, choices)
-                    .await;
-            });
+            // FIX-26：Drop 可能在 runtime 已关停（应用退出中）时执行，
+            // 裸 tokio::spawn 会 panic；守卫后优雅跳过该条落账。
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move { write_cancelled_row(&f).await });
+            }
+        }
+    }
+}
+
+/// 取消行的实际写入（从 Drop 中拆出便于复用与测试）。
+async fn write_cancelled_row(f: &StreamLogFinalizer) {
+    let snap = f
+        .snapshot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let (mut p, mut c, mut t, cached) = snap.usage;
+    let choices = snap.response_choices;
+    // 兜底：上游未回报 usage 时按请求体 + 已收到内容本地估算，
+    // 取消行的计费统计不再恒为 0。
+    if t == 0 && p == 0 && c == 0 {
+        let req_body: serde_json::Value =
+            serde_json::from_str(&f.sanitized_log_body).unwrap_or(serde_json::Value::Null);
+        let (ep, ec, et) =
+            super::estimate_usage::estimate_usage(&req_body, Some(snap.content.as_str()), &f.model);
+        p = ep;
+        c = ec;
+        t = et;
+    }
+    f.write(true, false, Some("client_cancelled"), p, c, t, cached, choices)
+        .await;
+}
+
+/// 流式超时配置（FIX-08）：首帧等待与帧间空闲分别限时，0 表示禁用该项。
+/// 缺省 60s/120s，可经设置 `stream.first_frame_timeout_secs` /
+/// `stream.idle_timeout_secs` 覆盖（SettingsStore 任意键读取，无需 schema）。
+#[derive(Debug, Clone, Copy)]
+pub struct StreamTimeouts {
+    pub first_frame: std::time::Duration,
+    pub idle: std::time::Duration,
+}
+
+impl Default for StreamTimeouts {
+    fn default() -> Self {
+        Self {
+            first_frame: std::time::Duration::from_secs(60),
+            idle: std::time::Duration::from_secs(120),
+        }
+    }
+}
+
+impl StreamTimeouts {
+    pub fn from_settings(settings: &crate::settings_store::SettingsStore) -> Self {
+        let secs = |key: &str, default: u64| {
+            std::time::Duration::from_secs(settings.get_u64(key, default))
+        };
+        Self {
+            first_frame: secs("stream.first_frame_timeout_secs", 60),
+            idle: secs("stream.idle_timeout_secs", 120),
         }
     }
 }
@@ -1309,6 +1369,7 @@ fn stream_response_body(
     upstream_protocol: String,
     upstream_endpoint: String,
     upstream_type: String,
+    timeouts: StreamTimeouts,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
     let mode_for_error = mode.clone();
     let snapshot = std::sync::Arc::new(std::sync::Mutex::new(StreamSnapshot::default()));
@@ -1365,7 +1426,25 @@ fn stream_response_body(
         // 成功的调用记成 499 零用量行。终止后跳出循环走正常落账路径。
         // 首帧/伴随帧就含终止标记（极短响应）的情形由 pump 内部登记覆盖。
         while !had_error && !pump.terminated() {
-            match upstream_bytes.next().await {
+            // 帧间空闲超时（FIX-08，提交后阶段）：上游挂死时不再无限等待，
+            // 超时按流错误收尾（下发结构化错误事件 + 502 落账）。0 = 禁用。
+            let next = if timeouts.idle.is_zero() {
+                upstream_bytes.next().await
+            } else {
+                match tokio::time::timeout(timeouts.idle, upstream_bytes.next()).await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        pump.mark_idle_timeout();
+                        had_error = true;
+                        error_message = Some(format!(
+                            "upstream idle timeout: no frame for {:?}",
+                            timeouts.idle
+                        ));
+                        break;
+                    }
+                }
+            };
+            match next {
                 Some(Ok(bytes)) => match pump.push(&bytes) {
                     Ok(out) => {
                         // 每帧后同步取消路径要用的落账快照（#57）。
@@ -1897,6 +1976,7 @@ mod tests {
             "anthropic".to_string(),
             "messages".to_string(),
             "channel".to_string(),
+            StreamTimeouts::default(),
         );
 
         let mut bytes = Vec::new();
@@ -2000,6 +2080,7 @@ mod tests {
             "anthropic".to_string(),
             "messages".to_string(),
             "channel".to_string(),
+            StreamTimeouts::default(),
         );
 
         // 上游挂死时若实现退化回「等 EOF」，这里 10s 超时直接失败。
@@ -2056,6 +2137,7 @@ mod tests {
             "anthropic".to_string(),
             "messages".to_string(),
             "channel".to_string(),
+            StreamTimeouts::default(),
         ));
 
         // 消费两帧输出（首帧 + 含 usage 的第二帧），确保快照已更新。
@@ -2114,6 +2196,7 @@ mod tests {
             "anthropic".to_string(),
             "messages".to_string(),
             "channel".to_string(),
+            StreamTimeouts::default(),
         ));
 
         stream.next().await.unwrap().unwrap();
@@ -2136,5 +2219,74 @@ mod tests {
             row.total_tokens > 0,
             "cancelled row must fall back to a local usage estimate: {row:?}"
         );
+    }
+
+    /// FIX-08：帧间空闲超时——上游挂死（发帧后既无终止标记也关连接）时，
+    /// 流在 idle 超时后以结构化错误事件收尾并落 502 行，不再无限等待。
+    #[tokio::test]
+    async fn stream_idle_timeout_ends_hung_upstream_with_error_event() {
+        let repo = Arc::new(Repository::new(fresh_db().await));
+        // 无 message_stop、无 EOF：第二帧输出后上游永久挂起。
+        let mut upstream = hanging_after_terminal_upstream(false, false);
+        let pump = pump_for(&mut upstream).await;
+
+        let timeouts = StreamTimeouts {
+            first_frame: std::time::Duration::from_secs(30),
+            idle: std::time::Duration::from_millis(300),
+        };
+        let stream = stream_response_body(
+            pump,
+            upstream,
+            repo.clone(),
+            api_key(),
+            audited_request(),
+            "m".to_string(),
+            "up-model".to_string(),
+            "chat".to_string(),
+            false,
+            full_request_body(),
+            None,
+            "ch-1".to_string(),
+            "ch".to_string(),
+            "anthropic".to_string(),
+            1,
+            "messages_g1_native".to_string(),
+            None,
+            "anthropic".to_string(),
+            "messages".to_string(),
+            "channel".to_string(),
+            timeouts,
+        );
+
+        let mut bytes = Vec::new();
+        tokio::pin!(stream);
+        let finished = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            async {
+                while let Some(item) = stream.next().await {
+                    bytes.extend_from_slice(&item.unwrap());
+                }
+            },
+        )
+        .await;
+        assert!(finished.is_ok(), "idle timeout must end the hung stream");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("upstream idle timeout"),
+            "structured error event must carry the timeout reason: {text}"
+        );
+
+        // 提交后超时 = 流错误：落 502 行（非 499、非成功 200）。
+        let logs = repo.get_logs(10, 0).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status_code, 502, "idle timeout is a stream error: {logs:?}");
+    }
+
+    /// FIX-08：StreamTimeouts 缺省值——首帧 60s、空闲 120s。
+    #[test]
+    fn stream_timeouts_defaults_are_sane() {
+        let t = StreamTimeouts::default();
+        assert_eq!(t.first_frame, std::time::Duration::from_secs(60));
+        assert_eq!(t.idle, std::time::Duration::from_secs(120));
     }
 }

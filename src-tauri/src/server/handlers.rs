@@ -203,6 +203,10 @@ async fn maybe_route_plan(
             sanitized_log_body,
             trace_id,
             shared.state.auth_service.clone(),
+            // 流式超时（FIX-08）从设置读取（stream.*_timeout_secs，缺省 60/120s）。
+            crate::endpoint_executor::driver::StreamTimeouts::from_settings(
+                &shared.state.settings,
+            ),
         )
         .await;
         Ok(Some(resp))
