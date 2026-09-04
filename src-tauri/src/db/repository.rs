@@ -670,6 +670,14 @@ impl Repository {
             .await
     }
 
+    /// FIX-13：按 id 取回完整密钥记录（管理面按需 reveal）。
+    pub async fn get_api_key_by_id(&self, id: &str) -> Result<ApiKey, sqlx::Error> {
+        sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+    }
+
     pub async fn create_api_key(&self, input: &CreateApiKeyInput) -> Result<ApiKey, sqlx::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_iso();

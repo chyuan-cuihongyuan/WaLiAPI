@@ -73,6 +73,8 @@ export const channelApi = {
 // API Key commands
 export const apiKeyApi = {
   getAll: () => invoke<ApiKey[]>("get_api_keys"),
+  // FIX-13：列表只回掩码，复制/示例代码等显式动作经此按需取全量。
+  getFull: (id: string) => invoke<string>("get_api_key_full", { id }),
   create: (input: CreateApiKeyInput) => invoke<ApiKey>("create_api_key", { input }),
   update: (input: { id: string; name?: string; quota_limit?: number; status?: number; allowed_models?: string[]; allowed_channels?: string[]; denied_models?: string[]; denied_channels?: string[] }) => invoke<void>("update_api_key", { input }),
   delete: (id: string) => invoke<void>("delete_api_key", { id }),

@@ -89,16 +89,16 @@ export function AppConfigPanel({ appName }: { appName: string }) {
       setAuthAccounts(acctList);
 
       // Restore persisted key selection, fallback to first key
-      // （FIX-19：密钥改存会话级，不再长期落盘 localStorage）
+      // （FIX-19：密钥改存会话级；FIX-13：选择标识改用 key id）
       const savedKey = sessionStorage.getItem(keyStorageKey);
-      const savedKeyValid = savedKey && keyList.some(k => k.key === savedKey);
+      const savedKeyValid = savedKey && keyList.some(k => k.id === savedKey);
       if (keyList.length > 0 && !selKey) {
-        setSelKey(savedKeyValid ? savedKey! : keyList[0].key);
+        setSelKey(savedKeyValid ? savedKey! : keyList[0].id);
       }
 
       // Restore persisted model selection, fallback to first model
       // (filtered by selected key's allowed/denied lists)
-      const selectedKeyObj = keyList.find(k => k.key === (savedKeyValid ? savedKey! : keyList[0]?.key));
+      const selectedKeyObj = keyList.find(k => k.id === (savedKeyValid ? savedKey! : keyList[0]?.id));
       const { channelAllowed, modelAllowed } = makeKeyGuards(selectedKeyObj);
       const ms: string[] = [];
       chList.forEach(c => {
@@ -130,7 +130,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
 
   // Find the currently selected API key object.
   const selectedApiKey = useMemo(
-    () => keys.find(k => k.key === selKey),
+    () => keys.find(k => k.id === selKey),
     [keys, selKey],
   );
 
@@ -184,7 +184,9 @@ export function AppConfigPanel({ appName }: { appName: string }) {
     setAppliedResult(null);
     setResultKind("apply");
     try {
-      const result = await appConfigApi.apply(appName, selKey, selModel);
+      // FIX-13：列表只回掩码，写配置前按需取完整密钥。
+      const fullKey = await apiKeyApi.getFull(selKey);
+      const result = await appConfigApi.apply(appName, fullKey, selModel);
       setAppliedResult(result);
       const [appList, content] = await Promise.all([
         appConfigApi.getApps(),
@@ -342,7 +344,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
                 className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-8 text-sm font-mono text-slate-900 shadow-sm cursor-pointer"
               >
                 {keys.length === 0 && <option value="">请先创建密钥</option>}
-                {keys.map(k => <option key={k.id} value={k.key}>{k.name} ({k.key.slice(0, 12)}...)</option>)}
+                {keys.map(k => <option key={k.id} value={k.id}>{k.name} ({k.key})</option>)}
               </select>
               <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
             </div>

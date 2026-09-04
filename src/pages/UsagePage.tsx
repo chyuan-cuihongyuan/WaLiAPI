@@ -84,12 +84,13 @@ export function UsagePage() {
       setAuthAccounts(accts as AuthAccount[]);
 
       // Restore persisted key, fallback to first
-      // （FIX-19：密钥改存会话级，不再长期落盘 localStorage）
+      // （FIX-19：密钥改存会话级，不再长期落盘 localStorage；
+      //   FIX-13：列表只回掩码，选择标识改用 key id）
       const savedKey = sessionStorage.getItem(keyStorageKey);
       const keyList = ks as ApiKey[];
       if (keyList.length > 0) {
-        const keyValid = savedKey && keyList.some(k => k.key === savedKey);
-        setSelKey(keyValid ? savedKey! : keyList[0].key);
+        const keyValid = savedKey && keyList.some(k => k.id === savedKey);
+        setSelKey(keyValid ? savedKey! : keyList[0].id);
       }
 
       // Build model list from active channels + active auth accounts
@@ -123,9 +124,27 @@ export function UsagePage() {
 
   // Find the currently selected API key object.
   const selectedApiKey = useMemo(
-    () => keys.find(k => k.key === selKey),
+    () => keys.find(k => k.id === selKey),
     [keys, selKey],
   );
+
+  // FIX-13：示例代码与复制需要完整密钥——按需取回，选中变化即清空；
+  // 未载入时示例中的密钥为占位符，完整密钥不常驻内存/不落盘。
+  const [keyValue, setKeyValue] = useState("");
+  const [keyValueLoading, setKeyValueLoading] = useState(false);
+  useEffect(() => { setKeyValue(""); }, [selKey]);
+  const loadKeyValue = async () => {
+    if (!selKey || keyValue || keyValueLoading) return;
+    setKeyValueLoading(true);
+    try {
+      setKeyValue(await apiKeyApi.getFull(selKey));
+    } catch (e) {
+      console.error("Failed to load full key:", e);
+    } finally {
+      setKeyValueLoading(false);
+    }
+  };
+  const keyForSamples = keyValue || "sk-waliapi-****（点击「载入密钥」后填充）";
 
   // Three categories: API channel models, Auth account models, mapping aliases (unified).
   // Filtered by the selected API key's allowed/denied lists.
@@ -201,20 +220,20 @@ export function UsagePage() {
     chat: {
       "curl-mac": `curl ${endpoints.chat} \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${selKey}" \\
+  -H "Authorization: Bearer ${keyForSamples}" \\
   -d '{
     "model": "${selModel}",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'`,
       "curl-windows": `curl ${endpoints.chat} ^
   -H "Content-Type: application/json" ^
-  -H "Authorization: Bearer ${selKey}" ^
+  -H "Authorization: Bearer ${keyForSamples}" ^
   -d "{\\"model\\": \\"${selModel}\\", \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"Hello!\\"}]}"`,
       "javascript": `import OpenAI from "openai";
 
 const client = new OpenAI({
   baseURL: "${baseUrl}",
-  apiKey: "${selKey}",
+  apiKey: "${keyForSamples}",
 });
 
 const response = await client.chat.completions.create({
@@ -226,7 +245,7 @@ console.log(response.choices[0].message.content);`,
 
 const client = new OpenAI({
   baseURL: "${baseUrl}",
-  apiKey: "${selKey}",
+  apiKey: "${keyForSamples}",
 });
 
 async function main() {
@@ -247,7 +266,7 @@ public class XapiTest {
     HttpRequest req = HttpRequest.newBuilder()
       .uri(URI.create("${endpoints.chat}"))
       .header("Content-Type", "application/json")
-      .header("Authorization", "Bearer ${selKey}")
+      .header("Authorization", "Bearer ${keyForSamples}")
       .POST(HttpRequest.BodyPublishers.ofString(body))
       .build();
     HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
@@ -258,21 +277,21 @@ public class XapiTest {
     responses: {
       "curl-mac": `curl ${endpoints.responses} \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${selKey}" \\
+  -H "Authorization: Bearer ${keyForSamples}" \\
   -d '{
     "model": "${selModel}",
     "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello!"}]}]
   }'`,
       "curl-windows": `curl ${endpoints.responses} ^
   -H "Content-Type: application/json" ^
-  -H "Authorization: Bearer ${selKey}" ^
+  -H "Authorization: Bearer ${keyForSamples}" ^
   -d "{\\"model\\": \\"${selModel}\\", \\"input\\": [{\\"type\\": \\"message\\", \\"role\\": \\"user\\", \\"content\\": [{\\"type\\": \\"input_text\\", \\"text\\": \\"Hello!\\"}]}]}"`,
       "javascript": `// OpenAI Responses API (fetch)
 const response = await fetch("${endpoints.responses}", {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
-    "Authorization": "Bearer ${selKey}",
+    "Authorization": "Bearer ${keyForSamples}",
   },
   body: JSON.stringify({
     model: "${selModel}",
@@ -287,7 +306,7 @@ async function main() {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": "Bearer ${selKey}",
+      "Authorization": "Bearer ${keyForSamples}",
     },
     body: JSON.stringify({
       model: "${selModel}",
@@ -308,7 +327,7 @@ public class ResponsesTest {
     HttpRequest req = HttpRequest.newBuilder()
       .uri(URI.create("${endpoints.responses}"))
       .header("Content-Type", "application/json")
-      .header("Authorization", "Bearer ${selKey}")
+      .header("Authorization", "Bearer ${keyForSamples}")
       .POST(HttpRequest.BodyPublishers.ofString(body))
       .build();
     HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
@@ -319,7 +338,7 @@ public class ResponsesTest {
     anthropic: {
       "curl-mac": `curl ${endpoints.anthropic} \\
   -H "Content-Type: application/json" \\
-  -H "x-api-key: ${selKey}" \\
+  -H "x-api-key: ${keyForSamples}" \\
   -H "anthropic-version: 2023-06-01" \\
   -d '{
     "model": "${selModel}",
@@ -328,7 +347,7 @@ public class ResponsesTest {
   }'`,
       "curl-windows": `curl ${endpoints.anthropic} ^
   -H "Content-Type: application/json" ^
-  -H "x-api-key: ${selKey}" ^
+  -H "x-api-key: ${keyForSamples}" ^
   -H "anthropic-version: 2023-06-01" ^
   -d "{\\"model\\": \\"${selModel}\\", \\"max_tokens\\": 1024, \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"Hello!\\"}]}"`,
       "javascript": `// Anthropic Messages API (fetch)
@@ -336,7 +355,7 @@ const response = await fetch("${endpoints.anthropic}", {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
-    "x-api-key": "${selKey}",
+    "x-api-key": "${keyForSamples}",
     "anthropic-version": "2023-06-01",
   },
   body: JSON.stringify({
@@ -353,7 +372,7 @@ async function main() {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": "${selKey}",
+      "x-api-key": "${keyForSamples}",
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
@@ -376,7 +395,7 @@ public class AnthropicTest {
     HttpRequest req = HttpRequest.newBuilder()
       .uri(URI.create("${endpoints.anthropic}"))
       .header("Content-Type", "application/json")
-      .header("x-api-key", "${selKey}")
+      .header("x-api-key", "${keyForSamples}")
       .header("anthropic-version", "2023-06-01")
       .POST(HttpRequest.BodyPublishers.ofString(body))
       .build();
@@ -400,7 +419,7 @@ public class AnthropicTest {
         headers["x-api-key"] = selKey;
         headers["anthropic-version"] = "2023-06-01";
       } else {
-        headers["Authorization"] = `Bearer ${selKey}`;
+        headers["Authorization"] = `Bearer ${keyForSamples}`;
       }
       let body: string;
       if (isAnthropic) {
@@ -603,12 +622,21 @@ public class AnthropicTest {
                     className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-8 text-sm font-mono text-slate-900 shadow-sm cursor-pointer"
                   >
                     {keys.length === 0 && <option value="">请先创建密钥</option>}
-                    {keys.map(k => <option key={k.id} value={k.key}>{k.name} ({k.key.slice(0, 12)}...)</option>)}
+                    {keys.map(k => <option key={k.id} value={k.id}>{k.name} ({k.key})</option>)}
                   </select>
                   <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
                 </div>
-                <button onClick={() => selKey && copy(selKey, "key")} disabled={!selKey} className="action-secondary px-3 py-2.5 disabled:opacity-50" title="复制 Key">
-                  {copied === "key" ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
+                {/* FIX-13：按需载入完整密钥后才能复制/生成真实示例 */}
+                <button
+                  onClick={async () => {
+                    await loadKeyValue();
+                    if (keyValue) { await copy(keyValue, "key"); }
+                  }}
+                  disabled={!selKey}
+                  className="action-secondary px-3 py-2.5 disabled:opacity-50"
+                  title={keyValue ? "复制完整 Key" : "载入完整 Key 后复制"}
+                >
+                  {copied === "key" ? <Check size={16} className="text-emerald-600" /> : keyValueLoading ? <Loader2 size={16} className="animate-spin" /> : <Copy size={16} />}
                 </button>
               </div>
               {keys.length === 0 && (

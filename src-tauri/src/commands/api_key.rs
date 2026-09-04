@@ -25,7 +25,8 @@ impl From<ApiKey> for ApiKeyDto {
         ApiKeyDto {
             id: k.id,
             name: k.name,
-            key: k.key,
+            // FIX-13：列表/详情只回掩码，全量经 get_api_key_full 按需获取。
+            key: crate::utils::secret::mask_secret(&k.key),
             status: k.status,
             allowed_models: serde_json::from_str(&k.allowed_models).unwrap_or_default(),
             allowed_channels: serde_json::from_str(&k.allowed_channels).unwrap_or_default(),
@@ -53,6 +54,26 @@ pub async fn get_api_keys_impl(state: &std::sync::Arc<AppState>) -> Result<Vec<A
         .await
         .map_err(|e| e.to_string())
         .map(|ks| ks.into_iter().map(Into::into).collect())
+}
+
+/// FIX-13：按 id 按需取回完整密钥（复制/生成示例代码等显式动作）。
+#[tauri::command]
+pub async fn get_api_key_full(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    id: String,
+) -> Result<String, String> {
+    get_api_key_full_impl(&*state, &id).await
+}
+
+pub async fn get_api_key_full_impl(
+    state: &std::sync::Arc<AppState>,
+    id: &str,
+) -> Result<String, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.get_api_key_by_id(id)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|k| k.key)
 }
 
 #[tauri::command]

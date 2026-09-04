@@ -121,10 +121,8 @@ pub(crate) async fn to_dto_with_keys(repo: &Repository, c: Channel) -> Result<Ch
 }
 
 fn mask_key(key: &str) -> String {
-    if key.len() <= 8 {
-        return "****".to_string();
-    }
-    format!("{}...{}", &key[..4], &key[key.len() - 4..])
+    // FIX-23：共享字符边界安全实现（此前按字节切片，多字节密钥 panic）。
+    crate::utils::secret::mask_secret(key)
 }
 
 fn to_dto(c: Channel) -> ChannelDto {

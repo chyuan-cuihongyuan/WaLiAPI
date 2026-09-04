@@ -266,6 +266,7 @@ pub fn run() {
             commands::channel::toggle_channel_extra_key,
             commands::channel::delete_channel_extra_key,
             commands::api_key::get_api_keys,
+            commands::api_key::get_api_key_full,
             commands::api_key::create_api_key,
             commands::api_key::update_api_key,
             commands::api_key::delete_api_key,

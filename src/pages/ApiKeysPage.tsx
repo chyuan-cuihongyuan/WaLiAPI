@@ -92,10 +92,16 @@ export function ApiKeysPage() {
     load();
   };
 
-  const copyKey = (key: string) => {
-    void writeClipboard(key);
-    setCopied(key);
-    setTimeout(() => setCopied(null), 2000);
+  // FIX-13：列表只回掩码；复制前按 id 取完整密钥，复制出的永远是可用密钥。
+  const copyKey = async (id: string) => {
+    try {
+      const full = await apiKeyApi.getFull(id);
+      void writeClipboard(full);
+      setCopied(id);
+      setTimeout(() => setCopied(null), 2000);
+    } catch (e) {
+      console.error("Failed to load full key:", e);
+    }
   };
 
   return (
@@ -125,12 +131,12 @@ export function ApiKeysPage() {
                   <div className="mb-3 flex items-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${k.status === 1 ? "bg-emerald-400 shadow-[0_0_16px_rgba(52,211,153,0.8)]" : "bg-zinc-500"}`} />
                     <button
-                      onClick={() => copyKey(k.key)}
+                      onClick={() => copyKey(k.id)}
                       title="点击复制密钥"
                       className="group flex items-center gap-1.5 text-left"
                     >
                       <h3 className="text-lg font-semibold tracking-tight group-hover:text-primary transition-colors">{k.name}</h3>
-                      {copied === k.key ? (
+                      {copied === k.id ? (
                         <Check size={13} className="text-emerald-400" />
                       ) : (
                         <Copy size={13} className="text-muted-foreground/0 group-hover:text-muted-foreground/60 transition-colors" />
@@ -140,8 +146,8 @@ export function ApiKeysPage() {
 
                   <div className="flex items-center gap-2 rounded-2xl border border-white/8 bg-black/16 px-3 py-3">
                     <code className="min-w-0 flex-1 truncate text-xs font-mono text-foreground/90">{k.key}</code>
-                    <button onClick={() => copyKey(k.key)} className="action-secondary px-3 py-2" title="复制">
-                      {copied === k.key ? <Check size={14} className="text-emerald-300" /> : <Copy size={14} />}
+                    <button onClick={() => copyKey(k.id)} className="action-secondary px-3 py-2" title="复制完整密钥">
+                      {copied === k.id ? <Check size={14} className="text-emerald-300" /> : <Copy size={14} />}
                     </button>
                   </div>
 
