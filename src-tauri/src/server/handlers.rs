@@ -151,7 +151,7 @@ async fn maybe_route_plan(
                 .into_response()
         })?;
     let mut plan_rng = rand::rngs::StdRng::from_os_rng();
-    let plan = match route_plan::authorize_and_plan_with_accounts(
+    let mut plan = match route_plan::authorize_and_plan_with_accounts(
         key,
         &audited.envelope.model,
         endpoint,
@@ -162,8 +162,7 @@ async fn maybe_route_plan(
         &mut plan_rng,
     ) {
         Ok(plan) => plan,
-        Err(e) => {
-            let code = e.http_status();
+        Err(e) => {            let code = e.http_status();
             // I-3: a facade rejection (auth / no candidate / no endpoint)
             // must be observable in the RequestLog on BOTH paths, except for
             // Count Tokens which is deliberately excluded from request history.
@@ -192,6 +191,16 @@ async fn maybe_route_plan(
             ));
         }
     };
+    // GAP-08：重试策略设置对主路径生效——映射为 RoutePlan 尝试预算（组内
+    // = 次数+1、总量 = ×2，与既有默认 3/6 一致；关闭重试 → 1/1 真正不重试）。
+    // 此前该设置只作用于 legacy 轨，主路径预算硬编码。
+    {
+        let (retry_enabled, retry_times) =
+            crate::core::proxy::get_retry_settings(&shared.state.settings);
+        let (per_group, total) =
+            route_plan::retry_budget_from_settings(retry_enabled, retry_times);
+        plan.apply_retry_budget(per_group, total);
+    }
     if is_stream {
         let resp = crate::endpoint_executor::driver::route_stream_plan_with_auth_service(
             plan,

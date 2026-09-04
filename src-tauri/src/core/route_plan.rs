@@ -272,6 +272,35 @@ pub struct RouteGroup {
     pub max_attempts: usize,
 }
 
+/// GAP-08：把设置中心的「失败自动重试策略」映射为 RoutePlan 尝试预算。
+/// 组内 = 次数+1（与 legacy 轨 `max_attempts = retry_times+1` 一致）、
+/// 总量 = 组内×2（与既有硬编码默认 3/6 一致——双候选组语义）；关闭重试
+/// 时 (1, 1)，主路径真正不重试。
+pub fn retry_budget_from_settings(retry_enabled: bool, retry_times: i32) -> (usize, usize) {
+    if !retry_enabled {
+        return (1, 1);
+    }
+    let per_group = retry_times.max(0) as usize + 1;
+    (per_group, per_group * 2)
+}
+
+impl RoutePlan {
+    /// 按重试设置重写尝试预算（GAP-08：设置此前只作用于 legacy 轨）。
+    /// 组内预算与构建期同语义：受组内候选数物理限制（≤ 候选数）；总量
+    /// 受各组预算之和限制。non_idempotent 请求不放宽（保持 1，无自动重试）。
+    pub fn apply_retry_budget(&mut self, per_group: usize, total: usize) {
+        if self.non_idempotent {
+            return;
+        }
+        for group in &mut self.groups {
+            group.max_attempts = per_group.min(group.candidates.len()).max(1);
+        }
+        self.max_attempts_total = total
+            .min(self.groups.iter().map(|g| g.max_attempts).sum::<usize>())
+            .max(1);
+    }
+}
+
 /// The full routing plan for one request.  `groups` is already ordered
 /// native-first; conversion priority/weight can never leapfrog the native group.
 #[derive(Debug, Clone)]
@@ -1236,6 +1265,21 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    /// GAP-08 真值表：重试设置 → 主路径尝试预算（与 legacy 对齐）。
+    #[test]
+    fn retry_budget_mapping_truth_table() {
+        // 默认（开，2 次）→ 3/6，与既有硬编码默认逐字一致（零回归点）。
+        assert_eq!(retry_budget_from_settings(true, 2), (3, 6));
+        // 关闭 → 1/1（修复：此前主路径无视该设置继续重试）。
+        assert_eq!(retry_budget_from_settings(false, 2), (1, 1));
+        assert_eq!(retry_budget_from_settings(false, 0), (1, 1));
+        // 调大/调小按 次数+1 / ×2 映射。
+        assert_eq!(retry_budget_from_settings(true, 5), (6, 12));
+        assert_eq!(retry_budget_from_settings(true, 0), (1, 2));
+        // 负数（异常输入）clamp 到 0 次 → 1。
+        assert_eq!(retry_budget_from_settings(true, -3), (1, 2));
+    }
 
     fn api_key(allowed_models: &[&str], allowed_channels: &[&str]) -> ApiKey {
         ApiKey {
