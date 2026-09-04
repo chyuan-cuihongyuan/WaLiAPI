@@ -191,6 +191,10 @@ where
                         last_failure: Some(result),
                     };
                 }
+                // Honor upstream Retry-After before the next attempt.
+                if let Some(secs) = result.retry_after {
+                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                }
                 // Otherwise loop; `flow.next_step()` applies group transition / budget.
             }
             FlowStep::Halt { status, message } => {

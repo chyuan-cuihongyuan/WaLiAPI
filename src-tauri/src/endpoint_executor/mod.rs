@@ -43,9 +43,80 @@ use crate::core::attempt::{
 use crate::core::channel_identity::ChannelIdentity;
 use crate::core::route_plan::{AuthNonStreamFraming, EndpointKind};
 use crate::db::models::Channel;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use reqwest::header;
 use serde_json::Value;
+use std::time::Duration;
+
+/// Default idle timeout for mid-stream SSE reads is configurable via
+/// `StreamTimeouts`（FIX-08：`stream.idle_timeout_secs`，缺省 120s，0 = 禁用），
+/// 不再使用固定常量。
+
+/// Maximum backoff applied to a `Retry-After` value before jitter.
+const RETRY_AFTER_CAP_SECS: u64 = 5;
+
+/// Parse an HTTP `Retry-After` header value into seconds.
+///
+/// Supports both delta-seconds (`"120"`) and RFC 7231 IMF-fixdate
+/// (`"Wed, 21 Oct 2026 07:28:00 GMT"`).  Returns `None` on parse failure.
+fn parse_retry_after(value: Option<&str>) -> Option<u64> {
+    let raw = value?.trim();
+    // Try delta-seconds first.
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(secs);
+    }
+    // Try RFC 7231 IMF-fixdate.
+    if let Ok(dt) = DateTime::parse_from_rfc2822(raw) {
+        let now = Utc::now();
+        if dt > now {
+            let secs = (dt.with_timezone(&Utc) - now).num_seconds().max(0) as u64;
+            return Some(secs);
+        }
+        return Some(0);
+    }
+    None
+}
+
+/// Extract a capped, jittered backoff from a response's `Retry-After` header.
+///
+/// Returns `Some(Duration)` when the header is present and parseable,
+/// capped to [`RETRY_AFTER_CAP_SECS`] with ±20% jitter applied.
+fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = parse_retry_after(headers.get("retry-after").and_then(|v| v.to_str().ok()))?;
+    let capped = raw.min(RETRY_AFTER_CAP_SECS);
+    // ±20% jitter: multiply by a factor in [0.8, 1.2].
+    let jitter_factor = 0.8 + (rand::random::<f64>() * 0.4);
+    let jittered = (capped as f64 * jitter_factor).round() as u64;
+    Some(Duration::from_secs(jittered))
+}
+
+/// Wrapper for the next item from an upstream byte stream with an idle guard.
+///
+/// [`UpstreamItem::Chunk`] wraps the raw `Option<Result<Bytes, _>>` from the
+/// stream; [`UpstreamItem::IdleTimeout`] signals that no data arrived within
+/// the configured idle window.
+pub enum UpstreamItem<E> {
+    Chunk(Option<Result<bytes::Bytes, E>>),
+    IdleTimeout,
+}
+
+/// Read the next item from a stream with an idle-timeout guard.
+///
+/// If the stream does not produce an item within `idle_timeout`, returns
+/// [`UpstreamItem::IdleTimeout`] instead of waiting indefinitely.
+pub async fn next_upstream_item<S, E>(
+    upstream: &mut S,
+    idle_timeout: Duration,
+) -> UpstreamItem<E>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
+{
+    match tokio::time::timeout(idle_timeout, upstream.next()).await {
+        Ok(item) => UpstreamItem::Chunk(item),
+        Err(_) => UpstreamItem::IdleTimeout,
+    }
+}
 
 /// A connected upstream stream response (2xx, content still flowing).
 pub struct UpstreamStream {
@@ -112,8 +183,13 @@ pub async fn dispatch_auth_account_executor(
         };
         let status = response.status().as_u16();
         if status >= 400 {
+            let retry_after = retry_after_from_headers(response.headers());
             let text = response.text().await.unwrap_or_default();
-            return AttemptResult::Failure(failure_from_auth_upstream(status, &text));
+            return AttemptResult::Failure(failure_from_auth_upstream(
+                status,
+                &text,
+                retry_after.map(|d| d.as_secs()),
+            ));
         }
         let response_headers = safe_response_headers(response.headers());
         let bytes = response.bytes().await.unwrap_or_default();
@@ -158,8 +234,13 @@ pub async fn dispatch_auth_account_executor(
     };
     let status = response.status().as_u16();
     if status >= 400 {
+        let retry_after = retry_after_from_headers(response.headers());
         let text = response.text().await.unwrap_or_default();
-        return AttemptResult::Failure(failure_from_auth_upstream(status, &text));
+        return AttemptResult::Failure(failure_from_auth_upstream(
+            status,
+            &text,
+            retry_after.map(|d| d.as_secs()),
+        ));
     }
     let response_headers = safe_response_headers(response.headers());
     let bytes = response.bytes().await.unwrap_or_default();
@@ -223,8 +304,13 @@ pub async fn dispatch_auth_account_stream_executor(
     };
     let status = response.status().as_u16();
     if status >= 400 {
+        let retry_after = retry_after_from_headers(response.headers());
         let text = response.text().await.unwrap_or_default();
-        return StreamAttemptResult::Failure(failure_from_auth_upstream(status, &text));
+        return StreamAttemptResult::Failure(failure_from_auth_upstream(
+            status,
+            &text,
+            retry_after.map(|d| d.as_secs()),
+        ));
     }
     let content_type = response
         .headers()
@@ -484,7 +570,14 @@ pub fn classify_upstream_status(status: u16, body: &str) -> Option<FailureClass>
 }
 
 /// Build a classified [`AttemptFailure`] from an upstream non-2xx.
-pub fn failure_from_upstream(status: u16, body: &str) -> AttemptFailure {
+///
+/// `retry_after_secs` — when the upstream returned a `Retry-After` header,
+/// the parsed (capped) seconds value; `None` if absent or unparseable.
+pub fn failure_from_upstream(
+    status: u16,
+    body: &str,
+    retry_after_secs: Option<u64>,
+) -> AttemptFailure {
     let class = classify_upstream_status(status, body).unwrap_or(FailureClass::Retryable);
     let message = error_message_from_body(body).unwrap_or_else(|| {
         let cls = class.as_str();
@@ -501,7 +594,7 @@ pub fn failure_from_upstream(status: u16, body: &str) -> AttemptFailure {
         failure_class: class,
         message,
         status_code,
-        retry_after: None,
+        retry_after: retry_after_secs,
     }
 }
 
@@ -509,8 +602,12 @@ pub fn failure_from_upstream(status: u16, body: &str) -> AttemptFailure {
 /// the user (OAuth login), so a terminal 401/403 keeps its real status instead
 /// of the channel mask.  The failure CLASS is unchanged, so failover semantics
 /// (in-group only, never cross-group) are identical to channels.
-pub fn failure_from_auth_upstream(status: u16, body: &str) -> AttemptFailure {
-    let mut failure = failure_from_upstream(status, body);
+pub fn failure_from_auth_upstream(
+    status: u16,
+    body: &str,
+    retry_after_secs: Option<u64>,
+) -> AttemptFailure {
+    let mut failure = failure_from_upstream(status, body, retry_after_secs);
     if failure.failure_class == FailureClass::ChannelAuthTerminal {
         failure.status_code = Some(status);
     }
@@ -787,8 +884,13 @@ pub async fn dispatch_executor(
     };
     let status = resp.status().as_u16();
     if status >= 400 {
+        let retry_after = retry_after_from_headers(resp.headers());
         let text = resp.text().await.unwrap_or_default();
-        return AttemptResult::Failure(failure_from_upstream(status, &text));
+        return AttemptResult::Failure(failure_from_upstream(
+            status,
+            &text,
+            retry_after.map(|d| d.as_secs()),
+        ));
     }
     // T06 M-2: preserve safely-passthrough response headers (credentials and
     // hop-by-hop fields dropped) so the non-stream executor boundary retains
@@ -1037,8 +1139,13 @@ pub async fn dispatch_stream_executor(
     };
     let status = resp.status().as_u16();
     if status >= 400 {
+        let retry_after = retry_after_from_headers(resp.headers());
         let text = resp.text().await.unwrap_or_default();
-        return StreamAttemptResult::Failure(failure_from_upstream(status, &text));
+        return StreamAttemptResult::Failure(failure_from_upstream(
+            status,
+            &text,
+            retry_after.map(|d| d.as_secs()),
+        ));
     }
     let content_type = resp
         .headers()
@@ -1061,6 +1168,47 @@ pub async fn dispatch_stream_executor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_retry_after_delta_seconds() {
+        assert_eq!(parse_retry_after(Some("120")), Some(120));
+        assert_eq!(parse_retry_after(Some("0")), Some(0));
+        assert_eq!(parse_retry_after(Some("  30  ")), Some(30));
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        // A future date ~120 seconds from now.
+        let future = Utc::now() + chrono::Duration::seconds(120);
+        let rfc2822 = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let parsed = parse_retry_after(Some(&rfc2822));
+        assert!(parsed.is_some(), "should parse HTTP-date: {rfc2822}");
+        let secs = parsed.unwrap();
+        assert!(secs >= 115 && secs <= 125, "should be ~120s, got {secs}");
+    }
+
+    #[test]
+    fn parse_retry_after_invalid() {
+        assert_eq!(parse_retry_after(None), None);
+        assert_eq!(parse_retry_after(Some("garbage")), None);
+        assert_eq!(parse_retry_after(Some("")), None);
+    }
+
+    #[test]
+    fn retry_after_from_headers_caps_and_jitters() {
+        // A huge value (3600s) should be capped to RETRY_AFTER_CAP_SECS (5).
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "3600".parse().unwrap());
+        let dur = retry_after_from_headers(&headers).unwrap();
+        // With ±20% jitter on 5s, range is [4, 6].
+        assert!(dur.as_secs() >= 4 && dur.as_secs() <= 6, "capped+jit={:?}", dur);
+    }
+
+    #[test]
+    fn retry_after_from_headers_absent() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert!(retry_after_from_headers(&headers).is_none());
+    }
 
     #[test]
     fn final_url_joins_cleanly() {
@@ -1180,7 +1328,7 @@ mod tests {
 
     #[test]
     fn failure_from_upstream_never_leaks_channel_auth() {
-        let f = failure_from_upstream(401, r#"{"error":{"message":"bad channel key"}}"#);
+        let f = failure_from_upstream(401, r#"{"error":{"message":"bad channel key"}}"#, None);
         assert_eq!(f.failure_class, FailureClass::ChannelAuthTerminal);
         assert_eq!(
             f.status_code,
@@ -1193,14 +1341,14 @@ mod tests {
     fn auth_upstream_keeps_real_401_status() {
         // Auth accounts own their OAuth credentials: the caller must see the
         // real 401 to know re-login fixes it (failover class unchanged).
-        let f = failure_from_auth_upstream(401, r#"{"error":{"message":"invalid token"}}"#);
+        let f = failure_from_auth_upstream(401, r#"{"error":{"message":"invalid token"}}"#, None);
         assert_eq!(f.failure_class, FailureClass::ChannelAuthTerminal);
         assert_eq!(f.status_code, Some(401));
-        let f = failure_from_auth_upstream(403, "forbidden");
+        let f = failure_from_auth_upstream(403, "forbidden", None);
         assert_eq!(f.failure_class, FailureClass::ChannelAuthTerminal);
         assert_eq!(f.status_code, Some(403));
         // Non-auth failures behave exactly like the channel variant.
-        let f = failure_from_auth_upstream(500, "boom");
+        let f = failure_from_auth_upstream(500, "boom", None);
         assert_eq!(f.failure_class, FailureClass::Retryable);
         assert_eq!(f.status_code, Some(500));
     }

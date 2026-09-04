@@ -26,6 +26,9 @@ pub struct AppInfo {
 pub struct ApplyResult {
     pub success: bool,
     pub message: String,
+    /// Codex 专用：切回原账号后检测到 auth.json 仍处于 API Key 模式时的提示
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,7 +306,27 @@ fn backup_config(config_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// 标记文件：记录写入前配置不存在，恢复时应删除写入的配置
+fn absent_marker_path(config_path: &PathBuf) -> PathBuf {
+    let mut name = config_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    name.push_str(".waliapi-absent");
+    config_path.with_file_name(name)
+}
+
 fn restore_config(config_path: &PathBuf) -> Result<(), String> {
+    let absent_marker = absent_marker_path(config_path);
+    if absent_marker.exists() {
+        // 写入前配置本就不存在：恢复 = 删除写入的配置
+        if config_path.exists() {
+            fs::remove_file(config_path).map_err(|e| format!("删除配置失败: {e}"))?;
+        }
+        let _ = fs::remove_file(&absent_marker);
+        return Ok(());
+    }
     let backup = backup_path(config_path);
     if backup.exists() {
         let content = fs::read(&backup).map_err(|e| format!("读取备份失败: {e}"))?;
@@ -437,6 +460,80 @@ fn write_codex(
 
     atomic_write(&config_path, doc.to_string().as_bytes())?;
     Ok(())
+}
+
+/// 检测 Codex auth.json 是否卡在 API Key 鉴权模式。
+///
+/// 判定（任一命中即视为 API Key 模式）：
+/// - `auth_mode == "apikey"`
+/// - `OPENAI_API_KEY` 为非空字符串，且没有 ChatGPT 登录态（`tokens` 缺失或为 null）
+///
+/// 返回 `Some(原因)` 表示处于 API Key 模式；`None` 表示 ChatGPT 登录态正常，
+/// 或文件不存在 / 无法解析（交给 Codex 自行处理）。
+fn detect_codex_apikey_mode(config_dir: &PathBuf) -> Option<String> {
+    let auth_path = config_dir.join("auth.json");
+    let text = std::fs::read_to_string(&auth_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+
+    let auth_mode = v.get("auth_mode").and_then(|x| x.as_str()).unwrap_or("");
+    let api_key = v
+        .get("OPENAI_API_KEY")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let has_tokens = v.get("tokens").map(|t| t.is_object()).unwrap_or(false);
+
+    if auth_mode.eq_ignore_ascii_case("apikey") || (!api_key.is_empty() && !has_tokens) {
+        let reason = if !api_key.is_empty() {
+            "OPENAI_API_KEY 已设置"
+        } else {
+            "auth_mode = apikey"
+        };
+        Some(format!("auth.json 处于 API Key 模式（{reason}）"))
+    } else {
+        None
+    }
+}
+
+/// 将 Codex auth.json 重置为 ChatGPT 登录模式。
+///
+/// 原 auth.json 备份为 `~/.codex/auth.json.waliapi-backup`；重置后用户需运行
+/// `codex login` 重新完成 ChatGPT 授权（官方推荐的退出 API Key 模式流程）。
+#[tauri::command]
+pub async fn reset_codex_auth() -> Result<ApplyResult, String> {
+    reset_codex_auth_in(&home_dir().join(".codex"))
+}
+
+fn reset_codex_auth_in(config_dir: &PathBuf) -> Result<ApplyResult, String> {
+    let auth_path = config_dir.join("auth.json");
+
+    if !auth_path.exists() {
+        return Ok(ApplyResult {
+            success: false,
+            message: "auth.json 不存在，无需重置：直接运行 codex login 登录 ChatGPT 账号即可"
+                .to_string(),
+            auth_warning: None,
+        });
+    }
+
+    let content = fs::read(&auth_path).map_err(|e| format!("读取 auth.json 失败: {e}"))?;
+    atomic_write(
+        &auth_path.with_file_name("auth.json.waliapi-backup"),
+        &content,
+    )?;
+
+    let reset = serde_json::json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": serde_json::Value::Null,
+        "tokens": serde_json::Value::Null,
+    });
+    let text = serde_json::to_string_pretty(&reset).map_err(|e| format!("序列化失败: {e}"))?;
+    atomic_write(&auth_path, text.as_bytes())?;
+
+    Ok(ApplyResult {
+        success: true,
+        message: "已重置 auth.json 为 ChatGPT 登录模式（原文件备份为 ~/.codex/auth.json.waliapi-backup）。请重启 Codex 并运行 codex login 完成登录".to_string(),
+        auth_warning: None,
+    })
 }
 
 fn write_gemini_cli(
@@ -865,7 +962,18 @@ pub async fn apply_app_config_impl(
     let config_dir = (app_def.config_dir_fn)();
     let config_path = config_dir.join(app_def.config_file);
 
-    let _ = backup_config(&config_path);
+    // 仅在「未应用」状态下备份：避免重复写入时把已被修改的配置当成原始配置覆盖备份，
+    // 否则「恢复原配置」会恢复成 waliapi 配置，永远切不回去。
+    if detect_applied(&config_path, app_name) {
+        // 已处于网关配置状态，保留最初的备份，直接重写即可
+    } else if config_path.exists() {
+        let _ = backup_config(&config_path);
+        let _ = fs::remove_file(absent_marker_path(&config_path));
+    } else {
+        // 原配置不存在：打标记，恢复时删除写入的配置
+        let _ = atomic_write(&absent_marker_path(&config_path), b"");
+        let _ = fs::remove_file(backup_path(&config_path));
+    }
 
     let result = match app_name {
         "claude-code" => write_claude_code(&config_dir, &waliapi_url, &api_key, &model),
@@ -891,6 +999,7 @@ pub async fn apply_app_config_impl(
             Ok(ApplyResult {
                 success: true,
                 message: msg,
+                auth_warning: None,
             })
         }
         Err(e) => {
@@ -898,6 +1007,7 @@ pub async fn apply_app_config_impl(
             Ok(ApplyResult {
                 success: false,
                 message: e,
+                auth_warning: None,
             })
         }
     }
@@ -918,13 +1028,28 @@ pub async fn clear_app_config_impl(app_name: &str) -> Result<ApplyResult, String
     let config_path = config_dir.join(app_def.config_file);
 
     match restore_config(&config_path) {
-        Ok(()) => Ok(ApplyResult {
-            success: true,
-            message: format!("已恢复 {} 的原始配置", app_def.label),
-        }),
+        Ok(()) => {
+            let mut auth_warning = None;
+            let message = if app_name == "codex" {
+                // auth.json 若被其他工具改成 API Key 模式，仅恢复 config.toml 无法回到 ChatGPT 账号
+                auth_warning = detect_codex_apikey_mode(&config_dir);
+                format!(
+                    "已恢复 {} 的原始配置，重启 Codex 后将使用原账号（auth.json 未被改动）",
+                    app_def.label
+                )
+            } else {
+                format!("已恢复 {} 的原始配置", app_def.label)
+            };
+            Ok(ApplyResult {
+                success: true,
+                message,
+                auth_warning,
+            })
+        }
         Err(e) => Ok(ApplyResult {
             success: false,
             message: format!("恢复失败: {e}"),
+            auth_warning: None,
         }),
     }
 }
@@ -1032,4 +1157,129 @@ pub async fn prepare_app_config_path_impl(app_name: &str) -> Result<String, Stri
     }
 
     Ok(config_dir.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "waliapi-appcfg-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn restore_with_backup_recovers_original_and_removes_backup() {
+        let dir = temp_dir("backup");
+        let config = dir.join("config.toml");
+        fs::write(&config, b"original").unwrap();
+        backup_config(&config).unwrap();
+        // 模拟网关写入覆盖
+        fs::write(&config, b"model_provider = \"waliapi\"").unwrap();
+
+        restore_config(&config).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), b"original");
+        assert!(!backup_path(&config).exists());
+    }
+
+    #[test]
+    fn restore_with_absent_marker_deletes_written_config() {
+        let dir = temp_dir("absent");
+        let config = dir.join("config.toml");
+        // 写入前配置不存在：打 absent 标记
+        atomic_write(&absent_marker_path(&config), b"").unwrap();
+        // 模拟网关写入
+        fs::write(&config, b"model_provider = \"waliapi\"").unwrap();
+
+        restore_config(&config).unwrap();
+        assert!(!config.exists());
+        assert!(!absent_marker_path(&config).exists());
+    }
+
+    #[test]
+    fn restore_without_backup_or_marker_errors() {
+        let dir = temp_dir("none");
+        let config = dir.join("config.toml");
+        assert!(restore_config(&config).is_err());
+    }
+
+    #[test]
+    fn detect_apikey_mode_flags_key_without_tokens() {
+        let dir = temp_dir("detect-key");
+        fs::write(
+            dir.join("auth.json"),
+            r#"{"OPENAI_API_KEY": "sk-waliapi", "tokens": null}"#,
+        )
+        .unwrap();
+        assert!(detect_codex_apikey_mode(&dir).is_some());
+    }
+
+    #[test]
+    fn detect_apikey_mode_flags_auth_mode_field() {
+        let dir = temp_dir("detect-mode");
+        fs::write(
+            dir.join("auth.json"),
+            r#"{"auth_mode": "apikey", "OPENAI_API_KEY": null}"#,
+        )
+        .unwrap();
+        assert!(detect_codex_apikey_mode(&dir).is_some());
+    }
+
+    #[test]
+    fn detect_apikey_mode_ignores_chatgpt_login() {
+        let dir = temp_dir("detect-chatgpt");
+        fs::write(
+            dir.join("auth.json"),
+            r#"{"OPENAI_API_KEY": null, "tokens": {"id_token": "x", "access_token": "y"}, "last_refresh": "2026-01-01"}"#,
+        )
+        .unwrap();
+        assert!(detect_codex_apikey_mode(&dir).is_none());
+    }
+
+    #[test]
+    fn detect_apikey_mode_ignores_missing_or_invalid_auth_json() {
+        let dir = temp_dir("detect-missing");
+        assert!(detect_codex_apikey_mode(&dir).is_none());
+
+        fs::write(dir.join("auth.json"), "not-json").unwrap();
+        assert!(detect_codex_apikey_mode(&dir).is_none());
+    }
+
+    #[test]
+    fn reset_codex_auth_backs_up_and_resets_to_chatgpt_mode() {
+        let dir = temp_dir("reset");
+        let auth_path = dir.join("auth.json");
+        fs::write(&auth_path, r#"{"OPENAI_API_KEY": "sk-waliapi"}"#).unwrap();
+
+        let result = reset_codex_auth_in(&dir).unwrap();
+        assert!(result.success);
+
+        let reset: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
+        assert_eq!(reset["auth_mode"], "chatgpt");
+        assert!(reset["OPENAI_API_KEY"].is_null());
+
+        let backup: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+            dir.join("auth.json.waliapi-backup"),
+        )
+        .unwrap())
+        .unwrap();
+        assert_eq!(backup["OPENAI_API_KEY"], "sk-waliapi");
+    }
+
+    #[test]
+    fn reset_codex_auth_without_auth_json_fails_gracefully() {
+        let dir = temp_dir("reset-missing");
+        let result = reset_codex_auth_in(&dir).unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("codex login"));
+    }
 }

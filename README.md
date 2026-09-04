@@ -4,7 +4,7 @@
 
 ### 本地 LLM API 网关 · 多协议接入 · 知识库 RAG · MCP 工具服务
 
-[![Version](https://img.shields.io/badge/version-0.2.7-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.2.8-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-使用方式)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -40,7 +40,7 @@
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 289 | `+78,813 / -16,158` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 292 | `+79,538 / -16,202` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 |
 | ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
 | 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
 | 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 4 | `+3,086 / -120` | 知识库扫描版 PDF VLM OCR（方案A）· OCR 页级混合识别 · 修复 Claude 渠道协议适配 · OCR/Embedding 模型下拉按用途过滤 · pdfium macOS 打包路径修复 |
@@ -626,6 +626,26 @@ WaLiAPI/
 ---
 
 ## 📌 版本历史
+
+### v0.2.8 (2026-09-03)
+
+#### Codex 账号切换
+
+- ✨ **应用配置 Codex 切换账号**：应用配置页 Codex 卡片支持「切回原账号」操作，恢复配置后自动检测 `auth.json` 是否卡在 API Key 模式（`auth_mode == "apikey"` 或 `OPENAI_API_KEY` 非空且无 ChatGPT 登录态），命中时提示并支持一键重置为 ChatGPT 登录模式——原文件备份为 `~/.codex/auth.json.waliapi-backup`，重置后运行 `codex login` 重新授权
+- ✨ **配置恢复 absent 标记**：写入网关配置前检测原配置是否存在，不存在则打 `.waliapi-absent` 标记，恢复时删除写入的配置而非尝试恢复不存在的备份；且仅在「未应用」状态下备份，避免重复应用时把已改写的配置当成原始配置覆盖备份，根治「恢复原配置永远切不回去」
+- 🔧 **Codex 配置状态文案优化**：Codex 卡片已配置状态显示「已切换到网关」，恢复按钮显示「切回原账号」并附 tooltip 说明 `auth.json` 不被改动
+
+#### 流式稳定性
+
+- 🔧 **流式空闲超时守卫**：SSE 流式转发新增 5 分钟空闲超时（`STREAM_IDLE_TIMEOUT`），上游长时间无数据（半开连接 / 静默挂死）时主动断开并向下游发送协议错误事件，不再无限等待
+- 🔧 **首帧诊断信息增强**：首帧屏障失败时附带诊断信息（收到的字节数 + 脱敏内容预览 + Content-Type），审计日志可区分「空响应」「非 SSE JSON 错误体」「HTML 拦截页」等场景
+- 🔧 **上游 Retry-After 遵从**：解析上游响应的 `Retry-After` 头（支持 delta-seconds 与 RFC 7231 日期），重试前等待指定时间（上限 5 秒 + ±20% jitter），避免密集重试触发上游限流
+
+#### 其他
+
+- ✅ 新增 19 个单元测试覆盖配置恢复、Codex auth.json 检测/重置、流式空闲超时、首帧诊断、Retry-After 解析等场景
+- 📝 **README 贡献者数据同步**：按最新提交记录更新贡献者提交数与代码变更统计
+- 🔧 **版本号统一升级至 0.2.8**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
 ### v0.2.7 (2026-09-02)
 
