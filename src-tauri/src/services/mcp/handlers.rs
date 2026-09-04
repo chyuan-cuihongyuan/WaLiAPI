@@ -51,7 +51,8 @@ chunk metadata 包含 symbol_name、symbol_kind、signature，可用于精确过
 // Each SSE client gets a unique session_id. The POST handler uses
 // the session_id to push JSON-RPC responses back through the SSE stream.
 
-type SessionSender = mpsc::UnboundedSender<String>;
+/// FIX-23：有界通道发送端（容量见 MCP_SSE_CHANNEL_CAPACITY）。
+type SessionSender = mpsc::Sender<String>;
 
 fn sse_sessions() -> &'static Arc<RwLock<HashMap<String, SessionSender>>> {
     static SESSIONS: std::sync::OnceLock<Arc<RwLock<HashMap<String, SessionSender>>>> =
@@ -600,12 +601,35 @@ async fn dispatch_jsonrpc_async(shared: &SharedState, req: &McpRequest) -> McpRe
 // 3. Client POSTs JSON-RPC requests to that URL
 // 4. Server pushes responses back through the SSE stream
 
+/// FIX-23：SSE 会话消息通道容量上限。慢客户端不再无界积压——通道满时
+/// `try_send` 失败即丢该条响应（MPClient 靠 JSON-RPC id 匹配，超时自行处理）。
+const MCP_SSE_CHANNEL_CAPACITY: usize = 64;
+
+/// FIX-23：会话清理守卫——持有于 SSE 生成器内，客户端断开使流被 Drop
+/// 时触发，立即移除会话条目（替代旧的 1 小时定时清扫，断连不再滞留）。
+struct SseSessionGuard {
+    session_id: String,
+}
+
+impl Drop for SseSessionGuard {
+    fn drop(&mut self) {
+        let sessions = sse_sessions().clone();
+        let id = std::mem::take(&mut self.session_id);
+        // Drop 内不能 await：转交 tokio 执行；runtime 已关停则无事可做。
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                sessions.write().await.remove(&id);
+            });
+        }
+    }
+}
+
 pub async fn handle_mcp_sse(State(_shared): State<SharedState>) -> Response {
     // Generate unique session ID
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // Create channel for this session
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // Create channel for this session (bounded, FIX-23)
+    let (tx, mut rx) = mpsc::channel::<String>(MCP_SSE_CHANNEL_CAPACITY);
 
     // Register session
     sse_sessions().write().await.insert(session_id.clone(), tx);
@@ -613,6 +637,8 @@ pub async fn handle_mcp_sse(State(_shared): State<SharedState>) -> Response {
     // Build SSE stream
     let session_id_clone = session_id.clone();
     let stream = async_stream::stream! {
+        // 断连即清（FIX-23）：守卫随生成器 Drop 而触发。
+        let _session_guard = SseSessionGuard { session_id: session_id_clone.clone() };
         // 1. Send endpoint event — tells client where to POST JSON-RPC
         let endpoint_url = format!("/mcp?session_id={}", session_id_clone);
         let endpoint_event = format!(
@@ -628,9 +654,15 @@ pub async fn handle_mcp_sse(State(_shared): State<SharedState>) -> Response {
         loop {
             tokio::select! {
                 // Forward JSON-RPC responses to client
-                Some(msg) = rx.recv() => {
-                    let sse_data = format!("data: {}\n\n", msg);
-                    yield Ok::<_, std::io::Error>(sse_data.into_bytes());
+                msg = rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            let sse_data = format!("data: {}\n\n", msg);
+                            yield Ok::<_, std::io::Error>(sse_data.into_bytes());
+                        }
+                        // 发送端全部被清理（守卫之外的异常路径）→ 结束流。
+                        None => break,
+                    }
                 }
                 // Keepalive
                 _ = keepalive_interval.tick() => {
@@ -639,18 +671,6 @@ pub async fn handle_mcp_sse(State(_shared): State<SharedState>) -> Response {
             }
         }
     };
-
-    // Clean up session when client disconnects (stream dropped)
-    let session_id_cleanup = session_id.clone();
-    let cleanup_sessions = sse_sessions().clone();
-    tokio::spawn(async move {
-        // Wait a bit then check if the sender is still registered
-        // The stream drop will cause rx to be dropped, but tx remains in the map.
-        // We use a periodic cleanup: if sending fails, the session is dead.
-        // For simplicity, clean up after a long timeout.
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        cleanup_sessions.write().await.remove(&session_id_cleanup);
-    });
 
     Response::builder()
         .status(StatusCode::OK)
@@ -694,7 +714,11 @@ pub async fn handle_mcp(
     if let Some(session_id) = &params.session_id {
         let sessions = sse_sessions().read().await;
         if let Some(tx) = sessions.get(session_id) {
-            let _ = tx.send(response.to_json_string());
+            // FIX-23：有界通道 + try_send——慢客户端积压满 64 条时丢弃
+            // 本条响应（不再无界膨胀内存），同时检测接收端已断开。
+            if let Err(e) = tx.try_send(response.to_json_string()) {
+                tracing::warn!("MCP SSE session {session_id} push dropped: {e}");
+            }
         }
     }
 

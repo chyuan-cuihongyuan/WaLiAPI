@@ -424,7 +424,14 @@ async fn fts5_search(
     query: &str,
     top_k: usize,
 ) -> Result<Vec<SearchResult>, String> {
-    let fts_query = build_fts_query(query);
+    // FIX-27：空/纯符号查询直接返回空结果——此前无 token 时回退把原文
+    // 整段塞进 MATCH，FTS5 会把它当查询表达式解析（空串报错、裸运算符
+    // 误匹配甚至注入语法错误）。
+    let tokens = tokenize_query(query);
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fts_query = build_fts_query(&tokens);
 
     let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
         "SELECT c.id, c.content, c.metadata, d.filename, c.doc_id \
@@ -462,14 +469,9 @@ async fn fts5_search(
 }
 
 /// Build FTS5 query string from user query using improved tokenization
-fn build_fts_query(query: &str) -> String {
-    let tokens = tokenize_query(query);
-
-    if tokens.is_empty() {
-        return query.to_string();
-    }
-
-    // FTS5: OR-connected prefix terms for broader recall
+fn build_fts_query(tokens: &[String]) -> String {
+    // FTS5: OR-connected prefix terms for broader recall.
+    // tokens 非空由调用方保证（空 token 路径在 fts5_search 提前返回）。
     tokens
         .iter()
         .map(|t| format!("\"{}\"*", t.replace('"', "")))
@@ -760,5 +762,54 @@ pub fn get_model_context_limit(model: &str) -> usize {
         32_000
     } else {
         8_192
+    }
+}
+
+#[cfg(test)]
+mod fts_defense_tests {
+    use super::*;
+
+    async fn fts_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    /// FIX-27：空/纯空白/纯符号查询不产生任何 token。
+    #[test]
+    fn empty_and_symbol_queries_yield_no_tokens() {
+        assert!(tokenize_query("").is_empty());
+        assert!(tokenize_query("   \t\n").is_empty());
+        assert!(tokenize_query("!!! ??? ... '").is_empty());
+        assert!(!tokenize_query("hello").is_empty());
+        assert!(!tokenize_query("知识库").is_empty());
+    }
+
+    /// FIX-27：生成的 MATCH 表达式对每个 token 加引号——FTS5 运算符
+    /// 单词（AND/OR/NOT/NEAR）不再被当表达式解析。
+    #[test]
+    fn built_query_neutralizes_fts_operators() {
+        let tokens = vec!["AND".to_string(), "or".to_string(), "near".to_string()];
+        assert_eq!(build_fts_query(&tokens), "\"AND\"* OR \"or\"* OR \"near\"*");
+        // 内嵌引号被剥离，不破坏外层短语引用。
+        let tokens = vec!["a\"b".to_string()];
+        assert_eq!(build_fts_query(&tokens), "\"ab\"*");
+    }
+
+    /// FIX-27：空查询/纯符号查询不再把原文塞进 MATCH（此前空串直接
+    /// FTS5 语法错误、符号原文被当表达式）——现在干净返回空结果。
+    #[tokio::test]
+    async fn empty_query_search_returns_empty_without_error() {
+        let pool = fts_pool().await;
+        for query in ["", "   ", "!!! ???", "\"\""] {
+            let result = fts5_search(&pool, "kb-any", query, 5).await;
+            assert!(
+                result.as_ref().map(|r| r.is_empty()).unwrap_or(false),
+                "查询 {query:?} 应无错返回空结果，实际: {result:?}"
+            );
+        }
     }
 }
