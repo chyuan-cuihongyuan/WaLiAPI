@@ -1274,10 +1274,19 @@ async fn native_anthropic_request(
     };
     let url = native_anthropic_url(config, path, query);
     let (mapped_body, upstream_model) = mapped_anthropic_body(body, &config.model_mapping);
-    // count_tokens is always non-streaming; native Anthropic Messages streams
-    // through this same function, so use a streaming client (connect-timeout
-    // only) to avoid cutting off long SSE generations.
-    let client = crate::adaptor::streaming_client();
+    // FIX-12：仅流式 Messages 用只设连接超时的流式客户端；非流式 Messages
+    // 与 count_tokens 是普通 JSON 请求，必须受渠道总超时约束（此前一律用
+    // 流式客户端，上游挂死时请求永久悬挂无法切换渠道）。
+    let is_stream = !count_tokens
+        && body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    let client = if is_stream {
+        crate::adaptor::streaming_client()
+    } else {
+        crate::adaptor::blocking_client(config.timeout_secs)
+    };
     let mut request = client
         .post(url)
         .header("x-api-key", &config.api_key)
@@ -1360,6 +1369,109 @@ struct StreamLogContext {
 
 const MAX_NATIVE_SSE_RECORD_BYTES: usize = 64 * 1024;
 
+/// 原生 Anthropic 流的落账 finalizer（FIX-12）：正常完成在流结尾显式落账
+/// 并 `mark_done`；客户端断开导致生成器被 Drop 时，此处写 499 行——带解析
+/// 到的部分用量，无用量时按请求体本地估算，任何情况都有日志行。
+struct NativeStreamFinalizer {
+    repo: std::sync::Arc<Repository>,
+    key: crate::db::models::ApiKey,
+    channel: crate::db::models::Channel,
+    model: String,
+    upstream_model: Option<String>,
+    request: serde_json::Value,
+    security: security::SecurityScanResult,
+    is_stream: bool,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NativeStreamFinalizer {
+    fn from_context(ctx: &StreamLogContext) -> Self {
+        Self {
+            repo: ctx.repo.clone(),
+            key: ctx.key.clone(),
+            channel: ctx.channel.clone(),
+            model: ctx.model.clone(),
+            upstream_model: ctx.upstream_model.clone(),
+            request: ctx.request.clone(),
+            security: ctx.security.clone(),
+            is_stream: ctx.is_stream,
+            done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn mark_done(&self) {
+        self.done
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 上游中断：502 行 + 已解析的部分用量。
+    async fn record_interrupted(&self, partial_usage: Option<(i64, i64, i64)>) {
+        let usage = partial_usage.or_else(|| self.estimated_usage());
+        record_anthropic_outcome(
+            self.repo.clone(),
+            &self.key,
+            Some(&self.channel),
+            &self.model,
+            self.upstream_model.clone(),
+            &self.request,
+            &self.security,
+            self.is_stream,
+            502,
+            Some("native upstream stream interrupted".to_string()),
+            usage,
+        )
+        .await;
+    }
+
+    /// 请求体 prompt 估算（completion 无内容可估时为 0）。
+    fn estimated_usage(&self) -> Option<(i64, i64, i64)> {
+        let req_body =
+            serde_json::to_value(&self.request).unwrap_or(serde_json::Value::Null);
+        let (p, c, t) = crate::endpoint_executor::estimate_usage::estimate_usage(
+            &req_body,
+            None,
+            &self.model,
+        );
+        (t > 0).then_some((p, c, t))
+    }
+}
+
+impl Drop for NativeStreamFinalizer {
+    fn drop(&mut self) {
+        // FIX-26 同款守卫：应用退出中 Drop 不 spawn，避免 runtime 关停 panic。
+        if !self.done.load(std::sync::atomic::Ordering::SeqCst) {
+            self.mark_done();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let repo = self.repo.clone();
+                let key = self.key.clone();
+                let channel = self.channel.clone();
+                let model = self.model.clone();
+                let upstream_model = self.upstream_model.clone();
+                let request = self.request.clone();
+                let security = self.security.clone();
+                let is_stream = self.is_stream;
+                let usage = self.estimated_usage();
+                handle.spawn(async move {
+                    record_anthropic_outcome(
+                        repo,
+                        &key,
+                        Some(&channel),
+                        &model,
+                        upstream_model,
+                        &request,
+                        &security,
+                        is_stream,
+                        499,
+                        Some("client_cancelled".to_string()),
+                        usage,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+}
+
 /// Incrementally extracts the cumulative usage fields from a native Anthropic
 /// SSE stream.  It deliberately retains at most one bounded record rather
 /// than every byte forwarded to the client.
@@ -1420,7 +1532,9 @@ impl NativeSseUsageParser {
         }
     }
 
-    fn finish(self) -> Option<(i64, i64, i64)> {
+    /// FIX-12：改 `&mut self`——解析器在 Mutex 内共享，Drop/中断路径需要
+    /// 多次读取部分用量而不消耗解析器。
+    fn finish(&mut self) -> Option<(i64, i64, i64)> {
         (!self.malformed_or_oversized && self.stopped)
             .then(|| (self.input.unwrap_or(0), self.output.unwrap_or(0), self.cached.unwrap_or(0)))
     }
@@ -1492,17 +1606,24 @@ fn native_response(response: reqwest::Response, accounting: Option<StreamLogCont
     let upstream = response.bytes_stream();
     let stream = async_stream::stream! {
         tokio::pin!(upstream);
-        let mut usage_parser = NativeSseUsageParser::default();
+        // FIX-12：usage 解析器放共享锁，客户端断开时 Drop 路径可取部分用量。
+        let usage_parser = std::sync::Arc::new(std::sync::Mutex::new(NativeSseUsageParser::default()));
         // A non-streaming Messages response is a small JSON object in normal
         // operation.  Keep a hard cap for accounting so a malicious upstream
         // can never turn the proxy into an unbounded collector.
         let mut non_sse_observed = Vec::new();
+        // FIX-12：断开/中断/完成统一落账——客户端中途断开时生成器被丢弃，
+        // 尾部落账代码不会执行，由 finalizer 的 Drop 路径写 499 行（带部分
+        // 用量）；上游中断写 502 行；正常完成写 200 行（usage 缺失时走
+        // record_anthropic_outcome 内建的估算兜底，不再静默丢行）。
+        let finalizer = accounting.as_ref().map(NativeStreamFinalizer::from_context);
         let mut completed = true;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
                     if is_sse {
-                        usage_parser.feed(&bytes);
+                        let mut parser = usage_parser.lock().unwrap_or_else(|e| e.into_inner());
+                        parser.feed(&bytes);
                     } else if non_sse_observed.len().saturating_add(bytes.len()) <= MAX_NATIVE_SSE_RECORD_BYTES {
                         non_sse_observed.extend_from_slice(&bytes);
                     }
@@ -1513,12 +1634,26 @@ fn native_response(response: reqwest::Response, accounting: Option<StreamLogCont
         }
         if let Some(context) = accounting {
             if completed {
-                let usage = if is_sse { usage_parser.finish() } else { native_usage(&non_sse_observed, false) };
-                if let Some(usage) = usage {
-                    record_anthropic_success(context.repo, &context.key, &context.channel, &context.model, context.upstream_model.clone(), &context.request, &context.security, context.is_stream, Some(usage)).await;
-                }
+                let usage = if is_sse {
+                    let mut parser = usage_parser.lock().unwrap_or_else(|e| e.into_inner());
+                    parser.finish()
+                } else {
+                    native_usage(&non_sse_observed, false)
+                };
+                // usage 为 None 也落行：record_anthropic_outcome 对 2xx 有本地估算兜底。
+                record_anthropic_success(context.repo, &context.key, &context.channel, &context.model, context.upstream_model.clone(), &context.request, &context.security, context.is_stream, usage).await;
+            } else if let Some(f) = finalizer.as_ref() {
+                // 上游中断：502 行 + 已解析的部分用量（估算兜底同取消路径）。
+                let partial = {
+                    let mut parser = usage_parser.lock().unwrap_or_else(|e| e.into_inner());
+                    parser.finish()
+                };
+                f.record_interrupted(partial).await;
+                // 已落账，阻止 Drop 重复写 499。
+                f.mark_done();
             }
         }
+        drop(finalizer);
     };
     let mut builder = Response::builder().status(status);
     if let Some(content_type) = content_type {
