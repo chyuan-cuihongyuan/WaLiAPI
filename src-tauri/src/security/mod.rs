@@ -269,6 +269,37 @@ pub fn scan_response(body: &serde_json::Value, settings: &SecuritySettings) -> S
     result
 }
 
+/// 将响应侧扫描结果并入请求审计结果（FIX-16）。
+///
+/// 语义与 legacy proxy 路径一致：响应发现总是追加进 findings；风险等级
+/// 取两侧更高者（此时分数取高、摘要拼接「响应侧」段）。响应无发现时
+/// 原样返回。两侧的 action 不在此合并——响应侧动作（脱敏/阻断）作用于
+/// 已转发完成的响应，仅落账侧可见，不回改请求的处置记录。
+pub fn merge_response_scan(request: &mut SecurityScanResult, response: &SecurityScanResult) {
+    if response.findings.is_empty() {
+        return;
+    }
+    request.findings.extend(response.findings.iter().cloned());
+    if response.risk_level.rank() > request.risk_level.rank() {
+        request.risk_level = response.risk_level.clone();
+        request.risk_score = request.risk_score.max(response.risk_score);
+        request.summary = format!("{} | 响应侧: {}", request.summary, response.summary);
+    }
+}
+
+/// 扫描响应体并并入审计结果（FIX-16：主路径非流式/流式/原生路径共用）。
+///
+/// 尽力而为语义：`scan_response` 内部对扫描失败自降级（budget 超限除外），
+/// 调用方无需处理错误，扫描异常不影响响应转发与落账。
+pub fn scan_response_into(
+    audit: &mut SecurityScanResult,
+    body: &serde_json::Value,
+    settings: &SecuritySettings,
+) {
+    let response_scan = scan_response(body, settings);
+    merge_response_scan(audit, &response_scan);
+}
+
 /// Redact sensitive data from the request body before forwarding upstream.
 /// Returns a new JSON value with secrets replaced.
 pub fn redact_request_body(
@@ -281,4 +312,52 @@ pub fn redact_request_body(
     let redacted = redact::redact_json(body, settings);
     let was_redacted = redacted != *body;
     (redacted, was_redacted)
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn settings_with_response_scan() -> SecuritySettings {
+        SecuritySettings {
+            enabled: true,
+            scan_response: true,
+            ..Default::default()
+        }
+    }
+
+    /// FIX-16：响应含凭证时发现并入、等级取高、摘要拼「响应侧」段。
+    #[test]
+    fn merge_escalates_when_response_riskier() {
+        let mut request = SecurityScanResult::default();
+        let body = serde_json::json!({
+            "choices": [{"message": {"content": "token sk-abcdefghijklmnopqrstuvwx123456 end"}}]
+        });
+        scan_response_into(&mut request, &body, &settings_with_response_scan());
+        assert!(!request.findings.is_empty(), "secret must produce findings");
+        assert_ne!(request.risk_level, RiskLevel::Clean);
+        assert!(request.summary.contains("响应侧"), "summary: {}", request.summary);
+        assert!(request.findings.iter().all(|f| f.phase == "response"));
+    }
+
+    /// FIX-16：响应干净时审计结果保持原样（无发现、摘要不变）。
+    #[test]
+    fn merge_keeps_clean_response_untouched() {
+        let mut request = SecurityScanResult::default();
+        request.summary = "ok".to_string();
+        let body = serde_json::json!({"content": "hello world"});
+        scan_response_into(&mut request, &body, &settings_with_response_scan());
+        assert!(request.findings.is_empty());
+        assert_eq!(request.summary, "ok");
+        assert_eq!(request.risk_level, RiskLevel::Clean);
+    }
+
+    /// FIX-16：设置关闭（enabled/scan_response 任一为假）时不扫描。
+    #[test]
+    fn merge_noop_when_scan_disabled() {
+        let mut request = SecurityScanResult::default();
+        let body = serde_json::json!({"content": "token sk-abcdefghijklmnopqrstuvwx123456 end"});
+        scan_response_into(&mut request, &body, &SecuritySettings::default());
+        assert!(request.findings.is_empty());
+    }
 }

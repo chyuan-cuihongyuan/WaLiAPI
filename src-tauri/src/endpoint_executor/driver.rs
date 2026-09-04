@@ -27,6 +27,7 @@ use crate::endpoint_executor::{
     dispatch_stream_executor, next_upstream_item, StreamAttemptResult, UpstreamItem, UpstreamStream,
 };
 use crate::security::gate::AuditedRequest;
+use crate::security;
 use crate::utils;
 use axum::body::Body;
 use axum::http::{header, StatusCode};
@@ -461,6 +462,17 @@ async fn write_non_stream_log(
         None
     };
 
+    // FIX-16：响应侧扫描（尽力而为）——2xx 响应体过扫描，发现并入审计
+    // 结果后落账；扫描异常不阻断响应（scan_response 内部自降级）。
+    let mut audit_for_log = audited.audit_result.clone();
+    if execution.status >= 200 && execution.status < 300 {
+        security::scan_response_into(
+            &mut audit_for_log,
+            &execution.body,
+            &audited.security_settings,
+        );
+    }
+
     let log = RequestLog {
         id: utils::id::new_id(),
         seq: None,
@@ -483,12 +495,12 @@ async fn write_non_stream_log(
         created_at: utils::time::now_iso(),
         request_body: Some(sanitized_log_body.to_string()),
         response_choices,
-        risk_level: audited.audit_result.risk_level.as_str().to_string(),
-        risk_score: audited.audit_result.risk_score as i64,
-        risk_summary: Some(audited.audit_result.summary.clone()),
-        security_action: audited.audit_result.action.as_str().to_string(),
-        sanitized: i64::from(audited.audit_result.sanitized),
-        blocked_reason: audited.audit_result.blocked_reason.clone(),
+        risk_level: audit_for_log.risk_level.as_str().to_string(),
+        risk_score: audit_for_log.risk_score as i64,
+        risk_summary: Some(audit_for_log.summary.clone()),
+        security_action: audit_for_log.action.as_str().to_string(),
+        sanitized: i64::from(audit_for_log.sanitized),
+        blocked_reason: audit_for_log.blocked_reason.clone(),
         trace_id: trace_id.clone(),
         reasoning_effort: extract_reasoning_effort(&audited),
         // T09 observability fields we have on the facade path.  provider /
@@ -518,8 +530,8 @@ async fn write_non_stream_log(
     if let Err(e) = repo
         .create_security_findings(
             &log_id,
-            &audited.audit_result.findings,
-            audited.audit_result.action.as_str(),
+            &audit_for_log.findings,
+            audit_for_log.action.as_str(),
         )
         .await
     {
@@ -1253,6 +1265,21 @@ impl StreamLogFinalizer {
         usage_cached: i64,
         response_choices: Option<String>,
     ) {
+        // FIX-16：响应侧扫描（尽力而为）——扫描流泵累积的响应文本，发现
+        // 并入审计结果后落账。取消/中断行同样覆盖：半程内容同样有泄露面。
+        // 快照内容在协议终止或每增长 ≥16KB 时刷新，扫描到最近一次快照为止。
+        let snapshot_content = {
+            let snap = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+            snap.content.clone()
+        };
+        let mut audit_for_log = self.audited.audit_result.clone();
+        if !snapshot_content.is_empty() {
+            security::scan_response_into(
+                &mut audit_for_log,
+                &json!({ "content": snapshot_content }),
+                &self.audited.security_settings,
+            );
+        }
         let duration_ms = self.started.elapsed().as_millis() as i64;
         let log = RequestLog {
             id: utils::id::new_id(),
@@ -1284,12 +1311,12 @@ impl StreamLogFinalizer {
             created_at: utils::time::now_iso(),
             request_body: Some(self.sanitized_log_body.clone()),
             response_choices,
-            risk_level: self.audited.audit_result.risk_level.as_str().to_string(),
-            risk_score: self.audited.audit_result.risk_score as i64,
-            risk_summary: Some(self.audited.audit_result.summary.clone()),
-            security_action: self.audited.audit_result.action.as_str().to_string(),
-            sanitized: i64::from(self.audited.audit_result.sanitized),
-            blocked_reason: self.audited.audit_result.blocked_reason.clone(),
+            risk_level: audit_for_log.risk_level.as_str().to_string(),
+            risk_score: audit_for_log.risk_score as i64,
+            risk_summary: Some(audit_for_log.summary.clone()),
+            security_action: audit_for_log.action.as_str().to_string(),
+            sanitized: i64::from(audit_for_log.sanitized),
+            blocked_reason: audit_for_log.blocked_reason.clone(),
             trace_id: self.trace_id.clone(),
             reasoning_effort: extract_reasoning_effort(&self.audited),
             // T09 observability fields (single source: PreparedAttempt + identity).
@@ -1320,8 +1347,8 @@ impl StreamLogFinalizer {
             .repo
             .create_security_findings(
                 &log_id,
-                &self.audited.audit_result.findings,
-                self.audited.audit_result.action.as_str(),
+                &audit_for_log.findings,
+                audit_for_log.action.as_str(),
             )
             .await
         {
@@ -1483,6 +1510,10 @@ fn stream_response_body(
         // bytes, never raw upstream bytes.  Native passthrough preserves raw.
         match pump.start() {
             Ok(first) => {
+                // 极短响应：首帧/伴随帧（carry）就含全部内容甚至终止标记，
+                // 此时 while 循环一次都不进——这里同步一次落账快照，
+                // 否则取消行丢内容、FIX-16 响应扫描拿到空快照。
+                update_stream_snapshot(&snapshot, &pump);
                 if !first.is_empty() {
                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(first));
                 }
@@ -1553,6 +1584,8 @@ fn stream_response_body(
         if !had_error {
             match pump.finish() {
                 Ok(out) => {
+                    // 终止收尾后再同步一次快照：finish 可能补齐终止标记内容。
+                    update_stream_snapshot(&snapshot, &pump);
                     if !out.is_empty() {
                         yield Ok::<_, std::io::Error>(bytes::Bytes::from(out));
                     }
@@ -2143,6 +2176,7 @@ mod tests {
             body_len: 0,
             audit_result: SecurityScanResult::default(),
             request_features: RequestFeatures::default(),
+            security_settings: crate::security::SecuritySettings::default(),
         }
     }
 
@@ -2300,6 +2334,134 @@ mod tests {
             "messages": [{"role":"user","content":"请帮我总结这段足够长的提示词内容，确保本地 token 估算明显大于零，用于验证取消路径的兜底估算逻辑。"}]
         })
         .to_string()
+    }
+
+    // ─── FIX-16：响应侧扫描接入主路径（可观察测试） ────────────────────────
+
+    fn audited_request_with_response_scan() -> AuditedRequest {
+        let mut audited = audited_request();
+        audited.security_settings = crate::security::SecuritySettings {
+            enabled: true,
+            scan_response: true,
+            ..Default::default()
+        };
+        audited
+    }
+
+    /// 非流式 facade：响应体含凭证 → 落账行风险升级、摘要拼「响应侧」、
+    /// response 阶段发现入库。
+    #[tokio::test]
+    async fn non_stream_response_scan_records_findings() {
+        let repo = Arc::new(Repository::new(fresh_db().await));
+        let audited = audited_request_with_response_scan();
+        let execution = crate::core::plan_executor::PlanExecution {
+            status: 200,
+            body: json!({
+                "choices": [{"message": {"role": "assistant",
+                    "content": "token sk-abcdefghijklmnopqrstuvwx123456 end"}}]
+            }),
+            usage: None,
+            channel_id: Some("ch-1".into()),
+            channel_name: Some("ch".into()),
+            upstream_type: Some("channel".into()),
+            route_group: Some("chat_g1_native".into()),
+            upstream_protocol: Some("openai".into()),
+            upstream_endpoint: Some("chat_completions".into()),
+            upstream_model: Some("up-model".into()),
+            provider: Some("openai".into()),
+            identity_revision: Some(1),
+            codec_version: None,
+            response_headers: vec![],
+            attempts: 1,
+            duration_ms: 5,
+            last_failure: None,
+        };
+        write_non_stream_log(&repo, &api_key(), &audited, "chat", &execution, 5, "{}", None).await;
+
+        let logs = repo.get_logs(10, 0).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        let row = &logs[0];
+        assert_ne!(
+            row.risk_level, "clean",
+            "响应凭证必须升级风险等级: {}",
+            row.risk_level
+        );
+        assert!(
+            row.risk_summary.as_deref().unwrap_or("").contains("响应侧"),
+            "summary: {:?}",
+            row.risk_summary
+        );
+        let findings = repo.get_security_findings(&row.id).await.unwrap();
+        assert!(
+            findings.iter().any(|f| f.phase == "response"),
+            "response 发现必须入库: {findings:?}"
+        );
+    }
+
+    /// 流式 facade：累积内容含凭证 → 完成行的审计同样并入响应侧发现。
+    #[tokio::test]
+    async fn stream_response_scan_records_findings() {
+        let repo = Arc::new(Repository::new(fresh_db().await));
+        let secret_delta = "leak sk-abcdefghijklmnopqrstuvwx123456 now";
+        let body = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from(
+            format!(
+                "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_1\",\"role\":\"assistant\",\"model\":\"up-model\",\"content\":[]}}}}\n\n\
+                 event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{secret_delta}\"}}}}\n\n\
+                 event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":5}}}}\n\n\
+                 event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+            ),
+        ))])
+        .boxed();
+        let mut upstream = UpstreamStream {
+            content_type: "text/event-stream".to_string(),
+            headers: vec![],
+            body,
+        };
+        let pump = pump_for(&mut upstream).await;
+
+        let stream = stream_response_body(
+            pump,
+            upstream,
+            repo.clone(),
+            api_key(),
+            audited_request_with_response_scan(),
+            "m".to_string(),
+            "up-model".to_string(),
+            "chat".to_string(),
+            false,
+            full_request_body(),
+            None,
+            "ch-1".to_string(),
+            "ch".to_string(),
+            "anthropic".to_string(),
+            1,
+            "messages_g1_native".to_string(),
+            None,
+            "anthropic".to_string(),
+            "messages".to_string(),
+            "channel".to_string(),
+            StreamTimeouts::default(),
+        );
+        let mut bytes = Vec::new();
+        tokio::pin!(stream);
+        while let Some(item) = stream.next().await {
+            bytes.extend_from_slice(&item.unwrap());
+        }
+
+        let logs = repo.get_logs(10, 0).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        let row = &logs[0];
+        assert_eq!(row.status_code, 200);
+        assert_ne!(
+            row.risk_level, "clean",
+            "流式响应凭证必须升级风险等级: {}",
+            row.risk_level
+        );
+        let findings = repo.get_security_findings(&row.id).await.unwrap();
+        assert!(
+            findings.iter().any(|f| f.phase == "response"),
+            "response 发现必须入库: {findings:?}"
+        );
     }
 
     /// #57 主场景：协议终止事件已到、上游不关连接（EOF 永远不来）时，

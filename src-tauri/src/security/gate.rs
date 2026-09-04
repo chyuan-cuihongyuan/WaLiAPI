@@ -85,6 +85,9 @@ pub struct AuditedRequest {
     pub body_len: usize,
     pub audit_result: SecurityScanResult,
     pub request_features: RequestFeatures,
+    /// 请求准入时的安全设置快照（FIX-16）：响应侧扫描沿用同一份设置，
+    /// 避免各转发路径各自再读设置存储造成口径漂移。
+    pub security_settings: SecuritySettings,
 }
 
 /// Feature set a router/codec pre-check needs, derived from the ORIGINAL JSON.
@@ -334,6 +337,7 @@ pub fn audit_envelope(
         body_len: output.body_len,
         audit_result: output.audit_result,
         request_features: output.request_features,
+        security_settings: settings.clone(),
     })
 }
 

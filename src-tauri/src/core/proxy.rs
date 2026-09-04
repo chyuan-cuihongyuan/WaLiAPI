@@ -284,22 +284,9 @@ pub async fn handle_request(
                     // choices logging disabled
                 }
 
-                // Scan response for risks
-                let resp_security = security::scan_response(&resp_body, &security_settings);
-                let resp_findings_count = resp_security.findings.len();
-                if resp_findings_count > 0 {
-                    // Merge response findings into request findings for logging
-                    security_result.findings.extend(resp_security.findings);
-                    if resp_security.risk_level.rank() > security_result.risk_level.rank() {
-                        security_result.risk_level = resp_security.risk_level;
-                        security_result.risk_score =
-                            security_result.risk_score.max(resp_security.risk_score);
-                        security_result.summary = format!(
-                            "{} | 响应侧: {}",
-                            security_result.summary, resp_security.summary
-                        );
-                    }
-                }
+                // Scan response for risks and merge into the request audit
+                //（FIX-16：合并语义收敛到 security::scan_response_into 单一实现）
+                security::scan_response_into(&mut security_result, &resp_body, &security_settings);
 
                 let (prompt_tokens, completion_tokens, total_tokens) = {
                     let (p, c, t) = (

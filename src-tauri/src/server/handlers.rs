@@ -1373,6 +1373,8 @@ struct StreamLogContext {
     upstream_model: Option<String>,
     request: serde_json::Value,
     security: security::SecurityScanResult,
+    /// FIX-16：请求准入时的安全设置快照——响应侧扫描沿用同一口径。
+    security_settings: security::SecuritySettings,
     is_stream: bool,
 }
 
@@ -1389,12 +1391,18 @@ struct NativeStreamFinalizer {
     upstream_model: Option<String>,
     request: serde_json::Value,
     security: security::SecurityScanResult,
+    security_settings: security::SecuritySettings,
+    /// FIX-16：与转发循环共享的响应扫描累积器——断开/中断行扫半程内容。
+    scan_buffer: std::sync::Arc<std::sync::Mutex<ResponseScanBuffer>>,
     is_stream: bool,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NativeStreamFinalizer {
-    fn from_context(ctx: &StreamLogContext) -> Self {
+    fn from_context(
+        ctx: &StreamLogContext,
+        scan_buffer: std::sync::Arc<std::sync::Mutex<ResponseScanBuffer>>,
+    ) -> Self {
         Self {
             repo: ctx.repo.clone(),
             key: ctx.key.clone(),
@@ -1403,9 +1411,24 @@ impl NativeStreamFinalizer {
             upstream_model: ctx.upstream_model.clone(),
             request: ctx.request.clone(),
             security: ctx.security.clone(),
+            security_settings: ctx.security_settings.clone(),
+            scan_buffer,
             is_stream: ctx.is_stream,
             done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// FIX-16：请求审计 + 已累积响应内容的合并结果（断开/中断路径共用）。
+    fn merged_security(&self) -> security::SecurityScanResult {
+        let mut merged = self.security.clone();
+        let partial = self
+            .scan_buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .buf
+            .clone();
+        scan_bytes_into(&mut merged, &partial, &self.security_settings);
+        merged
     }
 
     fn mark_done(&self) {
@@ -1416,6 +1439,7 @@ impl NativeStreamFinalizer {
     /// 上游中断：502 行 + 已解析的部分用量。
     async fn record_interrupted(&self, partial_usage: Option<(i64, i64, i64)>) {
         let usage = partial_usage.or_else(|| self.estimated_usage());
+        let merged = self.merged_security();
         record_anthropic_outcome(
             self.repo.clone(),
             &self.key,
@@ -1423,7 +1447,7 @@ impl NativeStreamFinalizer {
             &self.model,
             self.upstream_model.clone(),
             &self.request,
-            &self.security,
+            &merged,
             self.is_stream,
             502,
             Some("native upstream stream interrupted".to_string()),
@@ -1457,7 +1481,7 @@ impl Drop for NativeStreamFinalizer {
                 let model = self.model.clone();
                 let upstream_model = self.upstream_model.clone();
                 let request = self.request.clone();
-                let security = self.security.clone();
+                let security = self.merged_security();
                 let is_stream = self.is_stream;
                 let usage = self.estimated_usage();
                 handle.spawn(async move {
@@ -1603,6 +1627,47 @@ fn anthropic_input_usage(usage: &serde_json::Value) -> i64 {
             .unwrap_or(0)
 }
 
+/// FIX-16：响应侧扫描的有界原始字节累积器。超限即停（保留前缀），
+/// `cap == 0` 表示扫描关闭、完全不累积。
+struct ResponseScanBuffer {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl ResponseScanBuffer {
+    fn feed(&mut self, bytes: &[u8]) {
+        if self.cap == 0 || self.buf.len() >= self.cap {
+            return;
+        }
+        let room = self.cap - self.buf.len();
+        self.buf.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+
+    fn enabled_for(settings: &security::SecuritySettings) -> usize {
+        if settings.enabled && settings.scan_response {
+            settings.max_scan_bytes
+        } else {
+            0
+        }
+    }
+}
+
+/// FIX-16：把响应原始字节（UTF-8 宽松解码）扫入审计结果（尽力而为）。
+fn scan_bytes_into(
+    audit: &mut security::SecurityScanResult,
+    bytes: &[u8],
+    settings: &security::SecuritySettings,
+) {
+    if bytes.is_empty() {
+        return;
+    }
+    security::scan_response_into(
+        audit,
+        &serde_json::Value::String(String::from_utf8_lossy(bytes).into_owned()),
+        settings,
+    );
+}
+
 fn native_response(response: reqwest::Response, accounting: Option<StreamLogContext>) -> Response {
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1625,7 +1690,19 @@ fn native_response(response: reqwest::Response, accounting: Option<StreamLogCont
         // 尾部落账代码不会执行，由 finalizer 的 Drop 路径写 499 行（带部分
         // 用量）；上游中断写 502 行；正常完成写 200 行（usage 缺失时走
         // record_anthropic_outcome 内建的估算兜底，不再静默丢行）。
-        let finalizer = accounting.as_ref().map(NativeStreamFinalizer::from_context);
+        // FIX-16：SSE 原始字节有界累积（非 SSE 已有 non_sse_observed 全量），
+        // 与 finalizer 共享——完成/断开/中断行都做响应侧扫描。
+        let scan_cap = accounting
+            .as_ref()
+            .map(|ctx| ResponseScanBuffer::enabled_for(&ctx.security_settings))
+            .unwrap_or(0);
+        let scan_buffer = std::sync::Arc::new(std::sync::Mutex::new(ResponseScanBuffer {
+            buf: Vec::new(),
+            cap: scan_cap,
+        }));
+        let finalizer = accounting
+            .as_ref()
+            .map(|ctx| NativeStreamFinalizer::from_context(ctx, scan_buffer.clone()));
         let mut completed = true;
         while let Some(item) = upstream.next().await {
             match item {
@@ -1633,6 +1710,10 @@ fn native_response(response: reqwest::Response, accounting: Option<StreamLogCont
                     if is_sse {
                         let mut parser = usage_parser.lock().unwrap_or_else(|e| e.into_inner());
                         parser.feed(&bytes);
+                        scan_buffer
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .feed(&bytes);
                     } else if non_sse_observed.len().saturating_add(bytes.len()) <= MAX_NATIVE_SSE_RECORD_BYTES {
                         non_sse_observed.extend_from_slice(&bytes);
                     }
@@ -1650,7 +1731,19 @@ fn native_response(response: reqwest::Response, accounting: Option<StreamLogCont
                     native_usage(&non_sse_observed, false)
                 };
                 // usage 为 None 也落行：record_anthropic_outcome 对 2xx 有本地估算兜底。
-                record_anthropic_success(context.repo, &context.key, &context.channel, &context.model, context.upstream_model.clone(), &context.request, &context.security, context.is_stream, usage).await;
+                // FIX-16：响应侧扫描并入审计——非 SSE 扫全量 body，SSE 扫有界累积。
+                let mut merged_security = context.security.clone();
+                let scan_bytes: Vec<u8> = if is_sse {
+                    scan_buffer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .buf
+                        .clone()
+                } else {
+                    non_sse_observed.clone()
+                };
+                scan_bytes_into(&mut merged_security, &scan_bytes, &context.security_settings);
+                record_anthropic_success(context.repo, &context.key, &context.channel, &context.model, context.upstream_model.clone(), &context.request, &merged_security, context.is_stream, usage).await;
             } else if let Some(f) = finalizer.as_ref() {
                 // 上游中断：502 行 + 已解析的部分用量（估算兜底同取消路径）。
                 let partial = {
@@ -2064,6 +2157,7 @@ pub async fn handle_messages(
                             upstream_model,
                             request: sanitized_log_json.clone(),
                             security: security_result.clone(),
+                            security_settings: audited.security_settings.clone(),
                             is_stream: stream,
                         }),
                     )
@@ -2159,6 +2253,7 @@ pub async fn handle_messages(
                         upstream_model,
                         request: sanitized_log_json.clone(),
                         security: security_result.clone(),
+                        security_settings: audited.security_settings.clone(),
                         is_stream: true,
                     },
                 )
@@ -2187,6 +2282,13 @@ pub async fn handle_messages(
                                 .and_then(|value| value.as_i64())
                                 .unwrap_or(0),
                         ));
+                        // FIX-16：响应侧扫描并入审计后落账（尽力而为）。
+                        let mut merged_security = security_result.clone();
+                        security::scan_response_into(
+                            &mut merged_security,
+                            &body,
+                            &audited.security_settings,
+                        );
                         record_anthropic_success(
                             repo.clone(),
                             &key,
@@ -2194,7 +2296,7 @@ pub async fn handle_messages(
                             &model,
                             upstream_model,
                             &sanitized_log_json,
-                            &security_result,
+                            &merged_security,
                             false,
                             usage,
                         )
@@ -2205,6 +2307,12 @@ pub async fn handle_messages(
                         // A 200 transport response is not a usable channel if
                         // its tool arguments/content cannot satisfy Messages.
                         last_error = format!("{}: conversion failed: {message}", channel.name);
+                        let mut merged_security = security_result.clone();
+                        security::scan_response_into(
+                            &mut merged_security,
+                            &body,
+                            &audited.security_settings,
+                        );
                         record_anthropic_outcome(
                             repo.clone(),
                             &key,
@@ -2212,7 +2320,7 @@ pub async fn handle_messages(
                             &model,
                             upstream_model,
                             &sanitized_log_json,
-                            &security_result,
+                            &merged_security,
                             false,
                             502,
                             Some(message),
@@ -2335,21 +2443,33 @@ fn openai_sse_response(
         tokio::pin!(upstream);
         let mut state = crate::protocol::anthropic::AnthropicStreamState::default();
         let mut failed = false;
+        // FIX-16：上游 OpenAI SSE 原始字节有界累积，落账前做响应侧扫描。
+        let mut scan_buffer = ResponseScanBuffer {
+            buf: Vec::new(),
+            cap: ResponseScanBuffer::enabled_for(&accounting.security_settings),
+        };
         while let Some(chunk) = upstream.next().await {
             match chunk {
-                Ok(bytes) => match state.feed(&bytes, &model, &message_id) {
+                Ok(bytes) => {
+                    scan_buffer.feed(&bytes);
+                    match state.feed(&bytes, &model, &message_id) {
                     Ok(events) => for event in events { yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes())); },
                     Err(message) => {
                         failed = true;
-                        record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None).await;
+                        let mut merged = accounting.security.clone();
+                        scan_bytes_into(&mut merged, &scan_buffer.buf, &accounting.security_settings);
+                        record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &merged, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None).await;
                         yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":{}}}}}\n\n", serde_json::to_string(&message).unwrap()).into_bytes()));
                         break;
                     }
-                },
+                    }
+                }
                 Err(error) => {
                     failed = true;
                     let message = format!("OpenAI stream interrupted: {error}");
-                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(message.clone()), None).await;
+                    let mut merged = accounting.security.clone();
+                    scan_bytes_into(&mut merged, &scan_buffer.buf, &accounting.security_settings);
+                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &merged, true, 502, Some(message.clone()), None).await;
                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":{}}}}}\n\n", serde_json::to_string(&message).unwrap()).into_bytes()));
                     break;
                 }
@@ -2360,10 +2480,14 @@ fn openai_sse_response(
                 Ok(events) => {
                     for event in events { yield Ok::<_, std::io::Error>(bytes::Bytes::from(event.into_bytes())); }
                     let usage = state.usage();
-                    record_anthropic_success(accounting.repo, &accounting.key, &accounting.channel, &accounting.model, None, &accounting.request, &accounting.security, true, Some(usage)).await;
+                    let mut merged = accounting.security.clone();
+                    scan_bytes_into(&mut merged, &scan_buffer.buf, &accounting.security_settings);
+                    record_anthropic_success(accounting.repo, &accounting.key, &accounting.channel, &accounting.model, None, &accounting.request, &merged, true, Some(usage)).await;
                 },
                 Err(message) => {
-                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &accounting.security, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None).await;
+                    let mut merged = accounting.security.clone();
+                    scan_bytes_into(&mut merged, &scan_buffer.buf, &accounting.security_settings);
+                    record_anthropic_outcome(accounting.repo.clone(), &accounting.key, Some(&accounting.channel), &accounting.model, None, &accounting.request, &merged, true, 502, Some(format!("OpenAI stream conversion failed: {message}")), None).await;
                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":{}}}}}\n\n", serde_json::to_string(&message).unwrap()).into_bytes()))
                 },
             }
@@ -3894,6 +4018,40 @@ pub async fn handle_health(State(shared): State<SharedState>) -> Response {
 #[cfg(test)]
 mod anthropic_handler_tests {
     use super::*;
+
+    /// FIX-16：原生路径响应扫描构件——有界累积（超限留前缀、关闭不累积）
+    /// 与响应字节扫描并入审计。
+    #[test]
+    fn response_scan_buffer_bounds_and_feeds_merge() {
+        let mut buffer = ResponseScanBuffer {
+            buf: Vec::new(),
+            cap: 8,
+        };
+        buffer.feed(b"0123456789abcdefgh");
+        assert_eq!(buffer.buf, b"01234567", "超限只保留前缀");
+
+        let settings = security::SecuritySettings {
+            enabled: true,
+            scan_response: true,
+            ..Default::default()
+        };
+        let mut audit = security::SecurityScanResult::default();
+        scan_bytes_into(
+            &mut audit,
+            b"token sk-abcdefghijklmnopqrstuvwx123456 end",
+            &settings,
+        );
+        assert!(!audit.findings.is_empty(), "凭证必须产生响应侧发现");
+        assert_ne!(audit.risk_level, security::RiskLevel::Clean);
+
+        // cap = 0（扫描关闭）完全不累积
+        let mut off = ResponseScanBuffer {
+            buf: Vec::new(),
+            cap: 0,
+        };
+        off.feed(b"leak");
+        assert!(off.buf.is_empty(), "关闭扫描时不累积任何字节");
+    }
 
     #[test]
     fn native_forwarding_keeps_anthropic_headers_and_only_maps_model() {

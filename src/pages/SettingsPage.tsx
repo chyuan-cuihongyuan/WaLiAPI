@@ -306,7 +306,7 @@ export function SettingsPage() {
           </div>
           <p className="text-xs text-muted-foreground">
             「请求脱敏转发」开启后，请求体中的 API Key、Token、私钥等敏感信息会在转发上游前被替换为脱敏值。
-            「响应侧安全扫描」开启后，上游返回内容也会被扫描并记录风险。
+            「响应侧安全扫描」开启后，上游返回内容（非流式、流式与原生 Anthropic 路径均覆盖）也会被扫描并记录风险；扫描为尽力而为，不影响响应转发。
           </p>
 
           {/* 内置规则 + 自定义规则：左右分栏 */}

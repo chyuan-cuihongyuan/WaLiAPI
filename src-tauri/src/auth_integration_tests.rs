@@ -127,6 +127,7 @@ fn audited() -> AuditedRequest {
         body_len: 0,
         audit_result: SecurityScanResult::default(),
         request_features: RequestFeatures::default(),
+        security_settings: crate::security::SecuritySettings::default(),
     }
 }
 
