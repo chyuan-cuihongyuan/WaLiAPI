@@ -100,22 +100,12 @@ async fn select_channel_key(channel: &Channel, repo: &Arc<Repository>) -> Channe
     if pool.is_empty() {
         return channel.clone();
     }
-    // Weighted random selection.
-    let total: i64 = pool.iter().map(|(_, w)| w).sum();
-    if total <= 0 {
-        return channel.clone();
-    }
-    let mut pick = rand::rng().random_range(0..total);
-    let mut chosen = &pool[0].0;
-    for (key, w) in &pool {
-        pick -= w;
-        if pick <= 0 {
-            chosen = key;
-            break;
-        }
-    }
+    // FIX-10：加权选择收敛为 core::weighted_key 单一实现（等权多 Key 均匀
+    // 分布；旧内联实现 `pick <= 0` 边界错误使第二个 Key 永远轮空，#34 根因）。
+    let chosen = crate::core::weighted_key::pick_weighted_key(&pool)
+        .unwrap_or_else(|| channel.api_key.clone());
     let mut ch = channel.clone();
-    ch.api_key = chosen.clone();
+    ch.api_key = chosen;
     ch
 }
 

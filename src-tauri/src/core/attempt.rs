@@ -94,6 +94,40 @@ pub fn classify_http_status(status: u16) -> Option<FailureClass> {
     }
 }
 
+/// 404 响应体嗅探（T00 decision 5 的单一事实源）：只有响应体能证明「路径
+/// 不存在」才归类 EndpointUnsupported，缺失模型等其余 404 一律 Retryable
+/// （缺模型绝不能把调用方终态 4xx 透传下去）。FIX-25：此逻辑原在
+/// endpoint_executor，legacy 轨无法访问导致同一 404 两轨语义相反——现
+/// 两轨共用本函数。
+fn classify_404_with_body(body: Option<&str>) -> FailureClass {
+    let Some(body) = body else {
+        return FailureClass::Retryable;
+    };
+    let lower = body.to_lowercase();
+    let path_missing = lower.contains("no such endpoint")
+        || lower.contains("unknown endpoint")
+        || lower.contains("endpoint does not exist")
+        || lower.contains("path not found")
+        || lower.contains("no such path")
+        || (lower.contains("not found")
+            && !lower.contains("model")
+            && !lower.contains("model_not_found"));
+    if path_missing {
+        FailureClass::EndpointUnsupported
+    } else {
+        FailureClass::Retryable
+    }
+}
+
+/// [`classify_http_status`] 的响应体感知版本：404 结合响应体判定（单一
+/// 事实源，新旧两轨共用），其余状态码与无 body 版本逐字一致。
+pub fn classify_http_status_with_body(status: u16, body: Option<&str>) -> Option<FailureClass> {
+    if status == 404 {
+        return Some(classify_404_with_body(body));
+    }
+    classify_http_status(status)
+}
+
 /// Downstream HTTP status reported when the flow halts after the given class.
 pub fn terminal_status(class: FailureClass) -> u16 {
     match class {
@@ -147,6 +181,21 @@ pub fn upstream_failover_decision(status: u16) -> FailoverDecision {
         Some(_) | None => FailoverDecision::Stop {
             downstream_status: status,
         },
+    }
+}
+
+/// [`upstream_failover_decision`] 的响应体感知版本（FIX-25）：调用点持有
+/// 上游错误体时必须用本函数——404 不再一律停止透传：无论响应体证明的是
+/// 路径不存在（EndpointUnsupported）还是缺失模型（Retryable），新轨都视
+/// 为 degradable 换候选渠道，legacy 对齐为 Failover（渠道级 404 往往只是
+/// 该渠道没有此端点/模型，换渠道可能成功；全部候选失败由调用点兜底 502）。
+/// 其余状态码语义与无 body 版本逐字一致（含 405/501 原样停止，该差异
+/// 不在 FIX-25 范围）。
+pub fn upstream_failover_decision_with_body(status: u16, _body: Option<&str>) -> FailoverDecision {
+    if status == 404 {
+        FailoverDecision::Failover
+    } else {
+        upstream_failover_decision(status)
     }
 }
 
@@ -1470,5 +1519,35 @@ mod tests {
     #[should_panic(expected = "callers must gate on non-2xx")]
     fn upstream_failover_decision_rejects_2xx() {
         let _ = upstream_failover_decision(200);
+    }
+
+    /// FIX-25：404 结合响应体判定，与新轨 classify_upstream_status 的 404
+    /// 语义一致（两种形态都 degradable → Failover）；其余状态码与无 body
+    /// 版本逐字一致。
+    #[test]
+    fn upstream_failover_decision_404_body_aware_matches_new_track() {
+        let stop = |downstream_status: u16| FailoverDecision::Stop { downstream_status };
+        // 404 一律换渠道：路径不存在（渠道缺此端点，换渠道可能成功）与
+        // 缺失模型（绝不能把调用方终态 4xx 透传）都 degradable。
+        for body in [
+            Some(r#"{"error":{"message":"no such endpoint: /v1/messages"}}"#),
+            Some(r#"{"error":{"message":"model not found: gpt-x"}}"#),
+            Some("Not Found"),
+            None,
+        ] {
+            assert_eq!(
+                upstream_failover_decision_with_body(404, body),
+                FailoverDecision::Failover,
+                "404 (body={body:?}) must fail over like the new track"
+            );
+        }
+        // 非 404 与无 body 版本逐字一致（对照矩阵抽样）。
+        assert_eq!(upstream_failover_decision_with_body(400, Some("x")), stop(400));
+        assert_eq!(upstream_failover_decision_with_body(401, None), stop(502));
+        assert_eq!(upstream_failover_decision_with_body(405, None), stop(405));
+        assert_eq!(
+            upstream_failover_decision_with_body(429, None),
+            FailoverDecision::Failover
+        );
     }
 }

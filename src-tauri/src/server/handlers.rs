@@ -1,6 +1,6 @@
 use super::router::SharedState;
 use crate::adaptor::{get_adaptor, ProxyRequest};
-use crate::core::attempt::{upstream_failover_decision, FailoverDecision};
+use crate::core::attempt::{upstream_failover_decision_with_body, FailoverDecision};
 use crate::core::dispatcher::Dispatcher;
 use crate::core::feature_flags;
 use crate::core::proxy;
@@ -865,7 +865,7 @@ async fn handle_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    match upstream_failover_decision(status.as_u16()) {
+                    match upstream_failover_decision_with_body(status.as_u16(), Some(&body_str)) {
                         FailoverDecision::Failover => continue,
                         FailoverDecision::Stop { downstream_status } => {
                             // Nothing has been streamed yet — stop cycling
@@ -1934,10 +1934,16 @@ pub async fn handle_messages(
                 Ok((response, upstream_model)) => {
                     let status = StatusCode::from_u16(response.status().as_u16())
                         .unwrap_or(StatusCode::BAD_GATEWAY);
-                    match upstream_failover_decision(status.as_u16()) {
+                    // FIX-25：先取错误体供 404 语义判定（两个分支都要用）。
+                    let native_err = store_native_error(response).await;
+                    let err_body_text = String::from_utf8_lossy(&native_err.body).to_string();
+                    match upstream_failover_decision_with_body(
+                        status.as_u16(),
+                        Some(&err_body_text),
+                    ) {
                         FailoverDecision::Failover => {
                             last_error = format!("{}: HTTP {}", channel.name, status);
-                            last_native_error = Some(store_native_error(response).await);
+                            last_native_error = Some(native_err);
                         }
                         FailoverDecision::Stop { downstream_status } => {
                             record_anthropic_outcome(
@@ -1964,7 +1970,7 @@ pub async fn handle_messages(
                                     "Upstream channel authentication failed",
                                 );
                             }
-                            return native_response(response, None);
+                            return stored_native_response(native_err);
                         }
                     }
                 }
@@ -2092,7 +2098,7 @@ pub async fn handle_messages(
                     .and_then(|value| value.as_str())
                     .unwrap_or("OpenAI Chat Completions upstream rejected the request");
                 last_error = format!("{}: {message}", channel.name);
-                match upstream_failover_decision(status.as_u16()) {
+                match upstream_failover_decision_with_body(status.as_u16(), Some(upstream.to_string().as_str())) {
                     FailoverDecision::Failover => {
                         last_openai_error = Some((status, message.to_string(), response_headers));
                     }
@@ -2367,9 +2373,12 @@ pub async fn handle_messages_count_tokens(
             Ok((response, _upstream_model)) => {
                 let status = StatusCode::from_u16(response.status().as_u16())
                     .unwrap_or(StatusCode::BAD_GATEWAY);
-                match upstream_failover_decision(status.as_u16()) {
+                // FIX-25：先取错误体供 404 语义判定（两个分支都要用）。
+                let native_err = store_native_error(response).await;
+                let err_body_text = String::from_utf8_lossy(&native_err.body).to_string();
+                match upstream_failover_decision_with_body(status.as_u16(), Some(&err_body_text)) {
                     FailoverDecision::Failover => {
-                        last_error = Some(store_native_error(response).await);
+                        last_error = Some(native_err);
                     }
                     FailoverDecision::Stop { downstream_status } => {
                         // Mask a channel-credential failure (401/403) to 502;
@@ -2381,7 +2390,7 @@ pub async fn handle_messages_count_tokens(
                                 "Upstream channel authentication failed",
                             );
                         }
-                        return native_response(response, None);
+                        return stored_native_response(native_err);
                     }
                 }
             }
@@ -2784,7 +2793,7 @@ async fn handle_responses_stream(
                 if !status.is_success() {
                     let body_str = resp.text().await.unwrap_or_default();
                     last_error = Some(format!("{}: {}", channel.name, body_str));
-                    match upstream_failover_decision(status.as_u16()) {
+                    match upstream_failover_decision_with_body(status.as_u16(), Some(&body_str)) {
                         FailoverDecision::Failover => continue,
                         FailoverDecision::Stop { downstream_status } => {
                             // Nothing has been streamed yet — stop cycling
@@ -3325,7 +3334,10 @@ pub async fn handle_embeddings(
                         eprintln!("[WARN] create_security_findings failed: {}", e);
                     }
                     last_error = Some(error_message);
-                    match upstream_failover_decision(status.as_u16()) {
+                    match upstream_failover_decision_with_body(
+                        status.as_u16(),
+                        Some(resp_body.to_string().as_str()),
+                    ) {
                         FailoverDecision::Failover => continue,
                         FailoverDecision::Stop { downstream_status } => {
                             // Terminal status: the same request would fail

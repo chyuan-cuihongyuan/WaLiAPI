@@ -7,3 +7,4 @@ pub mod protocol_boundary;
 pub mod proxy;
 pub mod route_plan;
 pub mod stream_supervisor;
+pub mod weighted_key;
