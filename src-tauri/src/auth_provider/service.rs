@@ -154,7 +154,29 @@ impl AuthService {
                 .clone()
         };
         let _guard = lock.lock().await;
+        let outcome = self
+            .persist_replacement_locked(kind, result, replacement)
+            .await;
+        drop(_guard);
+        self.prune_idle_refresh_locks().await;
+        outcome
+    }
 
+    /// FIX-22：锁清理——仅映射持有（无并发等待者）的条目移除；
+    /// 已 clone 出去的（strong_count > 1）保留，长驻进程不再泄漏。
+    async fn prune_idle_refresh_locks(&self) {
+        let mut locks = self.refresh_locks.lock().await;
+        locks.retain(|_, v| Arc::strong_count(v) > 1);
+    }
+
+    async fn persist_replacement_locked(
+        &self,
+        kind: ProviderKind,
+        result: crate::auth_provider::LoginResult,
+        replacement: ReplacementContext,
+    ) -> Result<AuthAccountSummary, ProviderError> {
+        // 调用方已持有该账号的 refresh 锁。
+        //
         // Re-read and revalidate under the lock: a concurrent refresh may have
         // rotated the token, or the account may have been deleted meanwhile.
         // A missing account is a stale replacement boundary, not a generic
@@ -287,7 +309,22 @@ impl AuthService {
                 .clone()
         };
         let _guard = lock.lock().await;
+        let outcome = self
+            .refresh_locked(account_id, refresh_before, force, probe_quota)
+            .await;
+        drop(_guard);
+        self.prune_idle_refresh_locks().await;
+        outcome
+    }
 
+    /// 在已持有账号 refresh 锁的前提下执行刷新（由 refresh_with_lock 调用）。
+    async fn refresh_locked(
+        &self,
+        account_id: &str,
+        refresh_before: DateTime<Utc>,
+        force: bool,
+        probe_quota: bool,
+    ) -> Result<AuthAccountSummary, ProviderError> {
         // Re-read while holding the lock: a preceding caller may have rotated
         // credentials, making this caller's refresh unnecessary.
         let account = self.get_account(account_id).await?;

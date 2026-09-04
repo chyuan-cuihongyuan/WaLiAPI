@@ -171,26 +171,25 @@ pub async fn ingest_source(
     let settings = shared.state.settings.clone();
     let pool = shared.state.db.pool.clone();
 
-    // Spawn ingest in background, return immediately with task info
-    let project_id = id.clone();
+    // FIX-22：真后台化——摄入含 LLM 生成，可能跑数十秒到数分钟，此前
+    // 注释写后台但实际 await 全程，HTTP 连接被占满。现在立即返回 202，
+    // 摄入在后台执行；任务/来源状态由 ingest::ingest_source 统一收敛
+    // （失败落 failed），进度经 `wiki-source-progress` 事件流下发。
     let source_id = sid.clone();
-
-    match ingest::ingest_source(&events, &settings, &pool, &project_id, &source_id).await {
-        Ok(result) => Json(serde_json::json!({
-            "status": "done",
-            "pages_created": result.pages_created,
-            "page_paths": result.page_paths,
-        }))
-        .into_response(),
-        Err(e) => {
-            // Update source status to failed
-            let repo = WikiRepository::new(pool);
-            let _ = repo
-                .update_source_status(&source_id, "failed", 0, Some(&e))
-                .await;
-            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+    tokio::spawn(async move {
+        if let Err(e) = ingest::ingest_source(&events, &settings, &pool, &id, &sid).await {
+            tracing::warn!(project = %id, source = %sid, error = %e, "wiki ingest failed (状态已收敛为 failed)");
         }
-    }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": "started",
+            "source_id": source_id,
+        })),
+    )
+        .into_response()
 }
 
 pub async fn rescan_sources(State(shared): State<SharedState>, Path(id): Path<String>) -> Response {

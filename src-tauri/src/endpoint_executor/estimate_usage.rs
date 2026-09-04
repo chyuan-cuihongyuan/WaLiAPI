@@ -132,14 +132,41 @@ fn count_tokens(text: &str) -> i64 {
     if text.is_empty() {
         return 0;
     }
-    match cl100k_base() {
-        Ok(bpe) => bpe.encode_with_special_tokens(text).len() as i64,
-        Err(_) => {
+    match cl100k_singleton() {
+        Some(bpe) => bpe.encode_with_special_tokens(text).len() as i64,
+        None => {
             // Rough fallback: ~4 chars per token for English, ~2 chars for CJK.
             // Use a blended estimate of ~3 chars/token.
             (text.len() as i64) / 3
         }
     }
+}
+
+/// FIX-21：BPE 构建进程内单例。`tiktoken_rs::cl100k_base()` 每次调用都会
+/// 完整重建词表（毫秒级、数 MB 分配），此前每个估算调用都重建一遍；
+/// 高流量下改为构建一次、之后复用。
+static CL100K_SINGLETON: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> =
+    std::sync::OnceLock::new();
+
+/// 仅供测试观察：BPE 实际构建次数。
+#[cfg(test)]
+static CL100K_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn cl100k_singleton() -> Option<&'static tiktoken_rs::CoreBPE> {
+    CL100K_SINGLETON
+        .get_or_init(|| {
+            #[cfg(test)]
+            CL100K_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match cl100k_base() {
+                Ok(bpe) => Some(bpe),
+                Err(e) => {
+                    tracing::warn!("cl100k_base tokenizer init failed, falling back to char estimate: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
 }
 
 /// Extract response text from a non-stream response body for estimation.
@@ -261,5 +288,20 @@ mod tests {
     #[test]
     fn test_empty_text() {
         assert_eq!(count_tokens(""), 0);
+    }
+
+    /// FIX-21：BPE 只构建一次——重复估算调用不再重建词表。
+    #[test]
+    fn bpe_builds_once_across_calls() {
+        let before = CL100K_BUILDS.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = count_tokens("first estimation pass");
+        let _ = count_tokens("second estimation pass");
+        let _ = count_tokens("第三次估算，混合中文与 English");
+        let after = CL100K_BUILDS.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            after <= before + 1,
+            "three calls must not build the tokenizer more than once (built {} times around this test)",
+            after - before
+        );
     }
 }
