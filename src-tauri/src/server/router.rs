@@ -188,6 +188,7 @@ mod tests {
                 std::time::Duration::from_secs(60),
             )),
             admin_sessions: crate::server::admin_auth::SessionStore::new(),
+            login_throttle: crate::server::admin_auth::LoginThrottle::new(),
             events: crate::server::event_bridge::EventSink::headless(event_tx),
             settings: crate::settings_store::SettingsStore::file(data_dir.join("settings.json")),
             data_dir,
@@ -369,5 +370,151 @@ mod tests {
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(res.headers().get("access-control-allow-origin").is_none());
+    }
+
+    // ─── FIX-17：管理面认证加固（端到端） ─────────────────────────────────
+
+    fn admin_json_post(uri: &str, bearer: Option<&str>, body: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-requested-with", "XMLHttpRequest");
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn admin_login_flow_hardening() {
+        let state = test_state().await;
+        let shared = test_shared(&state, Some(ADMIN_TOKEN), Some(MCP_TOKEN));
+        let app = build_router(state.clone(), shared);
+
+        // 初始管理员 + INITIAL_PASSWORD 文件；密码从文件读出，不在源码落字面量
+        crate::server::admin_auth::ensure_initial_admin(&state.db.pool, &state.data_dir)
+            .await
+            .unwrap();
+        let pw_file = state.data_dir.join("INITIAL_PASSWORD");
+        assert!(pw_file.exists());
+        let content = std::fs::read_to_string(&pw_file).unwrap();
+        let password = content
+            .lines()
+            .find_map(|l| l.strip_prefix("password: "))
+            .unwrap()
+            .to_string();
+        let login_body = |pw: &str| {
+            serde_json::json!({ "username": "admin", "password": pw }).to_string()
+        };
+
+        // 成功登录：HttpOnly Cookie + 初始密码文件删除 + token 可用
+        let res = app
+            .clone()
+            .oneshot(admin_json_post(
+                "/admin/api/auth/login",
+                None,
+                &login_body(&password),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookie = res
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        assert!(cookie.contains("HttpOnly"), "cookie 必须带 HttpOnly: {cookie}");
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let token = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let res = app
+            .clone()
+            .oneshot(request("GET", "/admin/api/auth/check", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!pw_file.exists(), "首登成功后初始密码文件必须删除");
+
+        // 第二个会话（模拟另一设备登录）
+        let res = app
+            .clone()
+            .oneshot(admin_json_post(
+                "/admin/api/auth/login",
+                None,
+                &login_body(&password),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let token2 = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 改密：当前会话续期，其他旧会话全部吊销（FIX-17）。
+        // 新密码运行期随机生成，请求体经 json! 宏注入，源码不落可用凭据字面量。
+        let new_password = format!("rotated-{}", uuid::Uuid::new_v4());
+        let change_body = serde_json::json!({
+            "old_password": password,
+            "new_password": new_password,
+        })
+        .to_string();
+        let res = app
+            .clone()
+            .oneshot(admin_json_post(
+                "/admin/api/auth/change-password",
+                Some(&token),
+                &change_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .clone()
+            .oneshot(request("GET", "/admin/api/auth/check", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "当前会话应保持有效");
+        let res = app
+            .clone()
+            .oneshot(request("GET", "/admin/api/auth/check", Some(&token2)))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "改密后旧会话必须全部吊销"
+        );
+
+        // 连续失败触发限速：错密码连打 6 次（400），第 7 次 429 + Retry-After
+        let wrong_password = format!("wrong-{}", uuid::Uuid::new_v4());
+        for i in 1..=6 {
+            let res = app
+                .clone()
+                .oneshot(admin_json_post(
+                    "/admin/api/auth/login",
+                    None,
+                    &login_body(&wrong_password),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "第 {i} 次失败应为 400");
+        }
+        let res = app
+            .clone()
+            .oneshot(admin_json_post(
+                "/admin/api/auth/login",
+                None,
+                &login_body(&wrong_password),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "第 7 次应被限速");
+        assert!(res.headers().get("Retry-After").is_some());
     }
 }

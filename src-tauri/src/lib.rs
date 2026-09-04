@@ -60,6 +60,8 @@ pub struct AppState {
     pub test_receipts: Arc<crate::services::channel_test::TestReceiptStore>,
     /// Web 管理面板：管理员会话（内存存储，重启失效）。
     pub admin_sessions: Arc<server::admin_auth::SessionStore>,
+    /// Web 管理面板：登录失败限速（按用户/全局 + 指数退避，FIX-17）。
+    pub login_throttle: Arc<server::admin_auth::LoginThrottle>,
     /// 统一事件出口（桌面 Webview + Web SSE 桥）。
     pub events: server::event_bridge::EventSink,
     /// 设置存储（桌面 tauri-plugin-store / headless JSON 文件）。
@@ -216,6 +218,7 @@ pub fn run() {
                         std::time::Duration::from_secs(30 * 60),
                     )),
                     admin_sessions: server::admin_auth::SessionStore::new(),
+                    login_throttle: server::admin_auth::LoginThrottle::new(),
                     events: server::event_bridge::EventSink::desktop(
                         move |event, payload| {
                             let _ = emit_handle.emit(event, payload);

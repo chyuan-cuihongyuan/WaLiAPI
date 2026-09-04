@@ -100,6 +100,7 @@ pub async fn run(cfg: WebServerConfig) -> Result<(), String> {
             std::time::Duration::from_secs(30 * 60),
         )),
         admin_sessions: server::admin_auth::SessionStore::new(),
+        login_throttle: server::admin_auth::LoginThrottle::new(),
         events: server::event_bridge::EventSink::headless(event_tx),
         settings: settings_store::SettingsStore::file(
             settings_store::default_settings_path(&data_dir),

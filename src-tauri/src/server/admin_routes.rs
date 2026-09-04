@@ -150,8 +150,9 @@ fn bad_request(message: String) -> (StatusCode, Json<Value>) {
 }
 
 fn session_cookie_header(token: &str) -> HeaderValue {
+    // HttpOnly（FIX-17）：令牌 Cookie 禁止 JS 读取，配合前端 Bearer 双轨。
     HeaderValue::from_str(&format!(
-        "{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_MAX_AGE_SECS}; SameSite=Lax"
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_MAX_AGE_SECS}; SameSite=Lax; HttpOnly"
     ))
     .expect("session token is header-safe")
 }
@@ -168,13 +169,70 @@ async fn login(
     State(shared): State<SharedState>,
     Json(body): Json<LoginBody>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
-    let user = admin_auth::find_user_by_username(&shared.state.db.pool, body.username.trim())
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| bad_request("用户名或密码错误".to_string()))?;
+    let username = body.username.trim();
+
+    // 失败限速（FIX-17）：按用户与全局两级指数退避，命中即 429 + Retry-After。
+    let now = std::time::Instant::now();
+    for key in [username, admin_auth::LOGIN_GLOBAL_KEY] {
+        let wait = shared.state.login_throttle.penalty_remaining(key, now);
+        if !wait.is_zero() {
+            let secs = wait.as_secs().max(1);
+            let mut response = (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": format!("登录尝试过于频繁，请 {secs} 秒后再试") })),
+            )
+                .into_response();
+            if let Ok(value) = HeaderValue::from_str(&secs.to_string()) {
+                response.headers_mut().insert("Retry-After", value);
+            }
+            return Ok(response);
+        }
+    }
+
+    let user = match admin_auth::find_user_by_username(&shared.state.db.pool, username).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            // 时序防枚举（FIX-17）：不存在的用户名也跑一次真实 argon2，
+            // 使响应耗时与「密码错误」路径一致。
+            admin_auth::dummy_verify(&body.password);
+            shared
+                .state
+                .login_throttle
+                .record_failure(username, std::time::Instant::now());
+            shared
+                .state
+                .login_throttle
+                .record_failure(admin_auth::LOGIN_GLOBAL_KEY, std::time::Instant::now());
+            return Err(bad_request("用户名或密码错误".to_string()));
+        }
+        Err(e) => return Err(internal_error(e)),
+    };
 
     if !admin_auth::verify_password(&body.password, &user.password_hash) {
+        shared
+            .state
+            .login_throttle
+            .record_failure(username, std::time::Instant::now());
+        shared
+            .state
+            .login_throttle
+            .record_failure(admin_auth::LOGIN_GLOBAL_KEY, std::time::Instant::now());
         return Err(bad_request("用户名或密码错误".to_string()));
+    }
+
+    shared.state.login_throttle.record_success(username);
+    shared
+        .state
+        .login_throttle
+        .record_success(admin_auth::LOGIN_GLOBAL_KEY);
+
+    // 首登成功即删除初始密码文件（FIX-17）：该文件只在初始建号时写入，
+    // 登录成功即证明持有人已知密码，明文落盘不再有存在必要。
+    let initial_password_file = shared.state.data_dir.join("INITIAL_PASSWORD");
+    if initial_password_file.exists() {
+        if let Err(e) = std::fs::remove_file(&initial_password_file) {
+            tracing::warn!("删除初始密码文件失败: {e}");
+        }
     }
 
     let token = admin_auth::generate_token();
@@ -208,7 +266,9 @@ async fn logout(
     let mut response = Json(json!({ "ok": true })).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("waliapi_admin_token=; Path=/; Max-Age=0; SameSite=Lax"),
+        HeaderValue::from_static(
+            "waliapi_admin_token=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly",
+        ),
     );
     response
 }
@@ -245,7 +305,12 @@ async fn change_password(
         .await
         .map_err(internal_error)?;
 
-    // 会话保持有效，仅清除强制改密标记
+    // 改密吊销该用户全部旧会话（FIX-17）：密码已轮换，改密前签发的
+    // 会话（含其他设备）一律失效；当前会话凭新状态续期，无需重新登录。
+    shared
+        .state
+        .admin_sessions
+        .revoke_all_for_user(&user.id);
     let session = AdminSession {
         must_change_password: false,
         ..identity.session.clone()
