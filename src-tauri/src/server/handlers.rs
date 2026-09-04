@@ -965,24 +965,17 @@ async fn handle_stream(
                                     }
                                     Err(e) => {
                                         had_error = true;
-                                        let err_chunk = format!(
-                                            "data: {{\"error\":{{\"message\":\"Upstream conversion failed: {}\",\"type\":\"server_error\"}}}}\n\n",
-                                            e
-                                        );
+                                        // FIX-20：错误帧经 serde_json 构造，杜绝非法 JSON。
+                                        let err_chunk = crate::endpoint_executor::driver::format_stream_error("chat", &format!("Upstream conversion failed: {e}"));
                                         yield Ok::<_, std::io::Error>(bytes::Bytes::from(err_chunk.into_bytes()));
-                                        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
                                         break;
                                     }
                                 }
                             }
                             Err(e) => {
                                 had_error = true;
-                                let err_chunk = format!(
-                                    "data: {{\"error\":{{\"message\":\"Stream connection interrupted: {}\",\"type\":\"server_error\"}}}}\n\n",
-                                    e
-                                );
+                                let err_chunk = crate::endpoint_executor::driver::format_stream_error("chat", &format!("Stream connection interrupted: {e}"));
                                 yield Ok::<_, std::io::Error>(bytes::Bytes::from(err_chunk.into_bytes()));
-                                yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
                                 break;
                             }
                         }
@@ -1011,12 +1004,8 @@ async fn handle_stream(
                             }
                             Err(e) => {
                                 had_error = true;
-                                let err_chunk = format!(
-                                    "data: {{\"error\":{{\"message\":\"Upstream conversion failed: {}\",\"type\":\"server_error\"}}}}\n\n",
-                                    e
-                                );
+                                let err_chunk = crate::endpoint_executor::driver::format_stream_error("chat", &format!("Upstream conversion failed: {e}"));
                                 yield Ok::<_, std::io::Error>(bytes::Bytes::from(err_chunk.into_bytes()));
-                                yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
                             }
                         }
                     }

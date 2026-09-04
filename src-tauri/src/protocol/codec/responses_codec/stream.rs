@@ -196,6 +196,13 @@ impl ChatToResponsesStreamDecoder {
 impl StreamDecoder for ChatToResponsesStreamDecoder {
     fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>, DecodeError> {
         self.pending.extend_from_slice(bytes);
+        if sse::pending_exceeded(&self.pending) {
+            return Err(DecodeError::from(UnsupportedFeatures::single(
+                FeatureKind::UnknownEvent,
+                "/",
+                sse::pending_overflow_message(),
+            )));
+        }
         let mut output = Vec::new();
         while let Some(end) = sse::record_end(&self.pending) {
             self.ensure_created(&mut output);

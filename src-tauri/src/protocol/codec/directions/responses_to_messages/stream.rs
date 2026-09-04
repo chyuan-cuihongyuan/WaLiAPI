@@ -66,6 +66,13 @@ impl MessagesResponsesStream {
 impl StreamDecoder for MessagesResponsesStream {
     fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>, DecodeError> {
         self.pending.extend_from_slice(bytes);
+        if sse::pending_exceeded(&self.pending) {
+            return Err(DecodeError::from(unsupported(
+                FeatureKind::UnknownEvent,
+                "/",
+                sse::pending_overflow_message(),
+            )));
+        }
         let mut out = Vec::new();
         while let Some(end) = sse::record_end(&self.pending) {
             let rec: Vec<u8> = self.pending.drain(..end).collect();

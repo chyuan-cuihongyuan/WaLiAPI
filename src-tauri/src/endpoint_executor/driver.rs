@@ -1544,22 +1544,32 @@ fn error_chain_root(err: &dyn std::error::Error) -> String {
 /// Format a post-commit stream error event in the DOWNSTREAM protocol (I-2).
 /// `mode` is the downstream mode ("chat" / "anthropic" / "responses" /
 /// "embedding" / "anthropic_count_tokens"), NOT the SSE transform mode.
-fn format_stream_error(mode: &str, message: &str) -> String {
-    let msg = message.replace('"', "\\\"");
+///
+/// FIX-20：data 载荷一律经 serde_json 构造——错误消息含引号/换行/反斜杠时
+/// 手写转义拼接会产生非法 JSON 帧导致 SDK 断流。
+pub(crate) fn format_stream_error(mode: &str, message: &str) -> String {
     if mode == "responses" {
         format!(
-            "event: response.failed\ndata: {{\"type\":\"response.failed\",\"error\":{{\"message\":\"{}\"}}}}\n\n",
-            msg
+            "event: response.failed\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.failed",
+                "error": {"message": message}
+            })
         )
     } else if mode == "anthropic" || mode == "anthropic_count_tokens" {
         format!(
-            "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":\"{}\"}}}}\n\n",
-            msg
+            "event: error\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": message}
+            })
         )
     } else {
         format!(
-            "data: {{\"error\":{{\"message\":\"{}\",\"type\":\"server_error\"}}}}\n\ndata: [DONE]\n\n",
-            msg
+            "data: {}\ndata: [DONE]\n\n",
+            serde_json::json!({
+                "error": {"message": message, "type": "server_error"}
+            })
         )
     }
 }
@@ -1783,6 +1793,34 @@ mod tests {
 
         // The SSE transform mode string must NEVER leak into error formatting.
         assert!(!format_stream_error("chat", "x").contains("chat_to_messages_v1"));
+    }
+
+    /// FIX-20：错误消息含引号/换行/反斜杠时 data 帧必须是合法 JSON
+    /// （手写转义拼接会产生断流帧）。三种下游协议逐一断言可解析。
+    #[test]
+    fn stream_error_events_are_always_valid_json() {
+        for mode in ["chat", "anthropic", "responses"] {
+            let event = format_stream_error(mode, "quote \" backslash \\ newline \n tab \t");
+            for line in event.lines() {
+                if let Some(payload) = line.strip_prefix("data: ") {
+                    if payload == "[DONE]" {
+                        continue;
+                    }
+                    let parsed: serde_json::Value = serde_json::from_str(payload)
+                        .unwrap_or_else(|e| panic!("{mode}: invalid JSON frame {payload:?}: {e}"));
+                    // 消息原样往返（合法转义，不丢失字符）。
+                    let msg = if mode == "responses" {
+                        parsed.pointer("/error/message")
+                    } else {
+                        parsed.pointer("/error/message")
+                    };
+                    assert_eq!(
+                        msg.and_then(|m| m.as_str()),
+                        Some("quote \" backslash \\ newline \n tab \t")
+                    );
+                }
+            }
+        }
     }
 
     /// The root-cause walk must surface the innermost error even when a generic

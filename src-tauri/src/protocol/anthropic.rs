@@ -49,6 +49,9 @@ impl AnthropicStreamState {
         message_id: &str,
     ) -> Result<Vec<String>, String> {
         self.pending.extend_from_slice(bytes);
+        if crate::protocol::codec::sse::pending_exceeded(&self.pending) {
+            return Err(crate::protocol::codec::sse::pending_overflow_message());
+        }
         let mut events = Vec::new();
         while let Some(end) = sse_record_end(&self.pending) {
             let record: Vec<u8> = self.pending.drain(..end).collect();

@@ -6,6 +6,24 @@
 
 use crate::protocol::codec::error::UnsupportedFeatures;
 
+/// SSE 解码器 pending 缓冲上限（FIX-11）：故障/恶意上游持续发送无终止符
+/// 字节时在上限处报错换渠道，而非无界累积。合法单条 SSE 记录为 KB 量级，
+/// 32MB 提供了极大的合法余量。
+pub const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
+
+/// pending 缓冲是否已超限（调用方在 `extend_from_slice` 后检查并报错）。
+pub fn pending_exceeded(pending: &[u8]) -> bool {
+    pending.len() > MAX_PENDING_BYTES
+}
+
+/// 超限错误文案（各解码器映射为自己的错误类型时共用）。
+pub fn pending_overflow_message() -> String {
+    format!(
+        "upstream SSE pending buffer exceeded {} MB without a record terminator",
+        MAX_PENDING_BYTES / (1024 * 1024)
+    )
+}
+
 /// Locate the terminating sequence of the next full SSE record.
 /// Returns the byte length (including the terminator) of the first complete
 /// record, or `None` if a record is not yet complete.

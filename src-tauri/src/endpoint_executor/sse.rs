@@ -37,6 +37,12 @@ pub fn parse_data_payload(record: &[u8]) -> Result<String, String> {
     crate::protocol::codec::sse::parse_data_payload(record).map_err(|error| error.message)
 }
 
+/// 泵累积内容（正文/推理文本）上限（FIX-11）：超长生成停止拼接并落截断
+/// 标记，防止故障/恶意上游把内存与日志体积放大到失控。下游转发不受影响
+/// （转发的字节不经过累积），仅影响落库的 response_choices。
+pub(crate) const MAX_ACCUMULATED_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const ACCUMULATION_TRUNCATION_MARKER: &str = "\n\n[... WaLiAPI: accumulated content truncated ...]";
+
 /// Validate only enough framing to retain the pre-commit failover barrier.
 /// Full protocol validation belongs to the decoder factory selected at prepare
 /// time and therefore runs inside [`StreamPumpCore::new`].
@@ -100,6 +106,8 @@ pub struct StreamPumpCore {
     finish_reason: Option<String>,
     /// tool_calls accumulated from stream deltas, keyed by index.
     tool_calls_map: std::collections::BTreeMap<i64, serde_json::Value>,
+    /// 累积内容触上限后置位：停止拼接正文/推理，落库时追加截断标记（FIX-11）。
+    accumulation_truncated: bool,
 }
 
 impl StreamPumpCore {
@@ -139,6 +147,7 @@ impl StreamPumpCore {
         if terminal_registered {
             supervisor.register_terminal();
         }
+        let accumulation_truncated = accumulated_content.len() >= MAX_ACCUMULATED_CONTENT_BYTES;
         Ok(Self {
             supervisor,
             decoder,
@@ -151,6 +160,7 @@ impl StreamPumpCore {
             response_role,
             finish_reason,
             tool_calls_map,
+            accumulation_truncated,
         })
     }
 
@@ -239,7 +249,18 @@ impl StreamPumpCore {
     }
 
     /// Accumulate content/reasoning/tool_calls from a downstream SSE event string.
+    /// 正文/推理触上限后停止拼接（FIX-11）；终止事件检测在 push 外层独立
+    /// 进行、不受累积上限影响，tool_calls 仍累积以保证落账结构完整。
     fn accumulate_from_sse(&mut self, event: &str) {
+        if !self.accumulation_truncated
+            && self.accumulated_content.len() >= MAX_ACCUMULATED_CONTENT_BYTES
+        {
+            self.accumulated_content.push_str(ACCUMULATION_TRUNCATION_MARKER);
+            self.accumulation_truncated = true;
+        }
+        if self.accumulation_truncated {
+            return;
+        }
         accumulate_from_sse_event(
             event,
             &mut self.accumulated_content,
