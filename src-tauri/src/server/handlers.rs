@@ -1794,6 +1794,65 @@ async fn store_native_error(response: reqwest::Response) -> StoredNativeError {
     }
 }
 
+/// FIX-18（#15）：请求体是否含图片内容块（Anthropic `{"type":"image"}` /
+/// OpenAI `{"type":"image_url"}`）。仅用于诊断提示，不参与路由决策（fail-open）。
+fn request_has_image_blocks(body: &serde_json::Value) -> bool {
+    body.get("messages")
+        .and_then(|m| m.as_array())
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            matches!(
+                                part.get("type").and_then(|t| t.as_str()),
+                                Some("image") | Some("image_url")
+                            )
+                        })
+                    })
+            })
+        })
+}
+
+/// FIX-18（#15）：原生渠道 400 且请求含图片块时，在错误体 message 追加
+/// 诊断提示。视觉能力路由（`supports_vision` 渠道标记 + failover 跳过）
+/// 为长期方案（docs/reliability-fixes-prd.md 票 03），当前只提示不改路由。
+fn annotate_vision_hint(
+    err: StoredNativeError,
+    request: &serde_json::Value,
+) -> StoredNativeError {
+    const HINT: &str =
+        "（该渠道疑似不支持图片：请求含图片内容块而上游以 400 拒绝，可切换到支持视觉的渠道）";
+    if err.status != StatusCode::BAD_REQUEST || !request_has_image_blocks(request) {
+        return err;
+    }
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&err.body) else {
+        return err;
+    };
+    // Anthropic 错误体为 {"type":"error","error":{"type":...,"message":...}}，
+    // 兼容扁平 {"message": ...} 形态。
+    let message = match value.pointer_mut("/error/message") {
+        Some(message) => Some(message),
+        None => value.get_mut("message"),
+    };
+    if let Some(serde_json::Value::String(text)) = message {
+        if !text.contains("该渠道疑似不支持图片") {
+            text.push_str(HINT);
+        }
+    }
+    let Ok(body) = serde_json::to_vec(&value) else {
+        return err;
+    };
+    StoredNativeError {
+        status: err.status,
+        content_type: err.content_type,
+        headers: err.headers,
+        body: bytes::Bytes::from(body),
+    }
+}
+
 fn stored_native_response(error: StoredNativeError) -> Response {
     let mut builder = Response::builder().status(error.status);
     if let Some(content_type) = error.content_type {
@@ -2201,7 +2260,11 @@ pub async fn handle_messages(
                                     "Upstream channel authentication failed",
                                 );
                             }
-                            return stored_native_response(native_err);
+                            // FIX-18（#15）：400 + 图片块 → 追加视觉诊断提示。
+                            return stored_native_response(annotate_vision_hint(
+                                native_err,
+                                &forward_json,
+                            ));
                         }
                     }
                 }
@@ -4051,6 +4114,61 @@ mod anthropic_handler_tests {
         };
         off.feed(b"leak");
         assert!(off.buf.is_empty(), "关闭扫描时不累积任何字节");
+    }
+
+    /// FIX-18（#15）：400 + 图片块 → message 追加诊断提示；无图片或非 400 不动。
+    #[test]
+    fn vision_hint_appended_only_for_400_with_image_blocks() {
+        let request = serde_json::json!({
+            "messages": [{"role":"user","content":[
+                {"type":"text","text":"hi"},
+                {"type":"image","source":{"type":"base64"}}
+            ]}]
+        });
+        assert!(request_has_image_blocks(&request));
+        assert!(!request_has_image_blocks(&serde_json::json!({
+            "messages": [{"role":"user","content":"plain text"}]
+        })));
+
+        let err400 = StoredNativeError {
+            status: StatusCode::BAD_REQUEST,
+            content_type: None,
+            headers: vec![],
+            body: bytes::Bytes::from(
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"upstream rejected"}}"#,
+            ),
+        };
+        let annotated = annotate_vision_hint(err400, &request);
+        let text = String::from_utf8_lossy(&annotated.body).to_string();
+        assert!(text.contains("该渠道疑似不支持图片"), "{text}");
+        // 重复标注幂等（不叠加两遍提示）
+        let reparsed = serde_json::from_slice::<serde_json::Value>(&annotated.body).unwrap();
+        let double = annotate_vision_hint(
+            StoredNativeError {
+                status: StatusCode::BAD_REQUEST,
+                content_type: None,
+                headers: vec![],
+                body: annotated.body.clone(),
+            },
+            &request,
+        );
+        let _ = reparsed;
+        let text2 = String::from_utf8_lossy(&double.body).to_string();
+        assert_eq!(
+            text2.matches("该渠道疑似不支持图片").count(),
+            1,
+            "提示只追加一次: {text2}"
+        );
+
+        // 非 400（如 429）不追加
+        let err429 = StoredNativeError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            content_type: None,
+            headers: vec![],
+            body: bytes::Bytes::from(r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#),
+        };
+        let untouched = annotate_vision_hint(err429, &request);
+        assert!(!String::from_utf8_lossy(&untouched.body).contains("疑似不支持"));
     }
 
     #[test]

@@ -618,10 +618,34 @@ WaLiAPI/
 │   │   ├── channel_presets.rs        # 渠道预设注册表
 │   │   ├── lib.rs                    # 入口 + 系统托盘
 │   │   └── main.rs                   # main 函数
-│   ├── migrations/                   # 数据库迁移 (23 个)
+│   ├── migrations/                   # 数据库迁移 (27 个)
 │   └── tauri.conf.json               # Tauri 配置
 └── package.json
 ```
+
+---
+
+## 🛡️ 安全边界与威胁模型
+
+WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先阅读本节，并确认边界假设与你的部署环境一致。
+
+**凭证域（互不通用）**：
+
+| 用途 | 凭证 | 说明 |
+|:---|:---|:---|
+| 数据面 `/v1/*` | `sk-waliapi-*` 网关密钥 | 供下游客户端调用网关 |
+| Web 管理面 + KB/Wiki REST | `WALIAPI_ADMIN_TOKEN`（≥32 字符） | 首次启动生成随机管理员密码（stdout + 数据目录 `INITIAL_PASSWORD` 文件，首次登录成功后文件即删除）；登录失败限速（指数退避）、会话 Cookie 为 HttpOnly、改密后吊销全部旧会话 |
+| MCP 端点 | `WALIAPI_MCP_TOKEN`（≥32 字符，须与管理 token 不同） | Streamable HTTP + SSE |
+
+**明文密钥存储（知情声明）**：上游渠道密钥与网关 API Key 以**明文**存储在本地 SQLite 数据目录中——数据目录的文件系统权限就是安全边界，本项目不提供静态加密。渠道导出文件包含明文密钥（界面有明示警告），请仅在受控环境操作。网关密钥在管理界面仅显示掩码，复制等显式动作才按需取回全量。
+
+**安全扫描的边界（尽力而为的 DLP）**：内置风险扫描引擎（敏感信息、路径、Unicode 隐写等规则）是启发式检测，按策略支持只审计 / 警告 / 脱敏 / 阻断，定位为「尽力而为的数据泄露防护」，不构成完整的内容安全方案。响应侧扫描覆盖非流式、流式与原生 Anthropic 路径，为尽力而为语义——扫描异常不阻断响应转发；扫描预算超限按 fail-closed 拒绝请求。
+
+**CORS 作用域**：宽松 CORS（`Access-Control-Allow-Origin: *`）**仅**作用于数据面网关路由（API Key 鉴权的 `/v1/*`——跨域调用是网关的设计用法）。管理面、KB/Wiki REST 与 MCP 端点不附带宽松 CORS，浏览器跨域不可读取其响应；管理面另带 CSRF 防护（变更类请求要求 `X-Requested-With` 头）。
+
+**公网部署建议**：Docker 默认仅绑定 `127.0.0.1`；确需公网暴露时，由 Caddy/Nginx 终止 TLS 后反代，注入强 `WALIAPI_ADMIN_TOKEN` / `WALIAPI_MCP_TOKEN`，不要移除认证头；SQLite 不支持多实例写同一数据目录，保持单实例。
+
+**视觉能力路由（长期方案，#15）**：当前版本对「请求含图片块而上游渠道以 400 拒绝」的场景，在错误信息中追加**诊断提示**（该渠道疑似不支持图片），不改变路由行为（fail-open）。基于渠道能力标记（`supports_vision`）的故障转移跳过是长期方案，见 `docs/reliability-fixes-prd.md`。
 
 ---
 
