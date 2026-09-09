@@ -905,6 +905,31 @@ mod rrf_tests {
         );
     }
 
+    /// rag_query 的实际取值表达式（settings → FusionMode）：weighted 可切回、
+    /// 未配置走默认。锁定设置存储到融合模式的接线契约。
+    #[test]
+    fn fusion_mode_settings_expression_matches_rag_query() {
+        let dir =
+            std::env::temp_dir().join(format!("waliapi-fusion-mode-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::settings_store::SettingsStore::file(dir.join("settings.json"));
+
+        // 未配置 → 默认 rrf
+        let mode = FusionMode::parse(&store.get_str("kb.fusion_mode", "rrf"));
+        assert_eq!(mode, FusionMode::Rrf);
+
+        // 配置 weighted → 可切回
+        store
+            .set_many(&[("kb.fusion_mode".to_string(), serde_json::json!("weighted"))])
+            .unwrap();
+        let mode = FusionMode::parse(&store.get_str("kb.fusion_mode", "rrf"));
+        assert_eq!(
+            mode,
+            FusionMode::Weighted,
+            "设置项 weighted 必须切回线性加权"
+        );
+    }
+
     /// 量纲悬殊两路：向量分数接近 1、关键词分数微小（FTS5 bm25 常态）。
     /// 线性加权下向量路一家独大；RRF 只看排名，两路一致认可的候选（两路都排前）
     /// 应排到第一。
