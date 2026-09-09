@@ -560,6 +560,7 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
                 commands::auth::auth_login_start_with(
                     arg(&args, "provider")?,
                     arg(&args, "replaceAccountId")?,
+                    arg(&args, "loginMethod")?,
                     app,
                     state.inner(),
                 )

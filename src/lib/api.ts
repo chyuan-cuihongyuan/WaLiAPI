@@ -15,7 +15,7 @@ import type {
   UpstreamModelsResult,
   AuthAccount, AuthLoginSessionStatus, AuthLoginStart, AuthMutationResult, AuthLogoutResult, AuthExportResult,
   AuthQuotaStatus, AuthUpdateInput,
-  AuthProviderInfo,
+  AuthProviderInfo, AuthLoginMethod,
   PromptTemplate,
 } from "../types";
 
@@ -120,10 +120,11 @@ export const authApi = {
    * for them before any network request.
    */
   login: (provider: string) => invoke<AuthMutationResult>("auth_login", { provider }),
-  loginStart: (provider: string, replaceAccountId?: string) =>
+  loginStart: (provider: string, replaceAccountId?: string, loginMethod?: AuthLoginMethod) =>
     invoke<AuthLoginStart>("auth_login_start", {
       provider,
       replaceAccountId: replaceAccountId ?? null,
+      loginMethod: loginMethod ?? null,
     }),
   loginStatus: (sessionId: string) => invoke<AuthLoginSessionStatus>("auth_login_status", { sessionId }),
   loginCancel: (sessionId: string) => invoke<AuthLoginSessionStatus>("auth_login_cancel", { sessionId }),

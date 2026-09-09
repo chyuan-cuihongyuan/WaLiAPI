@@ -228,6 +228,7 @@ pub enum LoginTarget {
 /// with only the fields a provider legitimately needs.
 #[derive(Clone, Debug)]
 pub struct ProviderLoginContext {
+    pub login_method: crate::auth_provider::AuthLoginMode,
     pub replacement: Option<ReplacementContext>,
 }
 

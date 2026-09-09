@@ -168,10 +168,13 @@ impl Provider for CodexProvider {
 
     async fn login(
         &self,
-        _context: &ProviderLoginContext,
+        context: &ProviderLoginContext,
         runtime: &dyn LoginRuntime,
     ) -> Result<LoginResult, ProviderError> {
-        self.login.login(runtime).await
+        match context.login_method {
+            super::AuthLoginMode::BrowserCallback => self.login.login(runtime).await,
+            super::AuthLoginMode::DeviceCode => self.login.login_device_code(runtime).await,
+        }
     }
 
     async fn import(&self, bytes: &[u8]) -> Result<LoginResult, ProviderError> {
