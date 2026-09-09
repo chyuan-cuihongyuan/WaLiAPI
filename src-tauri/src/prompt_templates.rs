@@ -354,6 +354,54 @@ mod tests {
                 .as_deref(),
             Some(def_for(KEY_RAG_SYSTEM).unwrap().builtin)
         );
+        // 事务保证：同 key 激活行恒唯一（其余版本全部置 inactive）
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM prompt_templates WHERE template_key = ? AND active = 1",
+        )
+        .bind(KEY_RAG_SYSTEM)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active_count, 1, "同 key 激活行必须唯一");
+    }
+
+    /// 管理页列表：按 key 分组升序、组内版本降序，字段往返完整。
+    #[tokio::test]
+    async fn list_templates_orders_and_roundtrips() {
+        let pool = memory_db().await;
+        seed_if_empty(&pool).await.unwrap();
+        let v2 = create_version(&pool, KEY_RAG_SYSTEM, "v2 内容")
+            .await
+            .unwrap();
+        let rows = list_templates(&pool).await.unwrap();
+
+        // key 升序：rag_system 在 deep_research_* 之后、query_rewrite 之前（若存在）
+        let mut keys: Vec<&str> = rows.iter().map(|r| r.template_key.as_str()).collect();
+        keys.dedup();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "列表应按 key 升序");
+
+        // 同 key 组内版本降序
+        let rag_versions: Vec<i64> = rows
+            .iter()
+            .filter(|r| r.template_key == KEY_RAG_SYSTEM)
+            .map(|r| r.version)
+            .collect();
+        assert_eq!(rag_versions, vec![v2, 1], "组内版本降序");
+
+        // 激活标记与内容往返
+        let active_row = rows
+            .iter()
+            .find(|r| r.template_key == KEY_RAG_SYSTEM && r.version == 1)
+            .unwrap();
+        assert!(active_row.active);
+        assert_eq!(active_row.content, def_for(KEY_RAG_SYSTEM).unwrap().builtin);
+        let inactive_row = rows
+            .iter()
+            .find(|r| r.template_key == KEY_RAG_SYSTEM && r.version == v2)
+            .unwrap();
+        assert!(!inactive_row.active);
     }
 
     #[tokio::test]
