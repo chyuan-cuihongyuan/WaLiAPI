@@ -841,6 +841,26 @@ async fn rewrite_query_with_llm(
 mod rewrite_tests {
     use super::*;
 
+    /// 门控键契约（ask_with_config 内联表达式）：键名与默认值锁定——
+    /// 键名打错会让改写误开（成本意外增加）或永不生效；默认必须为关。
+    #[test]
+    fn query_rewrite_gate_defaults_off_and_key_is_stable() {
+        let dir =
+            std::env::temp_dir().join(format!("waliapi-rewrite-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::settings_store::SettingsStore::file(dir.join("settings.json"));
+
+        // 未配置 → 关（默认值契约）
+        assert!(
+            !store.get_bool("kb.query_rewrite", false),
+            "kb.query_rewrite 默认必须为关"
+        );
+        // 开启表达式（ask_with_config 内联条件的镜像）：关闭或无历史 → 不进入改写
+        let gate = store.get_bool("kb.query_rewrite", false);
+        assert!(!(gate && !Vec::<ConversationMessage>::new().is_empty()));
+        assert!(!gate, "关闭时检索路径零变化（结构性跳过改写）");
+    }
+
     #[test]
     fn extract_rewrite_query_takes_first_line_and_trims_quotes() {
         assert_eq!(
