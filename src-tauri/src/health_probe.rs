@@ -302,4 +302,90 @@ mod tests {
         let dashboard = repo.get_dashboard_stats().await.unwrap();
         assert_eq!(dashboard.total_requests, 1, "仪表盘请求数排除探测行");
     }
+
+    /// 被动反哺：探测失败的渠道经一次 mark_probe_ok 立即恢复排序位
+    /// （验收标准「一次真实请求成功 → 恢复正常排序」）。
+    #[tokio::test]
+    async fn mark_probe_ok_recovers_ordering_after_real_success() {
+        let pool = memory_db().await;
+        let repo = Repository::new(pool.clone());
+        for (id, priority) in [("sink", 9), ("healthy", 1)] {
+            sqlx::query(
+                "INSERT INTO channels (id, name, type, base_url, api_key, models, status, priority, \
+                 weight, config, model_mapping, timeout_secs, identity_revision, created_at, updated_at) \
+                 VALUES (?, ?, 'openai', 'http://127.0.0.1:1', 'sk-x', '[]', 1, ?, 1, '{}', '{}', 60, 0, ?, ?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(priority)
+            .bind(crate::db::models::now_iso())
+            .bind(crate::db::models::now_iso())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE channels SET last_probe_ok = 0 WHERE id = 'sink'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 反哺前：sink 沉底
+        let ids: Vec<String> = repo
+            .get_enabled_channels()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, vec!["healthy", "sink"]);
+
+        // 真实请求成功路径调用的反哺 → 立即恢复高优先级位
+        repo.mark_probe_ok("sink").await;
+        let ids: Vec<String> = repo
+            .get_enabled_channels()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, vec!["sink", "healthy"], "被动反哺后应恢复优先级排序");
+    }
+
+    /// 两轨覆盖：driver 轨入口的 get_enabled_channels_for_mode 同样吃沉底排序键
+    /// （且与 mode_health 冷却并存时，冷却剔除优先、健康排序作用于剩余候选）。
+    #[tokio::test]
+    async fn mode_query_also_sinks_unhealthy_candidates() {
+        let pool = memory_db().await;
+        let repo = Repository::new(pool.clone());
+        for (id, priority, probe_ok) in [("hot", 9, 0), ("mid", 5, 1), ("low", 1, 1)] {
+            sqlx::query(
+                "INSERT INTO channels (id, name, type, base_url, api_key, models, status, priority, \
+                 weight, config, model_mapping, timeout_secs, identity_revision, created_at, updated_at, \
+                 last_probe_ok) \
+                 VALUES (?, ?, 'openai', 'http://127.0.0.1:1', 'sk-x', '[]', 1, ?, 1, '{}', '{}', 60, 0, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(priority)
+            .bind(crate::db::models::now_iso())
+            .bind(crate::db::models::now_iso())
+            .bind(probe_ok)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let ids: Vec<String> = repo
+            .get_enabled_channels_for_mode("chat_completions", false, &crate::db::models::now_iso())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["mid", "low", "hot"],
+            "for_mode 查询同样沉底探测失败渠道（两轨一致的排序语义）"
+        );
+    }
 }
