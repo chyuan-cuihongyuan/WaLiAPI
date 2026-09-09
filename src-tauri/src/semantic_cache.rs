@@ -283,6 +283,22 @@ pub async fn store(
     }
 }
 
+/// 清空缓存：model 为 Some(非空) 时按模型清，否则清全部。返回删除行数。
+/// 管理命令（clear_semantic_cache）的实体，独立成函数便于测试。
+pub async fn clear(pool: &SqlitePool, model: Option<&str>) -> Result<u64, sqlx::Error> {
+    match model {
+        Some(m) if !m.is_empty() => sqlx::query("DELETE FROM semantic_cache WHERE model = ?")
+            .bind(m)
+            .execute(pool)
+            .await
+            .map(|r| r.rows_affected()),
+        _ => sqlx::query("DELETE FROM semantic_cache")
+            .execute(pool)
+            .await
+            .map(|r| r.rows_affected()),
+    }
+}
+
 /// 从缓存答案合成非流式 chat completion 响应体。
 pub fn replay_body(model: &str, answer: &str) -> serde_json::Value {
     serde_json::json!({
@@ -575,5 +591,39 @@ mod tests {
             sse.trim_end().ends_with("data: [DONE]"),
             "流式回放必须以 [DONE] 收尾"
         );
+    }
+
+    /// 清空语义（管理命令实体）：按模型清与全清，返回删除行数。
+    #[tokio::test]
+    async fn clear_by_model_and_all() {
+        let pool = memory_db().await;
+        for (key, model) in [("sc_a_1", "m1"), ("sc_b_1", "m1"), ("sc_c_1", "m2")] {
+            sqlx::query(
+                "INSERT INTO semantic_cache (id, cache_key, model, embedding, answer, ttl_expire_at, created_at) \
+                 VALUES (?, ?, ?, NULL, ?, '2999-01-01T00:00:00+00:00', ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(key)
+            .bind(model)
+            .bind("ans")
+            .bind(crate::db::models::now_iso())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // 按模型清 m1 → 删 2 行，剩 m2
+        assert_eq!(clear(&pool, Some("m1")).await.unwrap(), 2);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM semantic_cache WHERE model = 'm2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 1);
+
+        // 空字符串等价全部清
+        assert_eq!(clear(&pool, Some("")).await.unwrap(), 1);
+        // None 全清（空表返回 0）
+        assert_eq!(clear(&pool, None).await.unwrap(), 0);
     }
 }

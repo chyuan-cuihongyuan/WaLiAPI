@@ -421,17 +421,7 @@ pub async fn clear_semantic_cache(
     model: Option<String>,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> Result<u64, String> {
-    let pool = &state.db.pool;
-    let result = match model.as_deref() {
-        Some(m) if !m.is_empty() => sqlx::query("DELETE FROM semantic_cache WHERE model = ?")
-            .bind(m)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?,
-        _ => sqlx::query("DELETE FROM semantic_cache")
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?,
-    };
-    Ok(result.rows_affected())
+    crate::semantic_cache::clear(&state.db.pool, model.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
