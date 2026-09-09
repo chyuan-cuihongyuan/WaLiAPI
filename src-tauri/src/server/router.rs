@@ -326,6 +326,110 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
+    // ─── C-02：语义缓存端到端（命中短路 + X-Cache 头 + 记账）────────────────
+
+    async fn seed_cache_state(state: &Arc<AppState>, key: &str) {
+        sqlx::query(
+            "INSERT INTO api_keys (id, name, key, created_at, updated_at) \
+             VALUES ('ck-1', 'cache-test', ?, ?, ?)",
+        )
+        .bind(key)
+        .bind("2026-09-09T00:00:00+00:00")
+        .bind("2026-09-09T00:00:00+00:00")
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+        state
+            .settings
+            .set_many(&[(
+                "cache.semantic_enabled".to_string(),
+                serde_json::json!(true),
+            )])
+            .unwrap();
+    }
+
+    fn cache_chat_request(key: &str, content: &str) -> Request<Body> {
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.0
+        });
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn semantic_cache_hit_short_circuits_upstream_with_hit_header() {
+        let state = test_state().await;
+        seed_cache_state(&state, "sk-cache-1").await;
+
+        // 种入缓存条目（测试库无任何渠道——若拦截失效请求会 503 No channels）
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "  相同   问题 "}],
+            "temperature": 0.0
+        });
+        crate::semantic_cache::store(&state.db.pool, &state.settings, &body, "缓存的答案").await;
+
+        let shared = test_shared(&state, Some(ADMIN_TOKEN), Some(MCP_TOKEN));
+        let app = build_router(state.clone(), shared);
+
+        // 规范化等价请求（空白差异）→ exact 命中
+        let res = app
+            .oneshot(cache_chat_request("sk-cache-1", "相同 问题"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get("x-cache").and_then(|v| v.to_str().ok()),
+            Some("hit"),
+            "命中必须带 X-Cache: hit"
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["choices"][0]["message"]["content"], "缓存的答案");
+
+        // 命中照常记账
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM request_logs WHERE mode = 'chat' AND upstream_type = 'cache'",
+        )
+        .fetch_one(&state.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(logged, 1, "命中请求应写 upstream_type=cache 的日志行");
+    }
+
+    #[tokio::test]
+    async fn semantic_cache_disabled_or_uncacheable_passes_through() {
+        let state = test_state().await;
+        seed_cache_state(&state, "sk-cache-2").await;
+        // 关闭开关
+        state
+            .settings
+            .set_many(&[(
+                "cache.semantic_enabled".to_string(),
+                serde_json::json!(false),
+            )])
+            .unwrap();
+        let shared = test_shared(&state, Some(ADMIN_TOKEN), Some(MCP_TOKEN));
+        let app = build_router(state, shared);
+
+        // 关闭时：无渠道可用 → 503（证明未走缓存拦截短路）
+        let res = app
+            .oneshot(cache_chat_request("sk-cache-2", "任意问题"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(res.headers().get("x-cache").is_none());
+    }
+
     #[tokio::test]
     async fn cors_only_covers_data_plane_not_service_routes() {
         let state = test_state().await;

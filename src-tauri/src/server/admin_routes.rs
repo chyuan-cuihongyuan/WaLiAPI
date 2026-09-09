@@ -603,6 +603,9 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
             to_json(commands::stats::get_token_trend(arg(&args, "hours")?, state).await)
         }
         "get_settings" => to_json(commands::settings::get_settings(state).await),
+        "clear_semantic_cache" => {
+            to_json(commands::settings::clear_semantic_cache(arg(&args, "model")?, state).await)
+        }
         "save_settings" => {
             to_json(commands::settings::save_settings(arg(&args, "settings")?, state).await)
         }

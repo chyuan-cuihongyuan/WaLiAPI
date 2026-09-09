@@ -12,6 +12,7 @@ mod protocol;
 #[cfg(test)]
 mod rollout_integration_tests;
 pub mod security;
+pub mod semantic_cache;
 pub mod server;
 pub mod services;
 pub mod settings_store;
@@ -242,6 +243,11 @@ pub fn run() {
                     state.settings.clone(),
                 ));
 
+                // 语义缓存过期清理（C-02；缓存未启用时清理为空操作）
+                tauri::async_runtime::spawn(crate::semantic_cache::run_maintenance_loop(
+                    state.db.pool.clone(),
+                ));
+
                 tauri::async_runtime::spawn(async move {
                     auth_provider::maintenance::run_maintenance_loop(auth_service).await;
                 });
@@ -317,6 +323,7 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::get_feature_flags,
             commands::settings::save_settings,
+            commands::settings::clear_semantic_cache,
             commands::settings::apply_theme,
             commands::settings::set_auto_start,
             commands::server::get_server_status,

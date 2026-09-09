@@ -120,6 +120,11 @@ pub async fn run(cfg: WebServerConfig) -> Result<(), String> {
         state.settings.clone(),
     ));
 
+    // 语义缓存过期清理（C-02；缓存未启用时清理为空操作）
+    tauri::async_runtime::spawn(crate::semantic_cache::run_maintenance_loop(
+        state.db.pool.clone(),
+    ));
+
     tauri::async_runtime::spawn(crate::auth_provider::maintenance::run_maintenance_loop(
         auth_service,
     ));

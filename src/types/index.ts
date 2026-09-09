@@ -432,6 +432,11 @@ export interface Settings {
   ocr_dpi: number;
   log_detail_level: "basic" | "detailed" | string;
   log_retention_days: number;
+  // 语义缓存（C-02，默认关闭）
+  cache_enabled: boolean;
+  cache_ttl_secs: number;
+  cache_threshold_percent: number;
+  cache_embedding_model: string;
 }
 
 // Security rule types

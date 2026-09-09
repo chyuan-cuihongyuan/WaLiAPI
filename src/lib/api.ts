@@ -573,3 +573,8 @@ export const appConfigApi = {
   getContent: (appName: string) => invoke<ConfigContent>("get_app_config_content", { appName }),
   openFolder: (appName: string) => invoke<void>("open_config_folder", { appName }),
 };
+
+// 语义缓存管理命令（C-02）
+export const semanticCacheApi = {
+  clear: (model?: string) => invoke<number>("clear_semantic_cache", { model: model ?? null }),
+};

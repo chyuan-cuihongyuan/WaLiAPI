@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { settingsApi, serverApi, securityApi, ocrApi, type OcrCacheInfo } from "../lib/api";
+import { settingsApi, serverApi, securityApi, ocrApi, semanticCacheApi, type OcrCacheInfo } from "../lib/api";
 import { isWebRuntime } from "../lib/web";
 import { PanelSettingsSection } from "../components/PanelSettingsSection";
 import type { Settings, BuiltinRule, CustomRule } from "../types";
@@ -606,6 +606,61 @@ export function SettingsPage() {
                   <option value={0}>永久保留</option>
                 </select>
                 <p className="mt-1 text-xs text-muted-foreground">过期审计日志会由服务自动清理；删除后数据库文件需单独压缩才会缩小。</p>
+              </div>
+            </div>
+          </div>
+          <div>
+            <h3 className="mb-3 text-sm font-medium text-muted-foreground">语义缓存</h3>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <label className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">
+                <div>
+                  <div className="text-sm font-medium">启用语义缓存</div>
+                  <p className="text-xs text-muted-foreground">相同/同义请求直接返回缓存答案（响应头 X-Cache: hit）。带工具调用、高温采样、安全审计命中的请求永不入缓存。默认关闭。</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.cache_enabled}
+                  onChange={e => setSettings({ ...settings, cache_enabled: e.target.checked })}
+                  className="h-5 w-5"
+                />
+              </label>
+              <div>
+                <label className="mb-2 block text-sm font-medium">嵌入模型（语义层）</label>
+                <input
+                  type="text"
+                  value={settings.cache_embedding_model}
+                  onChange={e => setSettings({ ...settings, cache_embedding_model: e.target.value })}
+                  placeholder="留空 = 仅精确匹配层"
+                  className={inputCls}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">填写渠道中的 Embedding 模型名以启用语义相似命中（阈值默认 0.95，保守）。</p>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">缓存 TTL（秒）</label>
+                <input
+                  type="number"
+                  min={60}
+                  value={settings.cache_ttl_secs}
+                  onChange={e => setSettings({ ...settings, cache_ttl_secs: Number(e.target.value) })}
+                  className={inputCls}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">默认 86400（24 小时），过期自动不命中并由后台清理。</p>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium">手动清空缓存</label>
+                <button
+                  onClick={async () => {
+                    try {
+                      const n = await semanticCacheApi.clear();
+                      window.alert(`已清空 ${n} 条缓存`);
+                    } catch (e) {
+                      window.alert(`清空失败：${e}`);
+                    }
+                  }}
+                  className="rounded-full border border-border px-4 py-2 text-sm font-medium hover:bg-white/5"
+                >
+                  清空全部缓存条目
+                </button>
               </div>
             </div>
           </div>

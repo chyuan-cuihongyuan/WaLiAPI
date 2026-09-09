@@ -560,6 +560,64 @@ pub async fn handle_chat_completions(
         return (StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS, Json(err_body)).into_response();
     }
 
+    // 语义缓存拦截（C-02）：Key 鉴权与安全门之后、路由候选之前。
+    // 默认关闭；带 tools/高温/审计命中的请求直接旁路。命中返回缓存答案
+    //（非流式 JSON / 流式 SSE 回放，响应头 X-Cache: hit），并照常写请求
+    // 日志行（记账口径不变）。
+    let audit_hit_for_cache = audit_result.risk_score > 0 || audit_result.sanitized;
+    if let Some(hit) = crate::semantic_cache::lookup(
+        repo.pool(),
+        &shared.state.settings,
+        &json,
+        audit_hit_for_cache,
+    )
+    .await
+    {
+        let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("");
+        tracing::debug!("[语义缓存] 命中（{} 层）: {model}", hit.layer);
+        let cache_log = sqlx::query(
+            "INSERT INTO request_logs (id, seq, api_key_id, api_key_name, model, mode, status_code, \
+             duration_ms, is_stream, is_retry, created_at, response_choices, risk_level, \
+             security_action, upstream_type, trace_id) \
+             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), ?, ?, ?, 'chat', 200, \
+             0, ?, 0, ?, ?, 'low', 'audit', 'cache', ?)",
+        )
+        .bind(crate::utils::id::new_id())
+        .bind(&key_record.id)
+        .bind(&key_record.name)
+        .bind(model)
+        .bind(i64::from(is_stream))
+        .bind(crate::db::models::now_iso())
+        .bind(
+            serde_json::to_string(&crate::semantic_cache::replay_body(model, &hit.answer))
+                .unwrap_or_default(),
+        )
+        .bind(trace_id.clone())
+        .execute(repo.pool())
+        .await;
+        if let Err(error) = cache_log {
+            tracing::warn!("[语义缓存] 命中日志行写入失败（不影响响应）: {error}");
+        }
+        let mut response = if is_stream {
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                [(header::CACHE_CONTROL, "no-cache")],
+                crate::semantic_cache::replay_sse_frames(model, &hit.answer),
+            )
+                .into_response()
+        } else {
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                axum::Json(crate::semantic_cache::replay_body(model, &hit.answer)),
+            )
+                .into_response()
+        };
+        response
+            .headers_mut()
+            .insert("x-cache", axum::http::HeaderValue::from_static("hit"));
+        return response;
+    }
+
     // T06: when `new_routeplan` is ON, route through the model-first RoutePlan
     // facade first (stream and non-stream both).  `Ok(None)` means the flag is
     // off and the legacy flat path runs unchanged.
@@ -608,11 +666,35 @@ pub async fn handle_chat_completions(
         )
         .await
         {
-            Ok(result) => (
-                StatusCode::from_u16(result.status).unwrap_or(StatusCode::OK),
-                Json(result.body),
-            )
-                .into_response(),
+            Ok(result) => {
+                // 语义缓存写入（C-02，best-effort 旁路）：非流式 2xx 且可缓存判定
+                // 通过时，响应完整落账后异步写缓存——失败仅告警不影响主请求。
+                let cache_status = result.status;
+                if (200..300).contains(&cache_status) {
+                    if let Some(answer) = result
+                        .body
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("message"))
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                    {
+                        let pool = repo.pool().clone();
+                        let settings = shared.state.settings.clone();
+                        let cache_body = json.clone();
+                        tokio::spawn(async move {
+                            crate::semantic_cache::store(&pool, &settings, &cache_body, &answer)
+                                .await;
+                        });
+                    }
+                }
+                (
+                    StatusCode::from_u16(result.status).unwrap_or(StatusCode::OK),
+                    Json(result.body),
+                )
+                    .into_response()
+            }
             Err((code, msg)) => {
                 let err_body = serde_json::json!({
                     "error": { "message": msg, "type": "upstream_error", "code": code }
