@@ -18,6 +18,23 @@ pub enum AuthLoginMode {
     DeviceCode,
 }
 
+impl AuthLoginMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BrowserCallback => "browser_callback",
+            Self::DeviceCode => "device_code",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "browser_callback" => Some(Self::BrowserCallback),
+            "device_code" => Some(Self::DeviceCode),
+            _ => None,
+        }
+    }
+}
+
 /// Immutable capability metadata for one provider.
 ///
 /// The struct intentionally stores only non-secret, renderer-safe values.
@@ -29,6 +46,7 @@ pub struct ProviderSpec {
     pub display_name: &'static str,
     pub icon_key: &'static str,
     pub login_mode: AuthLoginMode,
+    pub login_methods: &'static [AuthLoginMode],
     pub supports_import: bool,
     pub supports_export: bool,
     pub supports_quota: bool,
@@ -39,6 +57,7 @@ const CODEX: ProviderSpec = ProviderSpec {
     display_name: "Codex",
     icon_key: "codex",
     login_mode: AuthLoginMode::BrowserCallback,
+    login_methods: &[AuthLoginMode::BrowserCallback, AuthLoginMode::DeviceCode],
     supports_import: true,
     supports_export: true,
     supports_quota: true,
@@ -49,6 +68,7 @@ const KIMI: ProviderSpec = ProviderSpec {
     display_name: "Kimi Code",
     icon_key: "moonshot",
     login_mode: AuthLoginMode::DeviceCode,
+    login_methods: &[AuthLoginMode::DeviceCode],
     supports_import: false,
     supports_export: false,
     supports_quota: false,
@@ -89,6 +109,10 @@ mod tests {
         assert_eq!(spec.display_name, "Codex");
         assert_eq!(spec.icon_key, "codex");
         assert_eq!(spec.login_mode, AuthLoginMode::BrowserCallback);
+        assert_eq!(
+            spec.login_methods,
+            &[AuthLoginMode::BrowserCallback, AuthLoginMode::DeviceCode]
+        );
         assert!(spec.supports_import);
         assert!(spec.supports_export);
         assert!(spec.supports_quota);
@@ -101,6 +125,7 @@ mod tests {
         assert_eq!(spec.display_name, "Kimi Code");
         assert_eq!(spec.icon_key, "moonshot");
         assert_eq!(spec.login_mode, AuthLoginMode::DeviceCode);
+        assert_eq!(spec.login_methods, &[AuthLoginMode::DeviceCode]);
         assert!(!spec.supports_import);
         assert!(!spec.supports_export);
         assert!(!spec.supports_quota);

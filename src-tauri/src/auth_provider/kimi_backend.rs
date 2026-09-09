@@ -832,7 +832,13 @@ mod tests {
 
         // New login: OAuth mock succeeds, result carries a uuid-shaped id.
         let fresh = provider
-            .login(&ProviderLoginContext { replacement: None }, &runtime)
+            .login(
+                &ProviderLoginContext {
+                    login_method: crate::auth_provider::AuthLoginMode::DeviceCode,
+                    replacement: None,
+                },
+                &runtime,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -845,6 +851,7 @@ mod tests {
 
         // Replacement re-login reuses the persisted device_id.
         let context = ProviderLoginContext {
+            login_method: crate::auth_provider::AuthLoginMode::DeviceCode,
             replacement: Some(super::super::ReplacementContext {
                 local_account_id: "local-1".into(),
                 provider_account_id: DEVICE_ID.into(),
@@ -864,6 +871,7 @@ mod tests {
         let (provider, _state) = mock_provider().await;
         let runtime = TestRuntime::default();
         let context = ProviderLoginContext {
+            login_method: crate::auth_provider::AuthLoginMode::DeviceCode,
             replacement: Some(super::super::ReplacementContext {
                 local_account_id: "local-1".into(),
                 provider_account_id: DEVICE_ID.into(),

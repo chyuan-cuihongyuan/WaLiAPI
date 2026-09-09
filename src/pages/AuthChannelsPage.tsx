@@ -104,6 +104,9 @@ export function AuthChannelsPage() {
     displayName: selectedProvider === "kimi" ? "Kimi Code" : "Codex",
     iconKey: selectedProvider === "kimi" ? "moonshot" : "codex",
     loginMode: selectedProvider === "kimi" ? "device_code" : "browser_callback",
+    loginMethods: selectedProvider === "kimi"
+      ? ["device_code" as const]
+      : ["browser_callback" as const, "device_code" as const],
     supportsImport: selectedProvider !== "kimi",
     supportsExport: selectedProvider !== "kimi",
     supportsQuota: selectedProvider !== "kimi",

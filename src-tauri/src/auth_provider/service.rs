@@ -83,6 +83,22 @@ impl AuthService {
         target: LoginTarget,
         runtime: &dyn LoginRuntime,
     ) -> Result<AuthenticatedLogin, ProviderError> {
+        let login_method = crate::auth_provider::spec::provider_spec(&kind)
+            .map(|spec| spec.login_mode)
+            .ok_or_else(|| ProviderError::UnknownProvider {
+                provider: kind.to_string(),
+            })?;
+        self.authenticate_with_method(kind, target, login_method, runtime)
+            .await
+    }
+
+    pub async fn authenticate_with_method(
+        &self,
+        kind: ProviderKind,
+        target: LoginTarget,
+        login_method: crate::auth_provider::AuthLoginMode,
+        runtime: &dyn LoginRuntime,
+    ) -> Result<AuthenticatedLogin, ProviderError> {
         let provider = self.registry.get(&kind)?;
         let replacement = match &target {
             LoginTarget::New => None,
@@ -100,7 +116,10 @@ impl AuthService {
                 })
             }
         };
-        let context = ProviderLoginContext { replacement };
+        let context = ProviderLoginContext {
+            login_method,
+            replacement,
+        };
         let result = provider.login(&context, runtime).await?;
         Ok(AuthenticatedLogin {
             replacement: context.replacement,

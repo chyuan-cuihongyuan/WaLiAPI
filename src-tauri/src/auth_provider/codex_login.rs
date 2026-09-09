@@ -40,6 +40,11 @@ use super::{LoginResult, ProviderError, ProviderPayload, RefreshedPayload};
 pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 pub const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub const CODEX_DEVICE_USER_CODE_URL: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/usercode";
+pub const CODEX_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+pub const CODEX_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
+pub const CODEX_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 pub const CODEX_IMPORT_NOTICE: &str = "本机 Codex 仍维持原登录态，双方 token 不自动同步。";
 /// Registered loopback redirects used by the official Codex CLI.
 const CODEX_CALLBACK_PORT: u16 = 1455;
@@ -53,6 +58,10 @@ pub struct CodexLogin {
     token_url: String,
     timeout: Duration,
     callback_ports: (u16, u16),
+    device_user_code_url: String,
+    device_token_url: String,
+    device_verification_url: String,
+    client: reqwest::Client,
 }
 
 /// Production browser opener. Commands construct this from their `AppHandle`; tests inject a
@@ -106,6 +115,41 @@ struct CodexTokenFields {
     id_token: Option<String>,
     #[serde(default)]
     account_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceUserCodeResponse {
+    device_auth_id: String,
+    user_code: String,
+    #[serde(default)]
+    interval: Value,
+}
+
+impl DeviceUserCodeResponse {
+    fn interval_seconds(&self) -> u64 {
+        self.interval
+            .as_u64()
+            .or_else(|| self.interval.as_str().and_then(|value| value.parse().ok()))
+            .unwrap_or(5)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceTokenResponse {
+    authorization_code: String,
+    code_verifier: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DevicePollErrorEnvelope {
+    #[serde(default)]
+    error: DevicePollError,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DevicePollError {
+    #[serde(default)]
+    code: String,
 }
 
 impl ExtraTokenFields for CodexTokenFields {}
@@ -174,6 +218,10 @@ impl CodexLogin {
             token_url: CODEX_TOKEN_URL.to_owned(),
             timeout: Duration::from_secs(5 * 60),
             callback_ports: (CODEX_CALLBACK_PORT, CODEX_CALLBACK_FALLBACK_PORT),
+            device_user_code_url: CODEX_DEVICE_USER_CODE_URL.to_owned(),
+            device_token_url: CODEX_DEVICE_TOKEN_URL.to_owned(),
+            device_verification_url: CODEX_DEVICE_VERIFICATION_URL.to_owned(),
+            client: reqwest::Client::new(),
         }
     }
 
@@ -183,7 +231,24 @@ impl CodexLogin {
             token_url: token_url.into(),
             timeout: Duration::from_secs(5 * 60),
             callback_ports: (CODEX_CALLBACK_PORT, CODEX_CALLBACK_FALLBACK_PORT),
+            device_user_code_url: CODEX_DEVICE_USER_CODE_URL.to_owned(),
+            device_token_url: CODEX_DEVICE_TOKEN_URL.to_owned(),
+            device_verification_url: CODEX_DEVICE_VERIFICATION_URL.to_owned(),
+            client: reqwest::Client::new(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_device_endpoints(
+        mut self,
+        user_code_url: impl Into<String>,
+        device_token_url: impl Into<String>,
+        verification_url: impl Into<String>,
+    ) -> Self {
+        self.device_user_code_url = user_code_url.into();
+        self.device_token_url = device_token_url.into();
+        self.device_verification_url = verification_url.into();
+        self
     }
 
     #[cfg(test)]
@@ -231,6 +296,173 @@ impl CodexLogin {
     ) -> Result<LoginResult, ProviderError> {
         let cancel = RuntimeCancel { runtime };
         self.login_flow(runtime, &cancel).await
+    }
+
+    /// OpenAI Codex 无头登录。设备凭据只在 provider 内部流转，UI 仅能看到
+    /// 授权地址、一次性代码和过期时间。
+    pub async fn login_device_code(
+        &self,
+        runtime: &dyn super::LoginRuntime,
+    ) -> Result<LoginResult, ProviderError> {
+        if runtime.is_cancelled() {
+            return Err(ProviderError::LoginCancelled);
+        }
+        runtime.set_step(super::LoginStep::Preparing).await;
+        let device = self.request_device_user_code(runtime).await?;
+        if device.device_auth_id.is_empty() || device.user_code.is_empty() {
+            return Err(ProviderError::DeviceAuthorizationFailed);
+        }
+        let expires_at = (Utc::now() + ChronoDuration::minutes(15)).to_rfc3339();
+        runtime
+            .present_device_authorization(
+                &self.device_verification_url,
+                &device.user_code,
+                Some(expires_at),
+            )
+            .await?;
+        runtime.set_step(super::LoginStep::Authorizing).await;
+        // 自动打开浏览器仅是辅助能力；Docker 用户可在其他设备手动授权。
+        let _ = runtime.open_browser(&self.device_verification_url).await;
+        runtime.set_step(super::LoginStep::Waiting).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
+        let interval = device.interval_seconds().clamp(1, 30);
+        let (code, verifier) = self
+            .poll_device_code(
+                runtime,
+                &device.device_auth_id,
+                &device.user_code,
+                interval,
+                deadline,
+            )
+            .await?;
+        runtime.set_step(super::LoginStep::Exchanging).await;
+        tokio::select! {
+            _ = runtime.cancelled() => Err(ProviderError::LoginCancelled),
+            result = self.exchange_code(
+                CODEX_DEVICE_REDIRECT_URI,
+                code,
+                PkceCodeVerifier::new(verifier),
+            ) => result,
+        }
+    }
+
+    async fn request_device_user_code(
+        &self,
+        runtime: &dyn super::LoginRuntime,
+    ) -> Result<DeviceUserCodeResponse, ProviderError> {
+        for attempt in 0..=3_u32 {
+            let response = tokio::select! {
+                _ = runtime.cancelled() => return Err(ProviderError::LoginCancelled),
+                response = self.client.post(&self.device_user_code_url)
+                    .json(&json!({"client_id": CODEX_CLIENT_ID})).send() => response,
+            };
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    return response
+                        .json()
+                        .await
+                        .map_err(|_| ProviderError::DeviceAuthorizationFailed);
+                }
+                Ok(response)
+                    if matches!(
+                        response.status(),
+                        StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+                    ) =>
+                {
+                    return Err(ProviderError::AuthorizationDenied);
+                }
+                Ok(response) if !response.status().is_server_error() => {
+                    return Err(ProviderError::DeviceAuthorizationFailed);
+                }
+                Ok(_) | Err(_) if attempt < 3 => {
+                    let delay = Duration::from_secs(1_u64 << attempt);
+                    tokio::select! {
+                        _ = runtime.cancelled() => return Err(ProviderError::LoginCancelled),
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
+                Ok(_) | Err(_) => return Err(ProviderError::DeviceAuthorizationFailed),
+            }
+        }
+        Err(ProviderError::DeviceAuthorizationFailed)
+    }
+
+    async fn poll_device_code(
+        &self,
+        runtime: &dyn super::LoginRuntime,
+        device_auth_id: &str,
+        user_code: &str,
+        mut interval: u64,
+        deadline: tokio::time::Instant,
+    ) -> Result<(String, String), ProviderError> {
+        let mut transient_failures = 0_u8;
+        loop {
+            if runtime.is_cancelled() {
+                return Err(ProviderError::LoginCancelled);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ProviderError::LoginTimeout);
+            }
+            let response = tokio::select! {
+                _ = runtime.cancelled() => return Err(ProviderError::LoginCancelled),
+                response = self.client.post(&self.device_token_url).json(&json!({
+                    "device_auth_id": device_auth_id,
+                    "user_code": user_code,
+                })).send() => response,
+            };
+            match response {
+                Ok(response) if response.status() == StatusCode::OK => {
+                    let result: DeviceTokenResponse = response
+                        .json()
+                        .await
+                        .map_err(|_| ProviderError::TokenExchangeFailed)?;
+                    if result.authorization_code.is_empty() || result.code_verifier.is_empty() {
+                        return Err(ProviderError::TokenExchangeFailed);
+                    }
+                    return Ok((result.authorization_code, result.code_verifier));
+                }
+                Ok(response) if response.status() == StatusCode::NOT_FOUND => {
+                    transient_failures = 0;
+                }
+                Ok(response) if response.status() == StatusCode::FORBIDDEN => {
+                    let code = response
+                        .json::<DevicePollErrorEnvelope>()
+                        .await
+                        .ok()
+                        .map(|body| body.error.code)
+                        .unwrap_or_default();
+                    match code.as_str() {
+                        "deviceauth_authorization_pending" => transient_failures = 0,
+                        "deviceauth_authorization_denied" | "access_denied" => {
+                            return Err(ProviderError::AuthorizationDenied);
+                        }
+                        _ => return Err(ProviderError::DeviceAuthorizationFailed),
+                    }
+                }
+                Ok(response) if response.status().is_server_error() => {
+                    transient_failures = transient_failures.saturating_add(1);
+                    if transient_failures > 5 {
+                        return Err(ProviderError::Retryable);
+                    }
+                    interval = (interval.saturating_mul(2)).min(30);
+                }
+                Ok(response) if matches!(response.status(), StatusCode::UNAUTHORIZED) => {
+                    return Err(ProviderError::AuthorizationDenied);
+                }
+                Ok(_) => return Err(ProviderError::DeviceAuthorizationFailed),
+                Err(_) => {
+                    transient_failures = transient_failures.saturating_add(1);
+                    if transient_failures > 5 {
+                        return Err(ProviderError::Retryable);
+                    }
+                    interval = (interval.saturating_mul(2)).min(30);
+                }
+            }
+            tokio::select! {
+                _ = runtime.cancelled() => return Err(ProviderError::LoginCancelled),
+                _ = tokio::time::sleep(Duration::from_secs(interval)) => {}
+            }
+        }
     }
 
     /// The command layer owns the cancellation sender, while this method owns
@@ -1136,6 +1368,140 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}/token"), hits, server)
+    }
+
+    #[derive(Clone)]
+    struct DeviceMockState {
+        polls: Arc<AtomicUsize>,
+    }
+
+    async fn device_user_code(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+        assert_eq!(body, json!({"client_id": CODEX_CLIENT_ID}));
+        axum::Json(json!({
+            "device_auth_id": "private-device-auth-id",
+            "user_code": "ABCD-EFGH",
+            "interval": "1"
+        }))
+    }
+
+    async fn device_poll(
+        State(state): State<DeviceMockState>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> impl IntoResponse {
+        assert_eq!(body["device_auth_id"], "private-device-auth-id");
+        assert_eq!(body["user_code"], "ABCD-EFGH");
+        if state.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({
+                    "error": {"code": "deviceauth_authorization_pending"}
+                })),
+            )
+                .into_response();
+        }
+        (
+            StatusCode::OK,
+            axum::Json(json!({
+                "authorization_code": "device-authorization-code",
+                "code_verifier": "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+            })),
+        )
+            .into_response()
+    }
+
+    async fn device_exchange(Form(form): Form<HashMap<String, String>>) -> axum::Json<Value> {
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(
+            form.get("code").map(String::as_str),
+            Some("device-authorization-code")
+        );
+        assert_eq!(
+            form.get("redirect_uri").map(String::as_str),
+            Some(CODEX_DEVICE_REDIRECT_URI)
+        );
+        assert_eq!(
+            form.get("client_id").map(String::as_str),
+            Some(CODEX_CLIENT_ID)
+        );
+        assert_eq!(
+            form.get("code_verifier").map(String::as_str),
+            Some("vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv")
+        );
+        axum::Json(json!({
+            "access_token": jwt(json!({"exp": 4_102_444_800_i64})),
+            "refresh_token": REFRESH,
+            "id_token": jwt(json!({"email": "device@example.test", "plan_type": "plus"})),
+            "account_id": "account-device",
+            "token_type": "Bearer"
+        }))
+    }
+
+    #[derive(Default)]
+    struct DeviceRuntime {
+        verification: std::sync::Mutex<Option<(String, String, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::LoginRuntime for DeviceRuntime {
+        async fn open_browser(&self, _: &str) -> Result<(), ProviderError> {
+            Err(ProviderError::BrowserOpenFailed)
+        }
+        async fn set_step(&self, _: super::super::LoginStep) {}
+        async fn present_device_authorization(
+            &self,
+            url: &str,
+            code: &str,
+            expires_at: Option<String>,
+        ) -> Result<(), ProviderError> {
+            *self.verification.lock().unwrap() =
+                Some((url.to_owned(), code.to_owned(), expires_at));
+            Ok(())
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        async fn cancelled(&self) {
+            std::future::pending::<()>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn device_code_pending_then_exchanges_with_official_redirect() {
+        let state = DeviceMockState {
+            polls: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/usercode", post(device_user_code))
+            .route("/device-token", post(device_poll))
+            .route("/oauth-token", post(device_exchange))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = format!("http://{addr}");
+        let login = CodexLogin::with_endpoints("http://unused.test", format!("{base}/oauth-token"))
+            .with_device_endpoints(
+                format!("{base}/usercode"),
+                format!("{base}/device-token"),
+                "https://verify.example.test",
+            );
+        let runtime = DeviceRuntime::default();
+        let result = login.login_device_code(&runtime).await.unwrap();
+        assert_eq!(result.account_id, "account-device");
+        assert_eq!(result.label, "device@example.test");
+        assert_eq!(state.polls.load(Ordering::SeqCst), 2);
+        let verification = runtime.verification.lock().unwrap().clone().unwrap();
+        assert_eq!(verification.0, "https://verify.example.test");
+        assert_eq!(verification.1, "ABCD-EFGH");
+        assert!(verification.2.is_some());
+        let serialized = serde_json::to_string(result.payload.as_value()).unwrap();
+        assert!(!serialized.contains("private-device-auth-id"));
+        assert!(!serialized.contains("device-authorization-code"));
+        assert!(!serialized.contains("code_verifier"));
+        server.abort();
     }
 
     struct CallbackRuntime;

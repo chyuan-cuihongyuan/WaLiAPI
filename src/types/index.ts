@@ -273,12 +273,14 @@ export interface AuthLoginStart {
 }
 
 export type AuthProviderId = "codex" | "kimi" | (string & {});
+export type AuthLoginMethod = "browser_callback" | "device_code";
 
 export interface AuthProviderInfo {
   id: AuthProviderId;
   displayName: string;
   iconKey: string;
   loginMode: "browser_callback" | "device_code" | (string & {});
+  loginMethods: AuthLoginMethod[];
   supportsImport: boolean;
   supportsExport: boolean;
   supportsQuota: boolean;

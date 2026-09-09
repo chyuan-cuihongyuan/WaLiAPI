@@ -405,6 +405,7 @@ fn login_error_code(error: &ProviderError) -> &'static str {
         ProviderError::LoginTimeout => "timeout",
         ProviderError::BrowserOpenFailed => "browser_open",
         ProviderError::CallbackFailed => "callback_state",
+        ProviderError::DeviceAuthorizationFailed => "device_authorization",
         ProviderError::TokenExchangeFailed => "token_exchange",
         ProviderError::AuthorizationDenied => "authorization_denied",
         _ => "login_failed",
@@ -417,6 +418,7 @@ fn login_error_message(error: &ProviderError) -> &'static str {
         "timeout" => "等待浏览器授权超时，请重新开始登录。",
         "browser_open" => "无法打开浏览器授权页，请检查默认浏览器后重试。",
         "callback_state" => "授权回调无效或被拒绝，请重新开始登录。",
+        "device_authorization" => "Device Code 不可用，请检查 ChatGPT 个人安全设置或 Workspace 管理员权限；也可导入 auth.json。",
         "token_exchange" => "授权完成，但令牌交换失败，请重新开始登录。",
         "authorization_denied" => "授权被拒绝，请重新开始登录。",
         _ => "登录未完成，请检查浏览器授权后重试。",
@@ -517,6 +519,7 @@ async fn run_provider_login_session(
     session_id: String,
     provider: ProviderKind,
     target: crate::auth_provider::LoginTarget,
+    login_method: crate::auth_provider::AuthLoginMode,
     cancellation: watch::Receiver<bool>,
     app: Option<tauri::AppHandle>,
     service: Arc<crate::auth_provider::service::AuthService>,
@@ -532,7 +535,10 @@ async fn run_provider_login_session(
         session_id: session_id.clone(),
         cancellation,
     };
-    let result = match service.authenticate(provider, target, &runtime).await {
+    let result = match service
+        .authenticate_with_method(provider, target, login_method, &runtime)
+        .await
+    {
         Ok(authenticated) => {
             // The commit gate: a cancel that races persistence (or that happened
             // before the OAuth finished) makes begin_save return false and the
@@ -686,6 +692,7 @@ pub struct AuthProviderDto {
     pub display_name: String,
     pub icon_key: String,
     pub login_mode: String,
+    pub login_methods: Vec<String>,
     pub supports_import: bool,
     pub supports_export: bool,
     pub supports_quota: bool,
@@ -700,11 +707,12 @@ pub async fn auth_providers_list() -> Result<Vec<AuthProviderDto>, String> {
             id: spec.kind.to_owned(),
             display_name: spec.display_name.to_owned(),
             icon_key: spec.icon_key.to_owned(),
-            login_mode: match spec.login_mode {
-                crate::auth_provider::AuthLoginMode::BrowserCallback => "browser_callback",
-                crate::auth_provider::AuthLoginMode::DeviceCode => "device_code",
-            }
-            .to_owned(),
+            login_mode: spec.login_mode.as_str().to_owned(),
+            login_methods: spec
+                .login_methods
+                .iter()
+                .map(|method| method.as_str().to_owned())
+                .collect(),
             supports_import: spec.supports_import,
             supports_export: spec.supports_export,
             supports_quota: spec.supports_quota,
@@ -716,9 +724,25 @@ pub async fn auth_providers_list() -> Result<Vec<AuthProviderDto>, String> {
 /// listener + system browser); device-code providers also work headless
 /// because the verification URL + user code travel through the polled
 /// session status instead.
-fn login_requires_desktop_shell(kind: &ProviderKind) -> bool {
-    crate::auth_provider::spec::provider_spec(kind)
-        .is_some_and(|spec| spec.login_mode == crate::auth_provider::AuthLoginMode::BrowserCallback)
+fn login_requires_desktop_shell(login_method: crate::auth_provider::AuthLoginMode) -> bool {
+    login_method == crate::auth_provider::AuthLoginMode::BrowserCallback
+}
+
+fn resolve_login_method(
+    kind: &ProviderKind,
+    requested: Option<&str>,
+) -> Result<crate::auth_provider::AuthLoginMode, String> {
+    let spec = crate::auth_provider::spec::provider_spec(kind)
+        .ok_or_else(|| "Unsupported auth provider".to_owned())?;
+    let method = match requested {
+        Some(value) => crate::auth_provider::AuthLoginMode::parse(value)
+            .ok_or_else(|| "不支持的登录方式".to_owned())?,
+        None => spec.login_mode,
+    };
+    if !spec.login_methods.contains(&method) {
+        return Err("当前服务商不支持所选登录方式".to_owned());
+    }
+    Ok(method)
 }
 
 /// Shared core behind the `auth_login_start` command and the headless admin
@@ -727,12 +751,17 @@ fn login_requires_desktop_shell(kind: &ProviderKind) -> bool {
 pub(crate) async fn auth_login_start_with(
     provider: String,
     replace_account_id: Option<String>,
+    login_method: Option<String>,
     app: Option<tauri::AppHandle>,
     state: &Arc<AppState>,
 ) -> Result<AuthLoginStart, String> {
     let kind = provider_kind(Some(provider))?;
-    if app.is_none() && login_requires_desktop_shell(&kind) {
-        return Err("OAuth 登录仅桌面版可用，请使用 auth.json 导入".to_string());
+    let login_method = resolve_login_method(&kind, login_method.as_deref())?;
+    if app.is_none() && login_requires_desktop_shell(login_method) {
+        return Err(
+            "浏览器 OAuth（localhost 回调）仅桌面端支持；请使用 Device Code 或导入 auth.json"
+                .to_string(),
+        );
     }
     // Validate the local account id syntactically before spawning so a bad id
     // fails the command (not a background task).  The payload is never touched.
@@ -751,8 +780,17 @@ pub(crate) async fn auth_login_start_with(
     let service = state.auth_service.clone();
     let task_id = session_id.clone();
     tauri::async_runtime::spawn(async move {
-        run_provider_login_session(sessions, task_id, kind, target, cancellation, app, service)
-            .await;
+        run_provider_login_session(
+            sessions,
+            task_id,
+            kind,
+            target,
+            login_method,
+            cancellation,
+            app,
+            service,
+        )
+        .await;
     });
     Ok(AuthLoginStart { session_id })
 }
@@ -761,10 +799,18 @@ pub(crate) async fn auth_login_start_with(
 pub async fn auth_login_start(
     provider: String,
     replace_account_id: Option<String>,
+    login_method: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AuthLoginStart, String> {
-    auth_login_start_with(provider, replace_account_id, Some(app), state.inner()).await
+    auth_login_start_with(
+        provider,
+        replace_account_id,
+        login_method,
+        Some(app),
+        state.inner(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1235,6 +1281,10 @@ mod tests {
         assert_eq!(codex.display_name, "Codex");
         assert_eq!(codex.icon_key, "codex");
         assert_eq!(codex.login_mode, "browser_callback");
+        assert_eq!(
+            codex.login_methods,
+            vec!["browser_callback".to_owned(), "device_code".to_owned()]
+        );
         assert!(codex.supports_import);
         assert!(codex.supports_export);
         assert!(codex.supports_quota);
@@ -1242,6 +1292,7 @@ mod tests {
         assert_eq!(kimi.display_name, "Kimi Code");
         assert_eq!(kimi.icon_key, "moonshot");
         assert_eq!(kimi.login_mode, "device_code");
+        assert_eq!(kimi.login_methods, vec!["device_code".to_owned()]);
         assert!(!kimi.supports_import);
         assert!(!kimi.supports_export);
         assert!(!kimi.supports_quota);
@@ -1266,8 +1317,30 @@ mod tests {
         // Device-code providers (Kimi) must be allowed headless (Docker/web
         // admin panel); browser-callback providers (Codex) still require the
         // desktop shell for the loopback listener + system browser.
-        assert!(!login_requires_desktop_shell(&ProviderKind::Kimi));
-        assert!(login_requires_desktop_shell(&ProviderKind::Codex));
+        assert!(!login_requires_desktop_shell(
+            crate::auth_provider::AuthLoginMode::DeviceCode
+        ));
+        assert!(login_requires_desktop_shell(
+            crate::auth_provider::AuthLoginMode::BrowserCallback
+        ));
+    }
+
+    #[test]
+    fn login_method_defaults_are_backward_compatible_and_capabilities_are_enforced() {
+        assert_eq!(
+            resolve_login_method(&ProviderKind::Codex, None).unwrap(),
+            crate::auth_provider::AuthLoginMode::BrowserCallback
+        );
+        assert_eq!(
+            resolve_login_method(&ProviderKind::Kimi, None).unwrap(),
+            crate::auth_provider::AuthLoginMode::DeviceCode
+        );
+        assert_eq!(
+            resolve_login_method(&ProviderKind::Codex, Some("device_code")).unwrap(),
+            crate::auth_provider::AuthLoginMode::DeviceCode
+        );
+        assert!(resolve_login_method(&ProviderKind::Kimi, Some("browser_callback")).is_err());
+        assert!(resolve_login_method(&ProviderKind::Codex, Some("unknown")).is_err());
     }
 
     #[tokio::test]
