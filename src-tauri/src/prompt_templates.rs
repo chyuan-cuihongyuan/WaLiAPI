@@ -24,6 +24,7 @@ pub const KEY_DEEP_RESEARCH_FINAL_SYSTEM: &str = "deep_research_final_system";
 pub const KEY_DEEP_RESEARCH_ROUND0: &str = "deep_research_round0";
 pub const KEY_DEEP_RESEARCH_ROUND_NEXT: &str = "deep_research_round_next";
 pub const KEY_DEEP_RESEARCH_FINAL: &str = "deep_research_final";
+pub const KEY_QUERY_REWRITE: &str = "query_rewrite";
 
 /// 首批纳入的模板（RAG 问答 + 深度研究系列）。渠道转发类内容是用户请求的
 /// 一部分，不属于系统模板，不纳入。
@@ -96,6 +97,18 @@ pub const TEMPLATE_DEFS: &[TemplateDef] = &[
 {findings}
 
 请综合所有发现，给出完整、准确的回答。标注信息来源。"#,
+    },
+    TemplateDef {
+        key: KEY_QUERY_REWRITE,
+        placeholders: &["history", "query"],
+        builtin: r#"你是检索查询改写器。根据多轮对话历史，把用户的最新问题改写为独立、完整、可脱离上下文理解的检索查询。
+
+对话历史:
+{history}
+
+最新问题: {query}
+
+只输出改写后的检索查询本身，不要输出其他内容。"#,
     },
 ];
 

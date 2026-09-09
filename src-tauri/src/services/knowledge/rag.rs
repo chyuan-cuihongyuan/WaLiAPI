@@ -57,6 +57,16 @@ pub async fn ask_with_config(
     let repo = Repository::new(pool.clone());
     let kb_repo = KbRepository::new(pool.clone());
 
+    // C-06/R2：可选多轮查询改写（kb.query_rewrite，默认关）。
+    // 多轮对话的指代型问题（「上面说的方案呢」）直接送检索必然 miss——
+    // 开启时先用渠道模型把「近几轮对话 + 当前问题」改写成独立完整的检索查询。
+    // 失败/超时静默回退原查询（best-effort），多一次 LLM 调用的成本由开关控制。
+    let query = if settings.get_bool("kb.query_rewrite", false) && !history.is_empty() {
+        rewrite_query_with_llm(pool, settings, kb_id, chat_model, query, history).await
+    } else {
+        query.to_string()
+    };
+
     // 1. Embed the query (needed for vector and hybrid modes)
     let query_emb_opt = if search_mode != "keyword" {
         let embeddings = embedder::embed(&[query.to_string()], embedding_model, &repo)
@@ -82,7 +92,7 @@ pub async fn ask_with_config(
             retriever::hybrid_search_with_details(
                 pool,
                 kb_id,
-                query,
+                &query,
                 &embeddings[0],
                 top_k,
                 vector_weight,
@@ -90,7 +100,7 @@ pub async fn ask_with_config(
             )
             .await?
         } else {
-            let kw = retriever::keyword_only_search(pool, kb_id, query, top_k).await?;
+            let kw = retriever::keyword_only_search(pool, kb_id, &query, top_k).await?;
             kw.into_iter()
                 .map(|r| {
                     let score = r.score;
@@ -147,7 +157,7 @@ pub async fn ask_with_config(
             retriever::hybrid_search_with_details(
                 pool,
                 kb_id,
-                query,
+                &query,
                 query_emb,
                 top_k,
                 vector_weight,
@@ -166,7 +176,7 @@ pub async fn ask_with_config(
         if !kb_id.is_empty() {
             let answer = "RAG 中没有找到相关内容。".to_string();
             kb_repo
-                .add_conversation(kb_id, "user", query, None, Some(chat_model), 0)
+                .add_conversation(kb_id, "user", &query, None, Some(chat_model), 0)
                 .await
                 .ok();
             kb_repo
@@ -192,7 +202,7 @@ pub async fn ask_with_config(
     let context = build_context(&results);
 
     // 4. Build prompt with history
-    let prompt = build_rag_prompt(&context, query, history);
+    let prompt = build_rag_prompt(&context, &query, history);
 
     // 5. Token estimation and fallback
     let estimated_tokens = retriever::estimate_tokens(&prompt);
@@ -201,11 +211,14 @@ pub async fn ask_with_config(
 
     let (final_prompt, context_used) = if estimated_tokens > context_limit {
         // Stage 1: Trim context (remove lowest-scoring chunks)
-        let trimmed = trim_context(&results, query, history, context_limit);
+        let trimmed = trim_context(&results, &query, history, context_limit);
         if retriever::estimate_tokens(&trimmed.0) > context_limit {
             // Stage 2: Remove history, keep only latest message
-            let no_history =
-                build_rag_prompt(&context, query, &history[history.len().saturating_sub(2)..]);
+            let no_history = build_rag_prompt(
+                &context,
+                &query,
+                &history[history.len().saturating_sub(2)..],
+            );
             if retriever::estimate_tokens(&no_history) > context_limit {
                 // Stage 3: Remove context entirely
                 let bare = format!(
@@ -310,7 +323,7 @@ pub async fn ask_with_config(
                 let sources_json = serde_json::to_string(&sources).ok();
                 let tokens = usage.as_ref().map(|u| u.total_tokens as i64).unwrap_or(0);
                 kb_repo
-                    .add_conversation(kb_id, "user", query, None, Some(chat_model), 0)
+                    .add_conversation(kb_id, "user", &query, None, Some(chat_model), 0)
                     .await
                     .ok();
                 kb_repo
@@ -739,5 +752,142 @@ pub async fn deep_research(
             })
         }
         Err((code, msg)) => Err(format!("Final synthesis failed ({}): {}", code, msg)),
+    }
+}
+
+// ─── C-06/R2：多轮查询改写 ─────────────────────────────────────────────────
+
+/// 从改写回复中提取查询（纯函数）：取首个非空行、去引号包裹、截断到 512 字符。
+/// 空回复/全空白 → None（调用侧回退原查询）。
+fn extract_rewrite_query(reply: &str) -> Option<String> {
+    let line = reply.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line.trim_matches(|c| c == '"' || c == '“' || c == '”');
+    if line.is_empty() {
+        return None;
+    }
+    Some(line.chars().take(512).collect())
+}
+
+/// 可选查询改写：近几轮对话 + 当前问题 → 独立完整检索查询。
+/// 走渠道模型（kb-internal 路由组，token 消耗自动落账）；任何失败静默回退原查询。
+async fn rewrite_query_with_llm(
+    pool: &SqlitePool,
+    settings: &SettingsStore,
+    kb_id: &str,
+    chat_model: &str,
+    query: &str,
+    history: &[ConversationMessage],
+) -> String {
+    // 近 6 轮（改写只需消解指代，更早的轮次是噪音）
+    let recent: Vec<String> = history
+        .iter()
+        .rev()
+        .take(6)
+        .rev()
+        .map(|m| format!("{}: {}", m.role, m.content))
+        .collect();
+    let history_text = recent.join("\n");
+    let prompt = prompt_templates::render(
+        &prompt_templates::load(pool, prompt_templates::KEY_QUERY_REWRITE).await,
+        &[("history", &history_text), ("query", query)],
+    );
+    let chat_request = serde_json::json!({
+        "model": chat_model,
+        "messages": [
+            {"role": "system", "content": "你是检索查询改写器，只输出改写后的查询本身。"},
+            {"role": "user", "content": prompt}
+        ],
+        "stream": false,
+        "temperature": 0.0
+    });
+    let chat_request_str: String = serde_json::to_string(&chat_request).unwrap_or_default();
+    let proxy_result = proxy::handle_request(
+        &std::sync::Arc::new(Repository::new(pool.clone())),
+        settings,
+        "kb-rewrite",
+        "RAG-rewrite",
+        chat_request,
+        false,
+        Some(chat_request_str),
+        Some(format!("kb-internal_{}", kb_id)),
+        None,
+    )
+    .await;
+    let reply = match proxy_result {
+        Ok(result) => result
+            .body
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Err(_) => String::new(),
+    };
+    match extract_rewrite_query(&reply) {
+        Some(rewritten) => {
+            tracing::debug!("[RAG] 查询改写: {query:?} -> {rewritten:?}");
+            rewritten
+        }
+        None => {
+            tracing::warn!("[RAG] 查询改写回复不可解析，回退原查询");
+            query.to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::*;
+
+    #[test]
+    fn extract_rewrite_query_takes_first_line_and_trims_quotes() {
+        assert_eq!(
+            extract_rewrite_query("WaLiAPI 网关如何配置渠道配额\n（改写说明）"),
+            Some("WaLiAPI 网关如何配置渠道配额".to_string())
+        );
+        assert_eq!(
+            extract_rewrite_query("  \"带引号的查询\"  "),
+            Some("带引号的查询".to_string())
+        );
+        assert_eq!(
+            extract_rewrite_query("“中文引号”"),
+            Some("中文引号".to_string())
+        );
+        // 空白/空行 → None
+        assert_eq!(extract_rewrite_query(""), None);
+        assert_eq!(extract_rewrite_query(" \n \n"), None);
+        // 超长截断
+        let long = "长".repeat(600);
+        assert_eq!(
+            extract_rewrite_query(&long).map(|q| q.chars().count()),
+            Some(512)
+        );
+    }
+
+    /// 改写关闭（默认）或无历史 → 走原查询（结构性保障：分支条件在 ask_with_config 内联，
+    /// 此处锁定 extract 的回退语义与 rewrite 的失败回退）。
+    #[tokio::test]
+    async fn rewrite_falls_back_to_original_when_no_channels() {
+        // 内存库无任何渠道 → proxy 转发必然失败 → 回退原查询（不 panic、不报错）
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let settings = SettingsStore::file(
+            std::env::temp_dir().join(format!("waliapi-rewrite-test-{}", uuid::Uuid::new_v4())),
+        );
+        let history = vec![
+            ConversationMessage {
+                role: "user".into(),
+                content: "WaLiAPI 的渠道配额怎么配？".into(),
+            },
+            ConversationMessage {
+                role: "assistant".into(),
+                content: "在密钥页设置 quota_limit。".into(),
+            },
+        ];
+        let result =
+            rewrite_query_with_llm(&pool, &settings, "kb-1", "m", "那限流呢？", &history).await;
+        assert_eq!(result, "那限流呢？", "上游不可用时必须静默回退原查询");
     }
 }
