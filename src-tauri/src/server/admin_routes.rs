@@ -506,6 +506,25 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
             to_json(commands::log::get_log_security_findings(arg(&args, "logId")?, state).await)
         }
         "get_log_stats" => to_json(commands::log::get_log_stats(arg(&args, "days")?, state).await),
+        "list_prompt_templates" => {
+            to_json(commands::prompt_template::list_prompt_templates(state).await)
+        }
+        "create_prompt_template" => to_json(
+            commands::prompt_template::create_prompt_template(
+                arg(&args, "templateKey")?,
+                arg(&args, "content")?,
+                state,
+            )
+            .await,
+        ),
+        "activate_prompt_template" => to_json(
+            commands::prompt_template::activate_prompt_template(
+                arg(&args, "templateKey")?,
+                arg(&args, "version")?,
+                state,
+            )
+            .await,
+        ),
         "delete_log" => to_json(commands::log::delete_log(arg(&args, "id")?, state).await),
         "delete_logs_before" => {
             to_json(commands::log::delete_logs_before(arg(&args, "beforeDate")?, state).await)

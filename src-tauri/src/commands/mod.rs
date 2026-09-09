@@ -6,6 +6,7 @@ pub mod import_export;
 pub mod knowledge_base;
 pub mod log;
 pub mod log_repair;
+pub mod prompt_template;
 pub mod security;
 pub mod server;
 pub mod services;

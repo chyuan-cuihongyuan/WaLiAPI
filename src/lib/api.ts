@@ -16,6 +16,7 @@ import type {
   AuthAccount, AuthLoginSessionStatus, AuthLoginStart, AuthMutationResult, AuthLogoutResult, AuthExportResult,
   AuthQuotaStatus, AuthUpdateInput,
   AuthProviderInfo,
+  PromptTemplate,
 } from "../types";
 
 /**
@@ -572,4 +573,11 @@ export const appConfigApi = {
   resetCodexAuth: () => invoke<ApplyResult>("reset_codex_auth"),
   getContent: (appName: string) => invoke<ConfigContent>("get_app_config_content", { appName }),
   openFolder: (appName: string) => invoke<void>("open_config_folder", { appName }),
+};
+
+// Prompt template commands（C-07 模板版本化）
+export const promptTemplateApi = {
+  list: () => invoke<PromptTemplate[]>("list_prompt_templates"),
+  create: (templateKey: string, content: string) => invoke<number>("create_prompt_template", { templateKey, content }),
+  activate: (templateKey: string, version: number) => invoke<void>("activate_prompt_template", { templateKey, version }),
 };

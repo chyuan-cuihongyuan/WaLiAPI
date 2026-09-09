@@ -637,3 +637,13 @@ export interface UpstreamModelsResult {
   /** 拉取时使用的根 URL（便于展示/排障）。 */
   base_url: string;
 }
+
+// Prompt 模板（C-07 版本化管理）
+export interface PromptTemplate {
+  id: string;
+  template_key: string;
+  version: number;
+  content: string;
+  active: boolean;
+  created_at: string;
+}

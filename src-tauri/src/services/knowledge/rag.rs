@@ -4,6 +4,7 @@ use super::repository::KbRepository;
 use super::retriever;
 use crate::core::proxy;
 use crate::db::repository::Repository;
+use crate::prompt_templates;
 use crate::settings_store::SettingsStore;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -229,11 +230,12 @@ pub async fn ask_with_config(
         context_used
     );
 
-    // 6. Call LLM via proxy
+    // 6. Call LLM via proxy（系统提示词走模板表：激活版本优先，回退编译期默认）
+    let rag_system_prompt = prompt_templates::load(pool, prompt_templates::KEY_RAG_SYSTEM).await;
     let chat_request = serde_json::json!({
         "model": chat_model,
         "messages": [
-            {"role": "system", "content": "你是 RAG 助手。基于检索到的内容回答问题。回答要准确、简洁，并标注信息来源。如果没有相关信息，请明确说明。"},
+            {"role": "system", "content": rag_system_prompt},
             {"role": "user", "content": final_prompt}
         ],
         "stream": false
@@ -499,10 +501,12 @@ pub async fn deep_research(
                     .join("\n"),
             );
 
+            let next_query_system =
+                prompt_templates::load(pool, prompt_templates::KEY_RESEARCH_NEXT_QUERY).await;
             let follow_up_request = serde_json::json!({
                 "model": chat_model,
                 "messages": [
-                    {"role": "system", "content": "你是一个研究助手，根据已有发现生成下一步搜索查询。只返回查询本身。"},
+                    {"role": "system", "content": next_query_system},
                     {"role": "user", "content": follow_up_prompt}
                 ],
                 "stream": false
@@ -566,51 +570,28 @@ pub async fn deep_research(
             .join("\n");
 
         let round_prompt = if round == 0 {
-            format!(
-                r#"你是一个深度研究助手。请分析以下 RAG 内容，并给出初步发现。
-
-原始问题: {query}
-
-<knowledge_base>
-{context}
-</knowledge_base>
-
-请完成：
-1. 理解问题的核心需求
-2. 从 RAG 中提取相关信息
-3. 给出初步发现
-4. 如果信息不足，指出还需要哪些方面"#,
-                query = query,
-                context = context,
-            )
+            let template =
+                prompt_templates::load(pool, prompt_templates::KEY_DEEP_RESEARCH_ROUND0).await;
+            prompt_templates::render(&template, &[("query", query), ("context", &context)])
         } else {
-            format!(
-                r#"继续深度研究。
-
-原始问题: {query}
-
-已有发现:
-{findings}
-
-新检索到的内容:
-<knowledge_base>
-{context}
-</knowledge_base>
-
-请完成：
-1. 分析新内容与已有发现的关系
-2. 补充或修正之前的发现
-3. 指出是否需要继续研究"#,
-                query = query,
-                findings = findings_str,
-                context = context,
+            let template =
+                prompt_templates::load(pool, prompt_templates::KEY_DEEP_RESEARCH_ROUND_NEXT).await;
+            prompt_templates::render(
+                &template,
+                &[
+                    ("query", query),
+                    ("findings", &findings_str),
+                    ("context", &context),
+                ],
             )
         };
 
+        let deep_research_system =
+            prompt_templates::load(pool, prompt_templates::KEY_DEEP_RESEARCH_SYSTEM).await;
         let chat_request = serde_json::json!({
             "model": chat_model,
             "messages": [
-                {"role": "system", "content": "你是深度研究助手。基于 RAG 内容进行多轮迭代研究，逐步深入分析。"},
+                {"role": "system", "content": deep_research_system},
                 {"role": "user", "content": round_prompt}
             ],
             "stream": false
@@ -669,23 +650,17 @@ pub async fn deep_research(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let final_prompt = format!(
-        r#"基于多轮深度研究的发现，请综合回答原始问题。
-
-原始问题: {query}
-
-多轮研究发现:
-{findings}
-
-请综合所有发现，给出完整、准确的回答。标注信息来源。"#,
-        query = query,
-        findings = findings_summary,
+    let final_prompt = prompt_templates::render(
+        &prompt_templates::load(pool, prompt_templates::KEY_DEEP_RESEARCH_FINAL).await,
+        &[("query", query), ("findings", &findings_summary)],
     );
 
+    let final_system =
+        prompt_templates::load(pool, prompt_templates::KEY_DEEP_RESEARCH_FINAL_SYSTEM).await;
     let final_request = serde_json::json!({
         "model": chat_model,
         "messages": [
-            {"role": "system", "content": "你是深度研究助手。综合多轮研究发现，给出完整准确的回答。"},
+            {"role": "system", "content": final_system},
             {"role": "user", "content": final_prompt}
         ],
         "stream": false
