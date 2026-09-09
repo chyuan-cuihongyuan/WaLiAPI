@@ -600,6 +600,7 @@ pub async fn hybrid_search(
     top_k: usize,
     vector_weight: f32,
     keyword_weight: f32,
+    fusion_mode: FusionMode,
 ) -> Result<Vec<SearchResult>, String> {
     let scored = hybrid_search_with_details(
         pool,
@@ -609,62 +610,97 @@ pub async fn hybrid_search(
         top_k,
         vector_weight,
         keyword_weight,
+        fusion_mode,
     )
     .await?;
     Ok(scored.into_iter().map(|s| s.result).collect())
 }
 
 /// Hybrid search returning detailed score breakdowns.
-pub async fn hybrid_search_with_details(
-    pool: &SqlitePool,
-    kb_id: &str,
-    query: &str,
-    query_embedding: &[f32],
+/// 混合检索融合模式（C-06/R3）：
+/// - Rrf：倒数排名融合（只用排名，天然消两路量纲差异；默认）
+/// - Weighted：线性加权（历史行为，量纲敏感，保留可配回退）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionMode {
+    Rrf,
+    Weighted,
+}
+
+impl FusionMode {
+    pub fn parse(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("weighted") {
+            Self::Weighted
+        } else {
+            Self::Rrf
+        }
+    }
+}
+
+/// RRF 常数 k：排名 1 的贡献 1/(k+1)——业界惯用 60，
+/// 对 top_k 量级的候选列表区分度稳定。
+const RRF_K: f32 = 60.0;
+
+/// 融合两路检索结果（纯函数）：按 mode 计算综合分并截断 top_k。
+/// RRF 分数 = Σ 1/(k + rank)（rank 从 1 起，只在出现该 id 的路里计）；
+/// Weighted 分数 = v_score·vw + k_score·kw（历史行为原样保留）。
+pub fn fuse_scored(
+    vector_results: &[SearchResult],
+    keyword_results: &[SearchResult],
     top_k: usize,
     vector_weight: f32,
     keyword_weight: f32,
-) -> Result<Vec<ScoredSearchResult>, String> {
-    let (vector_results, keyword_results) = tokio::join!(
-        search(pool, kb_id, query_embedding, top_k * 2),
-        fts5_search(pool, kb_id, query, top_k * 2),
-    );
-
-    let vector_results = vector_results.unwrap_or_default();
-    let keyword_results = keyword_results.unwrap_or_default();
-
-    // Build lookup maps: chunk_id -> (SearchResult, raw_score)
+    mode: FusionMode,
+) -> Vec<ScoredSearchResult> {
     let mut vector_map: std::collections::HashMap<String, (SearchResult, f32)> =
         std::collections::HashMap::new();
-    for r in &vector_results {
+    for r in vector_results {
         vector_map.insert(r.chunk_id.clone(), (r.clone(), r.score));
     }
 
     let mut keyword_map: std::collections::HashMap<String, (SearchResult, f32)> =
         std::collections::HashMap::new();
-    for r in &keyword_results {
+    for r in keyword_results {
         keyword_map.insert(r.chunk_id.clone(), (r.clone(), r.score));
     }
 
-    // Collect all unique chunk IDs
     let mut all_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     all_ids.extend(vector_map.keys().cloned());
     all_ids.extend(keyword_map.keys().cloned());
 
-    // Compute weighted scores
     let mut scored: Vec<(String, f32, Option<f32>, Option<f32>)> = Vec::new();
     for id in &all_ids {
         let v_score = vector_map.get(id).map(|(_, s)| *s);
         let k_score = keyword_map.get(id).map(|(_, s)| *s);
-        let weighted =
-            v_score.unwrap_or(0.0) * vector_weight + k_score.unwrap_or(0.0) * keyword_weight;
-        scored.push((id.clone(), weighted, v_score, k_score));
+        let final_score = match mode {
+            FusionMode::Weighted => {
+                v_score.unwrap_or(0.0) * vector_weight + k_score.unwrap_or(0.0) * keyword_weight
+            }
+            FusionMode::Rrf => {
+                // 排名在各自路内按分数降序确定（输入已排序，这里防御性重算）
+                let v_rank = vector_results
+                    .iter()
+                    .position(|r| &r.chunk_id == id)
+                    .map(|p| p + 1);
+                let k_rank = keyword_results
+                    .iter()
+                    .position(|r| &r.chunk_id == id)
+                    .map(|p| p + 1);
+                let mut score = 0.0;
+                if let Some(rank) = v_rank {
+                    score += 1.0 / (RRF_K + rank as f32);
+                }
+                if let Some(rank) = k_rank {
+                    score += 1.0 / (RRF_K + rank as f32);
+                }
+                score
+            }
+        };
+        scored.push((id.clone(), final_score, v_score, k_score));
     }
 
-    // Sort by weighted score descending
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(top_k);
 
-    // Build final results with score breakdowns
     let mut results = Vec::with_capacity(scored.len());
     for (id, final_score, v_score, k_score) in scored {
         // Prefer vector result (has embedding metadata), fallback to keyword result
@@ -681,8 +717,35 @@ pub async fn hybrid_search_with_details(
             });
         }
     }
+    results
+}
 
-    Ok(results)
+pub async fn hybrid_search_with_details(
+    pool: &SqlitePool,
+    kb_id: &str,
+    query: &str,
+    query_embedding: &[f32],
+    top_k: usize,
+    vector_weight: f32,
+    keyword_weight: f32,
+    fusion_mode: FusionMode,
+) -> Result<Vec<ScoredSearchResult>, String> {
+    let (vector_results, keyword_results) = tokio::join!(
+        search(pool, kb_id, query_embedding, top_k * 2),
+        fts5_search(pool, kb_id, query, top_k * 2),
+    );
+
+    let vector_results = vector_results.unwrap_or_default();
+    let keyword_results = keyword_results.unwrap_or_default();
+
+    Ok(fuse_scored(
+        &vector_results,
+        &keyword_results,
+        top_k,
+        vector_weight,
+        keyword_weight,
+        fusion_mode,
+    ))
 }
 
 /// Keyword-only search using FTS5 (no vector search).
@@ -811,5 +874,90 @@ mod fts_defense_tests {
                 "查询 {query:?} 应无错返回空结果，实际: {result:?}"
             );
         }
+    }
+}
+
+// ─── C-06/R3：融合模式纯函数测试 ────────────────────────────────────────────
+#[cfg(test)]
+mod rrf_tests {
+    use super::*;
+
+    fn result(chunk_id: &str, score: f32) -> SearchResult {
+        SearchResult {
+            chunk_id: chunk_id.to_string(),
+            doc_id: "d".to_string(),
+            filename: "f.md".to_string(),
+            content: String::new(),
+            score,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn fusion_mode_parses_with_rrf_default() {
+        assert_eq!(FusionMode::parse("rrf"), FusionMode::Rrf);
+        assert_eq!(FusionMode::parse("RRF"), FusionMode::Rrf);
+        assert_eq!(FusionMode::parse("weighted"), FusionMode::Weighted);
+        assert_eq!(
+            FusionMode::parse("unknown"),
+            FusionMode::Rrf,
+            "未知值回退默认 RRF"
+        );
+    }
+
+    /// 量纲悬殊两路：向量分数接近 1、关键词分数微小（FTS5 bm25 常态）。
+    /// 线性加权下向量路一家独大；RRF 只看排名，两路一致认可的候选（两路都排前）
+    /// 应排到第一。
+    #[test]
+    fn rrf_beats_weighted_when_scales_are_skewed() {
+        // 两路一致认可 c_both；向量路单独强推 c_vec_only（分数最高）
+        let vector = vec![result("c_vec_only", 0.99), result("c_both", 0.97)];
+        let keyword = vec![result("c_both", 0.0007), result("c_kw_only", 0.0005)];
+
+        let weighted = fuse_scored(&vector, &keyword, 3, 0.7, 0.3, FusionMode::Weighted);
+        assert_eq!(
+            weighted[0].result.chunk_id, "c_vec_only",
+            "加权前置条件：向量量纲碾压"
+        );
+
+        let rrf = fuse_scored(&vector, &keyword, 3, 0.7, 0.3, FusionMode::Rrf);
+        assert_eq!(
+            rrf[0].result.chunk_id, "c_both",
+            "RRF 下两路都靠前的候选应排第一（排名共识优先于单路高分）"
+        );
+    }
+
+    #[test]
+    fn rrf_scores_are_rank_based_and_deterministic() {
+        let vector = vec![result("a", 0.9), result("b", 0.5)];
+        let keyword = vec![result("a", 0.1), result("b", 0.05)];
+        let fused = fuse_scored(&vector, &keyword, 2, 0.7, 0.3, FusionMode::Rrf);
+        // a: 两路 rank1 → 2/(k+1)；b: 两路 rank2 → 2/(k+2)；a > b
+        assert_eq!(fused[0].result.chunk_id, "a");
+        let expected_a = 1.0 / (60.0 + 1.0) + 1.0 / (60.0 + 1.0);
+        assert!((fused[0].result.score - expected_a).abs() < 1e-6);
+        // 分数明细保留两路原始值（可视化/调试用）
+        assert_eq!(fused[0].vector_score, Some(0.9));
+        assert_eq!(fused[0].keyword_score, Some(0.1));
+    }
+
+    #[test]
+    fn weighted_mode_preserves_historical_behavior() {
+        let vector = vec![result("a", 1.0)];
+        let keyword = vec![result("b", 1.0)];
+        let fused = fuse_scored(&vector, &keyword, 2, 0.7, 0.3, FusionMode::Weighted);
+        assert_eq!(fused[0].result.chunk_id, "a");
+        assert!((fused[0].result.score - 0.7).abs() < 1e-6);
+        assert!((fused[1].result.score - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rrf_truncates_to_top_k_and_handles_empty_lists() {
+        let vector: Vec<SearchResult> = vec![result("a", 0.9), result("b", 0.8), result("c", 0.7)];
+        assert_eq!(
+            fuse_scored(&vector, &[], 2, 0.7, 0.3, FusionMode::Rrf).len(),
+            2
+        );
+        assert!(fuse_scored(&[], &[], 5, 0.7, 0.3, FusionMode::Rrf).is_empty());
     }
 }

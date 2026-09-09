@@ -822,6 +822,8 @@ async fn handle_tool_call(
                     top_k,
                     vector_weight,
                     keyword_weight,
+                    // MCP 工具路径用默认融合模式（RRF）；面板路径按 kb.fusion_mode 设置
+                    retriever::FusionMode::Rrf,
                 )
                 .await?;
 

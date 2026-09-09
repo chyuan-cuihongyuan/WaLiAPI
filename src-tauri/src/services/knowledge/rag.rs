@@ -55,6 +55,8 @@ pub async fn ask_with_config(
 ) -> Result<RagAnswer, String> {
     let repo = Repository::new(pool.clone());
     let kb_repo = KbRepository::new(pool.clone());
+    // 融合模式（C-06/R3）：RRF 默认（消量纲），weighted 保留可配回退
+    let fusion_mode = retriever::FusionMode::parse(&settings.get_str("kb.fusion_mode", "rrf"));
 
     // 1. Embed the query (needed for vector and hybrid modes)
     let query_emb_opt = if search_mode != "keyword" {
@@ -86,6 +88,7 @@ pub async fn ask_with_config(
                 top_k,
                 vector_weight,
                 keyword_weight,
+                fusion_mode,
             )
             .await?
         } else {
@@ -151,10 +154,21 @@ pub async fn ask_with_config(
                 top_k,
                 vector_weight,
                 keyword_weight,
+                fusion_mode,
             )
             .await?
         }
     };
+
+    // C-06/R3 第二步：可选 LLM listwise 重排（`kb.rerank_enabled`，默认关）。
+    // 走网关自身的渠道跑渠道（proxy::handle_request，kb-internal 路由组），
+    // 重排调用的 token 消耗自动计入请求日志；失败静默回退原序（best-effort）。
+    let scored_results =
+        if settings.get_bool("kb.rerank_enabled", false) && scored_results.len() > 1 {
+            rerank_with_llm(pool, settings, kb_id, chat_model, query, scored_results).await
+        } else {
+            scored_results
+        };
 
     // Extract plain results for context building
     let results: Vec<super::models::SearchResult> =
@@ -764,5 +778,129 @@ pub async fn deep_research(
             })
         }
         Err((code, msg)) => Err(format!("Final synthesis failed ({}): {}", code, msg)),
+    }
+}
+
+// ─── C-06/R3 第二步：LLM listwise 重排 ─────────────────────────────────────
+
+/// 解析重排回复为候选顺序（纯函数）：
+/// 容忍前后杂文（截取首个 [ 到最后一个 ]）；编号越界/重复丢弃；
+/// 未出现的候选按原序补尾——保证输出恒为原候选的全排列。
+fn parse_rerank_order(reply: &str, len: usize) -> Option<Vec<usize>> {
+    let start = reply.find('[')?;
+    let end = reply.rfind(']')?;
+    if end <= start {
+        return None;
+    }
+    let parsed: Vec<i64> = serde_json::from_str(&reply[start..=end]).ok()?;
+    let mut order: Vec<usize> = Vec::with_capacity(len);
+    for index in parsed {
+        let index = index as usize;
+        if index < len && !order.contains(&index) {
+            order.push(index);
+        }
+    }
+    for i in 0..len {
+        if !order.contains(&i) {
+            order.push(i);
+        }
+    }
+    Some(order)
+}
+
+/// 可选 LLM 重排：把 top 候选拼给渠道模型打分重排（用渠道跑渠道）。
+/// 失败/关闭不影响主流程——原序返回，仅 tracing 告警。
+async fn rerank_with_llm(
+    pool: &SqlitePool,
+    settings: &crate::settings_store::SettingsStore,
+    kb_id: &str,
+    chat_model: &str,
+    query: &str,
+    candidates: Vec<retriever::ScoredSearchResult>,
+) -> Vec<retriever::ScoredSearchResult> {
+    let mut listing = String::new();
+    for (i, c) in candidates.iter().enumerate() {
+        let excerpt: String = c
+            .result
+            .content
+            .chars()
+            .take(200)
+            .collect::<String>()
+            .replace('\n', " ");
+        listing.push_str(&format!("[{}] {}: {}\n", i, c.result.filename, excerpt));
+    }
+    let prompt = format!(
+        "你是检索结果重排器。根据查询对候选片段按相关性从高到低排序。\n\n查询：{query}\n\n候选片段：\n{listing}\n只返回一个 JSON 数组，元素为候选编号、按相关性从高到低排列，例如 [2,0,1]。不要输出其他内容。"
+    );
+    let chat_request = serde_json::json!({
+        "model": chat_model,
+        "messages": [
+            {"role": "system", "content": "你是检索重排器，只输出 JSON 数组。"},
+            {"role": "user", "content": prompt}
+        ],
+        "stream": false,
+        "temperature": 0.0
+    });
+    let chat_request_str: String = serde_json::to_string(&chat_request).unwrap_or_default();
+    let proxy_result = proxy::handle_request(
+        &std::sync::Arc::new(crate::db::repository::Repository::new(pool.clone())),
+        settings,
+        "kb-rerank",
+        "RAG-rerank",
+        chat_request,
+        false,
+        Some(chat_request_str),
+        Some(format!("kb-internal_{}", kb_id)),
+        None,
+    )
+    .await;
+
+    let reply = match proxy_result {
+        Ok(result) => result
+            .body
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Err(_) => String::new(),
+    };
+    match parse_rerank_order(&reply, candidates.len()) {
+        Some(order) => {
+            let mut reordered = Vec::with_capacity(candidates.len());
+            for index in order {
+                reordered.push(candidates[index].clone());
+            }
+            tracing::debug!("[RAG] LLM 重排生效（{} 候选）", reordered.len());
+            reordered
+        }
+        None => {
+            tracing::warn!("[RAG] LLM 重排回复不可解析，回退原序（相关性排序）");
+            candidates
+        }
+    }
+}
+
+#[cfg(test)]
+mod rerank_tests {
+    use super::*;
+
+    #[test]
+    fn parse_rerank_order_extracts_json_and_validates() {
+        // 纯 JSON
+        assert_eq!(parse_rerank_order("[2,0,1]", 3), Some(vec![2, 0, 1]));
+        // 前后杂文容忍
+        assert_eq!(
+            parse_rerank_order("排序结果：[1, 2, 0] 以上。", 3),
+            Some(vec![1, 2, 0])
+        );
+        // 越界丢弃 + 缺失补尾（全排列保证）
+        assert_eq!(parse_rerank_order("[5,0,5]", 3), Some(vec![0, 1, 2]));
+        assert_eq!(parse_rerank_order("[1]", 3), Some(vec![1, 0, 2]));
+        // 不可解析 → None
+        assert_eq!(parse_rerank_order("no json here", 3), None);
+        assert_eq!(parse_rerank_order("[]", 3), Some(vec![0, 1, 2]));
     }
 }
