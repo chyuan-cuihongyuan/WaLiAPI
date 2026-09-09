@@ -593,6 +593,18 @@ export function ChannelsPage() {
                     )}
 
                     {/* 最近测试 */}
+                    {ch.last_probe_ok !== null && (
+                      <div className="flex items-center gap-2 text-xs text-slate-500">
+                        <span className="text-slate-400">健康探测:</span>
+                        <span
+                          className={`inline-block h-2 w-2 rounded-full ${ch.last_probe_ok ? "bg-emerald-500" : "bg-red-500"}`}
+                          title={ch.last_probe_ok ? "探测正常" : "探测失败（候选排序沉底）"}
+                        />
+                        <span>{ch.last_probe_ok ? "正常" : "异常"}</span>
+                        {ch.probe_latency_ms !== null && <span className="text-slate-400">{ch.probe_latency_ms}ms</span>}
+                        {ch.last_probe_at && <span>{formatTime(ch.last_probe_at)}</span>}
+                      </div>
+                    )}
                     {ch.last_test_at && (
                       <div className="flex items-center gap-2 text-xs text-slate-500">
                         <span className="text-slate-400">最近测试:</span>

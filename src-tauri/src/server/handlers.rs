@@ -4502,6 +4502,9 @@ mod list_models_tests {
             updated_at: "2026-01-01T00:00:00.000Z".to_string(),
             last_test_at: None,
             last_test_ok: None,
+            last_probe_at: None,
+            last_probe_ok: None,
+            probe_latency_ms: None,
         }
     }
 

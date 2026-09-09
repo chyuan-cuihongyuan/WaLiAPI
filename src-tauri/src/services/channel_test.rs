@@ -514,6 +514,9 @@ fn draft_channel(input: &DraftChannelTestInput, api_key: &str, timeout_secs: i64
         updated_at: now_iso(),
         last_test_at: None,
         last_test_ok: None,
+        last_probe_at: None,
+        last_probe_ok: None,
+        probe_latency_ms: None,
     }
 }
 
@@ -1868,6 +1871,9 @@ data: {"type":"message_stop"}
             updated_at: now_iso(),
             last_test_at: None,
             last_test_ok: None,
+            last_probe_at: None,
+            last_probe_ok: None,
+            probe_latency_ms: None,
         }
     }
 
@@ -1994,6 +2000,9 @@ data: {"type":"message_stop"}
             updated_at: now_iso(),
             last_test_at: None,
             last_test_ok: None,
+            last_probe_at: None,
+            last_probe_ok: None,
+            probe_latency_ms: None,
         };
         insert_channel(&pool, &channel).await;
         let repo = Repository::new(pool);

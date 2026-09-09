@@ -610,6 +610,34 @@ export function SettingsPage() {
             </div>
           </div>
           <div>
+            <h3 className="mb-3 text-sm font-medium text-muted-foreground">渠道健康探测</h3>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <label className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">
+                <div>
+                  <div className="text-sm font-medium">启用主动探测</div>
+                  <p className="text-xs text-muted-foreground">后台定期对启用渠道发 GET /models 廉价探测；失败渠道候选排序沉底（不剔除）；关闭时零后台流量。Auth 账号渠道永不探测。</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.probe_enabled}
+                  onChange={e => setSettings({ ...settings, probe_enabled: e.target.checked })}
+                  className="h-5 w-5"
+                />
+              </label>
+              <div>
+                <label className="mb-2 block text-sm font-medium">探测间隔（秒）</label>
+                <input
+                  type="number"
+                  min={30}
+                  value={settings.probe_interval_secs}
+                  onChange={e => setSettings({ ...settings, probe_interval_secs: Number(e.target.value) })}
+                  className={inputCls}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">默认 300 秒；最短 30 秒。探测请求记入请求日志（is_probe 标记），不计入用量统计。</p>
+              </div>
+            </div>
+          </div>
+          <div>
             <h3 className="mb-3 text-sm font-medium text-muted-foreground">路由设置</h3>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               <label className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">

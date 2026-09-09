@@ -43,11 +43,70 @@ impl Repository {
     }
 
     pub async fn get_enabled_channels(&self) -> Result<Vec<Channel>, sqlx::Error> {
+        // 主动探测（C-04）：探测失败的渠道沉底不剔除（NULL=从未探测，视为健康）。
+        // 同健康档内保持既有优先级/权重序；两轨候选查询共用此排序语义。
         sqlx::query_as::<_, Channel>(
-            "SELECT * FROM channels WHERE status = 1 ORDER BY priority DESC, weight DESC",
+            "SELECT * FROM channels WHERE status = 1 \
+             ORDER BY COALESCE(last_probe_ok, 1) DESC, priority DESC, weight DESC",
         )
         .fetch_all(&self.pool)
         .await
+    }
+
+    /// 记录一次主动探测结果：更新渠道探测三列 + 写 is_probe=1 日志行
+    /// （统计口径排除，避免污染用户用量）。直接 SQL 最小列集，不走
+    /// create_log 漏斗（探测行无正文、不受明细级别影响）。
+    pub async fn record_channel_probe(
+        &self,
+        channel_id: &str,
+        channel_name: &str,
+        outcome: crate::health_probe::ProbeOutcome,
+        now: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE channels SET last_probe_at = ?, last_probe_ok = ?, probe_latency_ms = ?, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(now)
+        .bind(i64::from(outcome.ok))
+        .bind(outcome.latency_ms)
+        .bind(now)
+        .bind(channel_id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO request_logs (id, seq, channel_id, channel_name, model, mode, \
+             status_code, duration_ms, is_stream, is_retry, created_at, risk_level, \
+             security_action, upstream_type, is_probe) \
+             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), ?, ?, ?, 'probe', \
+             ?, ?, 0, 0, ?, 'low', 'audit', 'channel', 1)",
+        )
+        .bind(crate::utils::id::new_id())
+        .bind(channel_id)
+        .bind(channel_name)
+        .bind(channel_name)
+        .bind(if outcome.ok { 200 } else { 502 })
+        .bind(outcome.latency_ms)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 被动反哺：真实请求成功后立即恢复该渠道的探测健康标记
+    /// （与 mode_health 的成功清除相互独立、各管各的表）。
+    pub async fn mark_probe_ok(&self, channel_id: &str) {
+        let result = sqlx::query(
+            "UPDATE channels SET last_probe_ok = 1, last_probe_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(crate::db::models::now_iso())
+        .bind(crate::db::models::now_iso())
+        .bind(channel_id)
+        .execute(&self.pool)
+        .await;
+        if let Err(error) = result {
+            tracing::warn!("[探测] 被动反哺失败（channel {channel_id}）: {error}");
+        }
     }
 
     /// Return channels that are enabled and not cooling down for this exact
@@ -69,7 +128,7 @@ impl Repository {
               AND h.is_stream = ?
              WHERE c.status = 1
                AND (h.cooldown_until IS NULL OR h.cooldown_until <= ?)
-             ORDER BY c.priority DESC, c.weight DESC",
+             ORDER BY COALESCE(c.last_probe_ok, 1) DESC, c.priority DESC, c.weight DESC",
         )
         .bind(endpoint)
         .bind(i64::from(is_stream))
@@ -1595,15 +1654,16 @@ impl Repository {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let today_prefix = format!("{}%", today);
 
-        let today_requests: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE created_at LIKE ?")
-                .bind(&today_prefix)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or(0);
+        let today_requests: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM request_logs WHERE created_at LIKE ? AND is_probe = 0",
+        )
+        .bind(&today_prefix)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
 
         let today_total_tokens: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs WHERE created_at LIKE ?",
+            "SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs WHERE created_at LIKE ? AND is_probe = 0",
         )
         .bind(&today_prefix)
         .fetch_one(&self.pool)
@@ -1611,7 +1671,7 @@ impl Repository {
         .unwrap_or(0);
 
         let today_cached_tokens: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs WHERE created_at LIKE ?",
+            "SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs WHERE created_at LIKE ? AND is_probe = 0",
         )
         .bind(&today_prefix)
         .fetch_one(&self.pool)
@@ -1619,24 +1679,26 @@ impl Repository {
         .unwrap_or(0);
 
         let today_prompt_tokens: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs WHERE created_at LIKE ?",
+            "SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs WHERE created_at LIKE ? AND is_probe = 0",
         )
         .bind(&today_prefix)
         .fetch_one(&self.pool)
         .await
         .unwrap_or(0);
 
-        let total_cached_tokens: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs")
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or(0);
+        let total_cached_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs WHERE is_probe = 0",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
 
-        let total_prompt_tokens: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs")
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or(0);
+        let total_prompt_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs WHERE is_probe = 0",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
 
         let active_channels: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE status = 1")
@@ -1668,19 +1730,21 @@ impl Repository {
             .await
             .unwrap_or(0);
 
-        let total_requests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs")
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or(0);
-
-        let total_tokens: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs")
+        let total_requests: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE is_probe = 0")
                 .fetch_one(&self.pool)
                 .await
                 .unwrap_or(0);
 
+        let total_tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs WHERE is_probe = 0",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
         let avg_latency: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(AVG(duration_ms), 0) FROM request_logs WHERE created_at LIKE ?",
+            "SELECT COALESCE(AVG(duration_ms), 0) FROM request_logs WHERE created_at LIKE ? AND is_probe = 0",
         )
         .bind(&today_prefix)
         .fetch_one(&self.pool)
@@ -1738,7 +1802,7 @@ impl Repository {
 
     pub async fn get_channel_stats(&self) -> Result<Vec<ChannelStats>, sqlx::Error> {
         sqlx::query_as::<_, ChannelStats>(
-            "SELECT\n                r.channel_id as channel_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.channel_id IS NOT NULL\n            GROUP BY r.channel_id"
+            "SELECT\n                r.channel_id as channel_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.channel_id IS NOT NULL AND r.is_probe = 0\n            GROUP BY r.channel_id"
         )
         .fetch_all(&self.pool)
         .await
@@ -1746,7 +1810,7 @@ impl Repository {
 
     pub async fn get_api_key_stats(&self) -> Result<Vec<ApiKeyStats>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyStats>(
-            "SELECT\n                r.api_key_id as api_key_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(SUM(r.cached_tokens), 0) as cached_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.api_key_id IS NOT NULL\n            GROUP BY r.api_key_id"
+            "SELECT\n                r.api_key_id as api_key_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(SUM(r.cached_tokens), 0) as cached_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.api_key_id IS NOT NULL AND r.is_probe = 0\n            GROUP BY r.api_key_id"
         )
         .fetch_all(&self.pool)
         .await
@@ -1762,7 +1826,7 @@ impl Repository {
         sqlx::query_as::<_, LogStats>(
             "SELECT substr(created_at, 1, 10) as date, COUNT(*) as count, COALESCE(SUM(total_tokens), 0) as total_tokens
              FROM request_logs
-             WHERE created_at >= ?
+             WHERE created_at >= ? AND is_probe = 0
              GROUP BY date
              ORDER BY date DESC"
         )
@@ -1784,6 +1848,7 @@ impl Repository {
                 ROUND(CAST(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1.0 ELSE 0.0 END) AS REAL) / COUNT(*), 4) as success_rate,
                 COALESCE(AVG(duration_ms), 0) as avg_latency_ms
             FROM request_logs
+            WHERE is_probe = 0
             GROUP BY model
             ORDER BY total_tokens DESC
         "#;
@@ -1809,7 +1874,7 @@ impl Repository {
                 COALESCE(SUM(total_tokens), 0) as total_tokens,
                 COUNT(*) as request_count
             FROM request_logs
-            WHERE created_at >= ?
+            WHERE created_at >= ? AND is_probe = 0
             GROUP BY hour, model
             ORDER BY hour ASC
         "#;

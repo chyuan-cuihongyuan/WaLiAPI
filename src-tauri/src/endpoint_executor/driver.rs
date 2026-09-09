@@ -161,6 +161,9 @@ async fn record_channel_mode_outcome(
 ) {
     let outcome = match result {
         crate::core::attempt::AttemptResult::Success(_) => {
+            // 被动反哺（C-04）：真实请求传输成功 → 立即恢复渠道的主动探测
+            // 健康标记（与 mode_health 的成功清除正交，各管各的表）。
+            repo.mark_probe_ok(channel_id);
             repo.record_channel_mode_success(channel_id, endpoint, is_stream)
                 .await
         }
@@ -2046,6 +2049,9 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             last_test_at: None,
             last_test_ok: None,
+            last_probe_at: None,
+            last_probe_ok: None,
+            probe_latency_ms: None,
         }
     }
 

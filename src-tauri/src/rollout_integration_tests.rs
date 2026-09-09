@@ -360,6 +360,9 @@ fn channel(
         updated_at: now_iso(),
         last_test_at: None,
         last_test_ok: None,
+        last_probe_at: None,
+        last_probe_ok: None,
+        probe_latency_ms: None,
     }
 }
 

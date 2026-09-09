@@ -1022,6 +1022,9 @@ mod tests {
             updated_at: "2026-08-01T00:00:00.000Z".into(),
             last_test_at: Some("2026-08-01T00:00:00.000Z".into()),
             last_test_ok: Some(1),
+            last_probe_at: None,
+            last_probe_ok: None,
+            probe_latency_ms: None,
         }
     }
 
@@ -1052,6 +1055,9 @@ mod tests {
             updated_at: "2026-07-01T00:00:00.000Z".into(),
             last_test_at: None,
             last_test_ok: None,
+            last_probe_at: None,
+            last_probe_ok: None,
+            probe_latency_ms: None,
         }
     }
 

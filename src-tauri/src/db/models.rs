@@ -52,6 +52,10 @@ pub struct Channel {
     pub updated_at: String,
     pub last_test_at: Option<String>,
     pub last_test_ok: Option<i64>,
+    /// 主动健康探测（迁移 033）：NULL = 从未探测（排序视为健康）。
+    pub last_probe_at: Option<String>,
+    pub last_probe_ok: Option<i64>,
+    pub probe_latency_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

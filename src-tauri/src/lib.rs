@@ -8,6 +8,7 @@ pub mod commands;
 pub mod core;
 pub mod db;
 mod endpoint_executor;
+pub mod health_probe;
 mod protocol;
 #[cfg(test)]
 mod rollout_integration_tests;
@@ -238,6 +239,12 @@ pub fn run() {
 
                 crate::audit_log::apply_settings(&state.settings);
                 tauri::async_runtime::spawn(crate::audit_log::run_maintenance_loop(
+                    state.db.pool.clone(),
+                    state.settings.clone(),
+                ));
+
+                // 渠道主动健康探测（默认开启 300s 一轮，可整体关闭）
+                tauri::async_runtime::spawn(crate::health_probe::run_probe_loop(
                     state.db.pool.clone(),
                     state.settings.clone(),
                 ));

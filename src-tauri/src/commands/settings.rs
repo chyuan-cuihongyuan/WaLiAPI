@@ -59,6 +59,15 @@ pub struct Settings {
     pub ocr_concurrency: i32,
     #[serde(default = "default_ocr_dpi")]
     pub ocr_dpi: i32,
+    /// 渠道主动健康探测开关（默认开）。关闭时零后台流量。
+    #[serde(default = "default_true")]
+    pub probe_enabled: bool,
+    #[serde(default = "default_probe_interval_secs")]
+    pub probe_interval_secs: u64,
+}
+
+fn default_probe_interval_secs() -> u64 {
+    300
 }
 
 fn default_port() -> u16 {
@@ -135,6 +144,8 @@ impl Default for Settings {
             ocr_max_pages: default_ocr_max_pages(),
             ocr_concurrency: default_ocr_concurrency(),
             ocr_dpi: default_ocr_dpi(),
+            probe_enabled: default_true(),
+            probe_interval_secs: default_probe_interval_secs(),
         }
     }
 }
@@ -218,6 +229,8 @@ pub async fn get_settings(state: tauri::State<'_, Arc<AppState>>) -> Result<Sett
         ocr_max_pages: get_u64(store, "ocr.max_pages", 200) as i32,
         ocr_concurrency: get_u64(store, "ocr.concurrency", 2) as i32,
         ocr_dpi: get_u64(store, "ocr.dpi", 200) as i32,
+        probe_enabled: get_bool(store, "probe.enabled", true),
+        probe_interval_secs: get_u64(store, "probe.interval_secs", 300),
     };
     Ok(settings)
 }
@@ -330,6 +343,14 @@ pub async fn save_settings(
             serde_json::json!(settings.ocr_concurrency),
         ),
         ("ocr.dpi".to_string(), serde_json::json!(settings.ocr_dpi)),
+        (
+            "probe.enabled".to_string(),
+            serde_json::json!(settings.probe_enabled),
+        ),
+        (
+            "probe.interval_secs".to_string(),
+            serde_json::json!(settings.probe_interval_secs),
+        ),
     ])?;
     crate::audit_log::apply_settings(&state.settings);
     // 缩短保留期后立即清理，避免等待后台维护周期。

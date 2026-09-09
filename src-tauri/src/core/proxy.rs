@@ -390,6 +390,10 @@ pub async fn handle_request(
                     }
                 }
 
+                // 被动反哺（C-04）：真实请求成功 → 恢复该渠道的主动探测健康标记
+                // （best-effort，与日志/配额递增同级的旁路更新）。
+                repo.mark_probe_ok(&channel.id);
+
                 return Ok(ProxyResult {
                     status,
                     body: resp_body,

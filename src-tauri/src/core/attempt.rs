@@ -627,6 +627,9 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             last_test_at: None,
             last_test_ok: None,
+            last_probe_at: None,
+            last_probe_ok: None,
+            probe_latency_ms: None,
         }
     }
 

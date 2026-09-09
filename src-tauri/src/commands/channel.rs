@@ -46,6 +46,10 @@ pub struct ChannelDto {
     pub updated_at: String,
     pub last_test_at: Option<String>,
     pub last_test_ok: Option<i64>,
+    /// 主动健康探测（迁移 033）：探测列优先展示，无探测数据回退手动测试列。
+    pub last_probe_at: Option<String>,
+    pub last_probe_ok: Option<i64>,
+    pub probe_latency_ms: Option<i64>,
     // --- Multi-key: extra API keys for load balancing (migration 023) ---
     pub extra_keys: Vec<ChannelKeyDto>,
 }
@@ -104,6 +108,9 @@ impl From<Channel> for ChannelDto {
             updated_at: c.updated_at,
             last_test_at: c.last_test_at,
             last_test_ok: c.last_test_ok,
+            last_probe_at: c.last_probe_at,
+            last_probe_ok: c.last_probe_ok,
+            probe_latency_ms: c.probe_latency_ms,
             extra_keys: Vec::new(), // populated by to_dto_with_keys
         }
     }

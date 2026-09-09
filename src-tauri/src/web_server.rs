@@ -120,6 +120,12 @@ pub async fn run(cfg: WebServerConfig) -> Result<(), String> {
         state.settings.clone(),
     ));
 
+    // 渠道主动健康探测（默认开启 300s 一轮，可整体关闭）
+    tauri::async_runtime::spawn(crate::health_probe::run_probe_loop(
+        state.db.pool.clone(),
+        state.settings.clone(),
+    ));
+
     tauri::async_runtime::spawn(crate::auth_provider::maintenance::run_maintenance_loop(
         auth_service,
     ));
